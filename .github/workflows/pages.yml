@@ -21,7 +21,8 @@ jobs:
       - name: Prepare site folder
         run: |
           mkdir _site
-          cp index.html *.js _site/
+          cp index.html *.js *.css _site/
+          cp -r zones _site/zones
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

@@ -1,38 +1,61 @@
 # Dagdeep
 
-**Learn data and AI engineering by playing.** Every lesson is a hands-on lab: drag sliders, run simulations, break pipelines on purpose and fix them, then beat a challenge for XP.
+**Learn data and AI engineering by playing.** No reading walls: every concept is a power-up card you collect mid-level, then use straight away in puzzle rounds. Wrong answers explain themselves, so mistakes are how you learn.
 
 Live site: https://vivek0803.github.io/Dagdeep/
 
-## Courses
+## How it plays
 
-| Course | Level | What you play with |
-|---|---|---|
-| **LLM Fundamentals, played** | Beginner | Tokens, sampling, prompts, JSON, evals, cost, latency, then a production unit: retries and fallbacks, prompt injection, tracing, safe releases, architecture. Prompt labs can call a live model. |
-| **Spark Internals: The Nightly Job** | Intermediate | A story + puzzle game. Seven chapters, each with a deep codex (Catalyst, partitions and small files, stages, shuffle internals, joins, skew, memory) and an arcade level with lives, combos and stars: Plan or Run?, Partition Packer, Shuffle Hunter, Hash Router, Join Duel, Skew Smasher, Executor Fit, and the boss fight. |
-| **Kafka & Streaming, played** | Intermediate | Log playground, key/ordering game, broker crash test, consumer group balancer, crash lab for delivery guarantees, schema compatibility, watermark tuner, checkpoint tuner, exactly-once sink designer, and a launch-day drill. |
+- **World map** with two worlds and 26 zones. Rank, XP, day streak and collected cards show on the map.
+- **Zones** have a short story mission, a path of levels that unlock in order, and a **card deck** of every concept you've collected.
+- **Levels** have 3 hearts, a streak multiplier, and a feedback sheet after every round that teaches the why. Stars = hearts left.
+- **Round types:** concept power-up, pick, sort (one card at a time into buckets), order the steps, match pairs, fill the code blanks, spot the bug, and true/false speed rounds.
+- **Boss levels** add a timer to every round. Spark also has 8 arcade levels (Plan or Run?, Partition Packer, Shuffle Hunter, Hash Router, Join Duel, Skew Smasher, Executor Fit, The Nightly Job).
+
+### Data Engineering world
+Spark · Kafka · Debezium CDC · AWS (S3, Glue, Athena, DynamoDB) · Apache Iceberg · Redshift · Snowflake · Databricks · dbt · StarRocks · Cassandra · MySQL · PostgreSQL · MongoDB
+
+### AI Engineering world
+LLM fundamentals · RAG · LangChain · LangGraph · LangSmith · Agentic AI · MCP · Claude Code (CLAUDE.md, skills, subagents, hooks, MCP, headless) · Security of AI (OWASP LLM Top 10, red-teaming) · Security for AI (defence in depth, least privilege, governance) · AI observability · Fine-tuning
 
 Plus the **Data flow player**: animated, step-by-step views of a write through MySQL (InnoDB), Apache Iceberg, and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
 
-XP, levels, streaks and badges are shared across courses; progress is saved per course in the visitor's browser.
+Progress is saved in the visitor's browser.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `index.html` | The page, styles, data-flow player and routing |
-| `course-engine.js` | Course engine: catalog, course map, lessons, quizzes, XP, badges, LLM labs |
-| `course-llm-content.js`, `course-llm-prod.js`, `course-prod-labs.js` | LLM course content and production labs |
-| `game-kit.js` | GameKit: shared arcade shell (lives, combo, timer, stars) for game courses |
-| `course-spark.js` | Spark course story, codex chapters and quizzes (`game:true`) |
-| `course-spark-games.js` | The Spark levels, registered on `window.COURSE_GAMES` |
-| `course-kafka.js` | Kafka & Streaming course content and labs |
-| `config.js` | Site settings (optional live-model endpoint) |
-| `api/worker.js` | Optional serverless proxy for live LLM labs |
+| `index.html` | Page shell, data-flow player and routing |
+| `quest-engine.js` | World map, zones, levels, round mechanics, XP, cards (zone list lives here) |
+| `quest.css` | Styles for the game |
+| `zones/<id>.js` | One file per zone, loaded on demand |
+| `game-kit.js`, `course-spark-games.js` | Arcade framework and the Spark arcade levels |
 
-## Adding a course
+## Adding or extending a zone
 
-Create `course-<id>.js` that registers `window.COURSES.<id> = {id, title, short, tagline, story, hue, level, hours, order, units:[...]}` and adds its labs to `window.COURSE_LABS`, then add a `<script>` tag after `course-engine.js` in `index.html`. Each lesson has `title, mins, sum, mission, body` (Markdown-like text with `:::flow`, `:::lanes`, `:::tip` blocks and tables), `lab, labTitle, challenge` and `take`; quizzes use `kind:"quiz"` with `questions`; a final project uses `kind:"boss"`.
+1. Add a row to `ZONES` in `quest-engine.js`: `[id, world, title, short, hue, monogram]`.
+2. Create `zones/<id>.js`:
+
+```js
+QUEST.zone("kafka", {
+  mission: ["dev", "One-line story with **bold** and «code»."],
+  levels: [
+    {t: "Level title", sub: "subtitle", rounds: [
+      ["learn", "Card title", "Concept text", ["optional", "flow", "steps"], "optional code"],
+      ["pick", "Question?", ["A", "B", "C"], 1, "Why B is right"],
+      ["sort", "Prompt", {"Bucket 1": ["x", "y"], "Bucket 2": ["z"]}, "why"],
+      ["order", "Prompt", ["step 1", "step 2", "step 3"], "why"],
+      ["match", "Prompt", [["term", "meaning"], ["term2", "meaning2"], ["term3", "meaning3"]], "why"],
+      ["fill", "Prompt", "code with ___ blanks", ["answer1"], ["decoy"], "why"],
+      ["bug", "Prompt", ["line 1", "line 2"], 1, "why"],
+      ["tf", "Prompt", [["statement", true, "why"]]]
+    ]},
+    {t: "Boss", boss: true, time: 30, rounds: [/* ... */]},
+    {t: "Arcade", arcade: "planOrRun"}
+  ]
+});
+```
 
 ## Run locally
 
@@ -41,50 +64,6 @@ python3 -m http.server 8000
 # open http://localhost:8000
 ```
 
-## Deploy (pick one)
+## Deploy
 
-### Option A: Netlify Drop (about 2 minutes, no account setup)
-1. Go to https://app.netlify.com/drop
-2. Drag this whole folder onto the page.
-3. You get a public URL immediately. Sign in to keep it and rename the subdomain.
-
-### Option B: GitHub Pages (free, deploys on every push)
-1. Create a new repository, for example `data-flow-explorer`, and push these files to `main`.
-2. In the repository: **Settings → Pages → Build and deployment → Source: GitHub Actions**.
-3. The included workflow (`.github/workflows/pages.yml`) publishes the site to
-   `https://<your-username>.github.io/<repo-name>/` (for this repo: https://vivek0803.github.io/Dagdeep/).
-
-```bash
-git init && git add . && git commit -m "Data Flow Explorer"
-git branch -M main
-git remote add origin https://github.com/<your-username>/data-flow-explorer.git
-git push -u origin main
-```
-
-### Option C: Cloudflare Pages or Vercel
-Import the repository and set the build command to *none* and the output directory to `/` (the repository root).
-
-## Live model in the course labs (optional)
-
-Without configuration, the four prompt labs run on a built-in simulator. To use a real model on your public site:
-
-1. Create a Cloudflare Worker and paste in `api/worker.js` (or `npx wrangler deploy`).
-2. Set the worker's variables:
-   - `API_KEY` (secret): your Anthropic or Groq API key
-   - `PROVIDER`: `anthropic` or `groq`
-   - `MODEL`: for example `claude-haiku-5-5` or `llama-3.3-70b-versatile`
-   - `ALLOWED_ORIGIN`: your site URL, for example `https://yourname.github.io`
-3. Optional: bind a KV namespace as `RATE_KV` to enable per-visitor rate limiting.
-4. Put the worker URL in `config.js` as `llmEndpoint` and redeploy the site.
-
-**Never put an API key in `config.js` or any front-end file**: anything shipped to the browser is public. The worker keeps the key server-side, limits prompt size and output tokens, restricts which site can call it, retries transient errors with backoff and jitter, and can rate-limit visitors.
-
-## Production checklist
-
-- [x] Static, no build step; works on any static host
-- [x] SEO and social meta tags, favicon
-- [x] Responsive down to 360 px; respects reduced-motion settings
-- [x] Progress stored per browser with safe fallbacks
-- [x] API key kept server-side behind a proxy with origin check, size caps, retries and rate limiting
-- [ ] Add your own domain in your host's settings
-- [ ] Set a monthly spending limit with your model provider
+GitHub Pages deploys on every push to `main` via `.github/workflows/pages.yml` (it copies `index.html`, `*.js`, `*.css` and `zones/`). Any static host works too (Netlify, Cloudflare Pages, Vercel: no build command, output directory `/`).

@@ -1090,11 +1090,12 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
 .packet-halo{fill:var(--accent); opacity:.25}
 @media (prefers-reduced-motion: reduce){ .progress div,.node rect.box{transition:none} }
 </style>
+<link rel="stylesheet" href="quest.css">
 </head>
 <body>
 <header class="appbar">
   <div class="appbar-in">
-    <a class="brand" href="#courses" aria-label="Dagdeep home">
+    <a class="brand" href="#play" aria-label="Dagdeep home">
       <svg viewBox="0 0 32 32" aria-hidden="true">
         <rect x="1" y="1" width="30" height="30" rx="9" fill="var(--ink)"/>
         <path d="M9 11h6a4 4 0 0 1 4 4v2a4 4 0 0 0 4 4" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/>
@@ -1104,7 +1105,7 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
       <span>Dagdeep</span>
     </a>
     <nav class="modes" aria-label="Sections">
-      <a href="#courses" id="modeCourses">Courses</a>
+      <a href="#play" id="modeCourses">Play</a>
       <a href="#mysql-write" id="modeFlows">Data flows</a>
     </nav>
   </div>
@@ -1153,15 +1154,9 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
   <footer>Simplified for learning. File names, IDs and counts are illustrative. MySQL assumes 8.0 InnoDB with <code>innodb_flush_log_at_trx_commit=1</code> and <code>sync_binlog=1</code>; Iceberg assumes format v2. Use ← and → keys to step.</footer>
   </div>
 </div>
-<script src="config.js"></script>
-<script src="course-llm-content.js"></script>
-<script src="course-llm-prod.js"></script>
 <script src="game-kit.js"></script>
-<script src="course-engine.js"></script>
-<script src="course-prod-labs.js"></script>
-<script src="course-spark.js"></script>
 <script src="course-spark-games.js"></script>
-<script src="course-kafka.js"></script>
+<script src="quest-engine.js"></script>
 
 <script>
 const KIND_NAMES = {actor:"Client / engine", proc:"Compute layer", mem:"Memory", disk:"Durable storage", log:"Log / stream", meta:"Metadata / catalog"};
@@ -1457,7 +1452,7 @@ function loadFlow(id){
 function route(){
   const h = location.hash.slice(1);
   if (FLOWS[h]) loadFlow(h);
-  else loadCourse(h.startsWith("course-") || h.startsWith("lesson-") ? h : "courses");
+  else loadQuest(h);
 }
 
 function checkCompact(){
