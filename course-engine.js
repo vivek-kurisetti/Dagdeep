@@ -1,25 +1,41 @@
 // Course engine: routing, XP/levels/streaks/badges, course map, lessons, quizzes and the interactive labs.
 // Uses helpers defined by the main page script at call time: $, esc, md, inl, showMode, reduceMotion.
 (function(){
-const C = window.COURSE_LLM;
-const ITEMS = [];
-C.units.forEach((u, ui) => u.items.forEach((it, ii) => { it.unit = ui; it.idx = ii; it.kind = it.kind || "lesson"; ITEMS.push(it); }));
+const COURSES = window.COURSES = window.COURSES || {};
+if (window.COURSE_LLM && !COURSES.llm) COURSES.llm = Object.assign(window.COURSE_LLM, {order:1, level:"Beginner", hue:300, hours:3, short:"How language models really work, from tokens to production."});
+let C = null, CID = null, ITEMS = [], LESSON_NO = {};
 const byId = id => ITEMS.find(i => i.id === id);
-const LESSON_NO = {}; let n = 0; ITEMS.forEach(i => { if (i.kind === "lesson") LESSON_NO[i.id] = ++n; });
+function prepCourse(c){
+  if (c._items) return;
+  c._items = []; c._no = {}; let n = 0;
+  c.units.forEach((u, ui) => u.items.forEach((it, ii) => { it.unit = ui; it.idx = ii; it.kind = it.kind || "lesson"; c._items.push(it); if (it.kind === "lesson") c._no[it.id] = ++n; }));
+}
+function useCourse(cid){
+  const c = COURSES[cid] || COURSES.llm; prepCourse(c);
+  C = c; CID = c.id; ITEMS = c._items; LESSON_NO = c._no; S = loadProg(CID);
+}
 
 /* ---------------- progress state ---------------- */
-const KEY = "course-llm-v1";
-let S = {xp:0, done:{}, ch:{}, quiz:{}, badges:[], streak:0, last:null};
-try { Object.assign(S, JSON.parse(localStorage.getItem(KEY) || "{}")); } catch(e) {}
-const save = () => { try { localStorage.setItem(KEY, JSON.stringify(S)); } catch(e) {} };
+// One shared profile (XP, level, streak, badges) and separate progress per course.
+const PKEY = "dagdeep-profile-v1";
+let P = {xp:0, badges:[], streak:0, last:null};
+const loadProg = cid => { const d = {done:{}, ch:{}, quiz:{}}; try { const o = JSON.parse(localStorage.getItem("course-" + cid + "-v1") || "{}"); return {done:o.done || {}, ch:o.ch || {}, quiz:o.quiz || {}}; } catch(e){ return d; } };
+let S = {done:{}, ch:{}, quiz:{}};
+try {
+  const raw = localStorage.getItem(PKEY);
+  if (raw) Object.assign(P, JSON.parse(raw));
+  else { const old = JSON.parse(localStorage.getItem("course-llm-v1") || "{}"); ["xp","badges","streak","last"].forEach(k => { if (old[k] != null) P[k] = old[k]; }); }
+} catch(e) {}
+const save = () => { try { localStorage.setItem(PKEY, JSON.stringify(P)); if (CID) localStorage.setItem("course-" + CID + "-v1", JSON.stringify(S)); } catch(e) {} };
+const prog = cid => cid === CID ? S : loadProg(cid);
 const LEVEL_XP = 300;
-const level = () => Math.floor(S.xp / LEVEL_XP) + 1;
+const level = () => Math.floor(P.xp / LEVEL_XP) + 1;
 const today = () => { const d = new Date(); return d.getFullYear() + "-" + (d.getMonth()+1) + "-" + d.getDate(); };
 function touchStreak(){
-  const t = today(); if (S.last === t) return;
+  const t = today(); if (P.last === t) return;
   const y = new Date(); y.setDate(y.getDate() - 1);
   const ys = y.getFullYear() + "-" + (y.getMonth()+1) + "-" + y.getDate();
-  S.streak = S.last === ys ? S.streak + 1 : 1; S.last = t; save();
+  P.streak = P.last === ys ? P.streak + 1 : 1; P.last = t; save();
 }
 const ICON = {
   flame:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M12 2c1 3.5 5 5.5 5 10a5 5 0 0 1-10 0c0-2 1-3.5 2-4.5 0 2 1 3 2 3 0-3-1-5.5 1-8.5z" fill="currentColor"/></svg>',
@@ -31,15 +47,23 @@ const ICON = {
   bolt:'<svg viewBox="0 0 24 24" aria-hidden="true"><path d="M13 2L4 14h7l-1 8 9-12h-7z" fill="currentColor"/></svg>',
   lock:'<svg viewBox="0 0 24 24" aria-hidden="true"><rect x="5" y="10" width="14" height="11" rx="2.5" fill="currentColor"/><path d="M8 10V7a4 4 0 0 1 8 0v3" fill="none" stroke="currentColor" stroke-width="2.2"/></svg>'
 };
+const anyCourse = f => Object.keys(COURSES).some(c => f(prog(c)));
 const BADGES = [
-  {id:"first", name:"First token", desc:"Finish your first lesson", ic:"bolt", test:() => !!S.done["1"]},
-  {id:"temp", name:"Temperature tamer", desc:"Beat the temperature challenge", ic:"flame", test:() => !!S.ch["4"]},
-  {id:"whisper", name:"Prompt whisperer", desc:"Beat the system prompt challenge", ic:"star", test:() => !!S.ch["9"]},
-  {id:"json", name:"JSON surgeon", desc:"Repair the broken JSON", ic:"check", test:() => !!S.ch["11"]},
-  {id:"budget", name:"Budget boss", desc:"Bring the bill under budget", ic:"bolt", test:() => !!S.ch["14"]},
-  {id:"ace", name:"Quiz ace", desc:"Score 100% on a checkpoint", ic:"quiz", test:() => Object.values(S.quiz).some(q => q && q.best === q.total)},
-  {id:"streak", name:"On a roll", desc:"Learn 3 days in a row", ic:"flame", test:() => S.streak >= 3},
-  {id:"master", name:"Ticket master", desc:"Ship the final project", ic:"crown", test:() => !!S.ch["boss"]}
+  {id:"first", name:"First steps", desc:"Finish any lesson", ic:"bolt", test:() => anyCourse(p => Object.keys(p.done).length > 0)},
+  {id:"streak", name:"On a roll", desc:"Learn 3 days in a row", ic:"flame", test:() => P.streak >= 3},
+  {id:"ace", name:"Quiz ace", desc:"Score 100% on any checkpoint", ic:"quiz", test:() => anyCourse(p => Object.values(p.quiz).some(q => q && q.best === q.total))},
+  {id:"poly", name:"Polymath", desc:"Finish lessons in 3 different courses", ic:"star", test:() => Object.keys(COURSES).filter(c => Object.keys(prog(c).done).length).length >= 3},
+  {id:"temp", course:"llm", name:"Temperature tamer", desc:"Beat the temperature challenge", ic:"flame", test:() => !!prog("llm").ch["4"]},
+  {id:"whisper", course:"llm", name:"Prompt whisperer", desc:"Beat the system prompt challenge", ic:"star", test:() => !!prog("llm").ch["9"]},
+  {id:"json", course:"llm", name:"JSON surgeon", desc:"Repair the broken JSON", ic:"check", test:() => !!prog("llm").ch["11"]},
+  {id:"budget", course:"llm", name:"Budget boss", desc:"Bring the LLM bill under budget", ic:"bolt", test:() => !!prog("llm").ch["14"]},
+  {id:"master", course:"llm", name:"Ticket master", desc:"Ship the LLM course project", ic:"crown", test:() => !!prog("llm").ch["boss"]},
+  {id:"smallfiles", course:"spark", name:"File whisperer", desc:"Fix the small-files stage", ic:"check", test:() => !!prog("spark").ch["2"]},
+  {id:"skew", course:"spark", name:"Skew slayer", desc:"Tame the skewed join", ic:"bolt", test:() => !!prog("spark").ch["6"]},
+  {id:"sparkboss", course:"spark", name:"Job rescuer", desc:"Rescue the nightly Spark job", ic:"crown", test:() => !!prog("spark").ch["boss"]},
+  {id:"order", course:"kafka", name:"Order keeper", desc:"Keep every order's events in sequence", ic:"check", test:() => !!prog("kafka").ch["2"]},
+  {id:"durable", course:"kafka", name:"Never lose a byte", desc:"Survive the broker crash", ic:"star", test:() => !!prog("kafka").ch["3"]},
+  {id:"kafkaboss", course:"kafka", name:"Stream captain", desc:"Ship the real-time payments pipeline", ic:"crown", test:() => !!prog("kafka").ch["boss"]}
 ];
 
 /* ---------------- feedback: toasts, confetti ---------------- */
@@ -63,19 +87,19 @@ function confetti(){
   })();
 }
 function addXP(n, why){
-  const before = level(); S.xp += n; touchStreak(); save();
+  const before = level(); P.xp += n; touchStreak(); save();
   toast(`<b>+${n} XP</b> ${esc(why)}`, "xp");
   if (level() > before){ toast(`<b>Level ${level()}!</b> Keep going.`, "lvl"); confetti(); }
   checkBadges(); updateHud();
 }
 function checkBadges(){
-  BADGES.forEach(b => { if (!S.badges.includes(b.id) && b.test()){ S.badges.push(b.id); save(); toast(`<span class="t-badge">${ICON[b.ic]}</span><b>Badge unlocked:</b> ${esc(b.name)}`, "badge"); } });
+  BADGES.forEach(b => { if (!P.badges.includes(b.id) && b.test()){ P.badges.push(b.id); save(); toast(`<span class="t-badge">${ICON[b.ic]}</span><b>Badge unlocked:</b> ${esc(b.name)}`, "badge"); } });
 }
 function updateHud(){
-  document.querySelectorAll("[data-hud=xp]").forEach(e => e.textContent = S.xp);
+  document.querySelectorAll("[data-hud=xp]").forEach(e => e.textContent = P.xp);
   document.querySelectorAll("[data-hud=lvl]").forEach(e => e.textContent = level());
-  document.querySelectorAll("[data-hud=streak]").forEach(e => e.textContent = S.streak);
-  document.querySelectorAll("[data-hud=bar]").forEach(e => e.style.width = ((S.xp % LEVEL_XP) / LEVEL_XP * 100) + "%");
+  document.querySelectorAll("[data-hud=streak]").forEach(e => e.textContent = P.streak);
+  document.querySelectorAll("[data-hud=bar]").forEach(e => e.style.width = ((P.xp % LEVEL_XP) / LEVEL_XP * 100) + "%");
 }
 
 /* ---------------- live model ---------------- */
@@ -646,6 +670,7 @@ Reply with JSON only, like {"label": "REFUND", "priority": "high"}`;
 
 window.COURSE_LABS = LABS;
 window.COURSE_UTIL = {bars, pick, mulberry32, softmax};
+window.COURSE_ICON = ICON;
 
 /* ======================= PAGES ======================= */
 const root = () => document.getElementById("cRoot");
@@ -654,23 +679,25 @@ const nodeIcon = it => it.kind === "quiz" ? ICON.quiz : it.kind === "boss" ? ICO
 const nextUp = () => ITEMS.find(i => !S.done[i.id]) || ITEMS[ITEMS.length - 1];
 
 function hudHTML(){
-  return `<div class="hud"><div class="hud-c lvl"><span class="hud-ic">${ICON.star}</span><div><small>Level <b data-hud="lvl">${level()}</b></small><div class="xpbar"><span data-hud="bar" style="width:${(S.xp % LEVEL_XP) / LEVEL_XP * 100}%"></span></div><small><b data-hud="xp">${S.xp}</b> XP</small></div></div>` +
-    `<div class="hud-c streak"><span class="hud-ic">${ICON.flame}</span><div><b data-hud="streak">${S.streak}</b><small>day streak</small></div></div></div>`;
+  return `<div class="hud"><div class="hud-c lvl"><span class="hud-ic">${ICON.star}</span><div><small>Level <b data-hud="lvl">${level()}</b></small><div class="xpbar"><span data-hud="bar" style="width:${(P.xp % LEVEL_XP) / LEVEL_XP * 100}%"></span></div><small><b data-hud="xp">${P.xp}</b> XP</small></div></div>` +
+    `<div class="hud-c streak"><span class="hud-ic">${ICON.flame}</span><div><b data-hud="streak">${P.streak}</b><small>day streak</small></div></div></div>`;
 }
 
 function renderHome(){
   const up = nextUp(), doneN = ITEMS.filter(i => S.done[i.id]).length;
-  root().innerHTML = `<section class="c-hero">
-      <div class="c-hero-txt"><p class="c-eyebrow">Course · ${Object.keys(LESSON_NO).length} lessons · ${ITEMS.filter(i => i.kind === "quiz").length} checkpoints · 1 final project</p><h1>${esc(C.title)}</h1><p>${esc(C.tagline)}</p><p class="c-story">${esc(C.story)}</p>
-        <div class="c-cta"><a class="btn big solid" href="#lesson-llm-${up.id}">${doneN ? "Continue" : "Start"}: ${esc(up.title)} →</a><span class="muted">${doneN}/${ITEMS.length} complete</span></div></div>
-      <div class="c-hero-side">${hudHTML()}<div class="c-badges">${BADGES.map(b => `<div class="bdg ${S.badges.includes(b.id) ? "on" : ""}" title="${esc(b.desc)}"><span>${S.badges.includes(b.id) ? ICON[b.ic] : ICON.lock}</span><small>${esc(b.name)}</small></div>`).join("")}</div></div>
+  document.title = C.title + " · Dagdeep";
+  const myBadges = BADGES.filter(b => !b.course || b.course === CID);
+  root().innerHTML = `<p class="c-back"><a class="btn ghost" href="#courses">← All courses</a></p><section class="c-hero" style="${heroHues(C.hue)}">
+      <div class="c-hero-txt"><p class="c-eyebrow">${esc(C.level || "")} course · ${Object.keys(LESSON_NO).length} lessons · ${ITEMS.filter(i => i.kind === "quiz").length} checkpoints${ITEMS.some(i => i.kind === "boss") ? " · 1 final project" : ""}</p><h1>${esc(C.title)}</h1><p>${esc(C.tagline)}</p><p class="c-story">${esc(C.story)}</p>
+        <div class="c-cta"><a class="btn big solid" href="#lesson-${CID}-${up.id}">${doneN ? "Continue" : "Start"}: ${esc(up.title)} →</a><span class="muted">${doneN}/${ITEMS.length} complete</span></div></div>
+      <div class="c-hero-side">${hudHTML()}<div class="c-badges">${myBadges.map(b => `<div class="bdg ${P.badges.includes(b.id) ? "on" : ""}" title="${esc(b.desc)}"><span>${P.badges.includes(b.id) ? ICON[b.ic] : ICON.lock}</span><small>${esc(b.name)}</small></div>`).join("")}</div></div>
     </section>
     <div class="c-path">${C.units.map((u, ui) => {
       const done = u.items.filter(i => S.done[i.id]).length;
       return `<section class="c-unit st" style="--h:${u.hue}"><header class="c-unit-h"><span class="u-no">Unit ${ui+1}</span><h2>${esc(u.title)}</h2><p>${esc(u.desc)}</p><span class="u-prog">${done}/${u.items.length}</span></header>
         <div class="c-track"><svg class="c-trail" aria-hidden="true"></svg><ol class="c-nodes">${u.items.map((it, ii) => {
           const isDone = !!S.done[it.id], cur = it === up;
-          return `<li style="--x:${[0, 1, 1.5, 1, 0, -1, -1.5, -1][ii % 8]}; --i:${ii}"><a class="c-node k-${it.kind}${isDone ? " done" : ""}${cur ? " cur" : ""}" href="#lesson-llm-${it.id}" aria-label="${esc(it.title)}">${isDone ? ICON.check : nodeIcon(it)}${cur ? `<span class="c-bubble">${doneN ? "NEXT" : "START"}</span>` : ""}</a>` +
+          return `<li style="--x:${[0, 1, 1.5, 1, 0, -1, -1.5, -1][ii % 8]}; --i:${ii}"><a class="c-node k-${it.kind}${isDone ? " done" : ""}${cur ? " cur" : ""}" href="#lesson-${CID}-${it.id}" aria-label="${esc(it.title)}">${isDone ? ICON.check : nodeIcon(it)}${cur ? `<span class="c-bubble">${doneN ? "NEXT" : "START"}</span>` : ""}</a>` +
             `<div class="c-node-lbl"><b>${esc(it.title)}</b><small>${it.mins} min${it.labTitle ? ` · ${it.kind === "boss" ? "Project" : "Lab"}: ${esc(it.labTitle)}` : it.kind === "quiz" ? ` · ${it.questions.length} questions` : ""}</small></div></li>`;
         }).join("")}</ol></div></section>`;
     }).join("")}</div>`;
@@ -690,6 +717,7 @@ function drawTrails(){
 
 function renderItem(id){
   const it = byId(id); if (!it){ renderHome(); return; }
+  document.title = it.title + " · " + C.title;
   const u = C.units[it.unit], idx = ITEMS.indexOf(it), prev = ITEMS[idx - 1], next = ITEMS[idx + 1];
   const kicker = it.kind === "quiz" ? "Checkpoint" : it.kind === "boss" ? "Final project" : `Lesson ${LESSON_NO[it.id]}`;
   let main = "";
@@ -702,14 +730,14 @@ function renderItem(id){
         <div class="lab-body" id="labBody"></div></section>
       <section class="l-take"><h3>Key takeaways</h3><ul>${it.take.map(t => `<li>${esc(t)}</li>`).join("")}</ul></section>`;
   }
-  root().innerHTML = `<div class="l-top"><a class="btn ghost" href="#course-llm">← Course map</a>
-      <ol class="l-dots">${u.items.map(x => `<li><a href="#lesson-llm-${x.id}" class="${x === it ? "on" : ""}${S.done[x.id] ? " done" : ""}" aria-label="${esc(x.title)}"></a></li>`).join("")}</ol>
-      <span class="l-xp">${ICON.star}<b data-hud="xp">${S.xp}</b> XP</span></div>
+  root().innerHTML = `<div class="l-top"><a class="btn ghost" href="#course-${CID}">← Course map</a>
+      <ol class="l-dots">${u.items.map(x => `<li><a href="#lesson-${CID}-${x.id}" class="${x === it ? "on" : ""}${S.done[x.id] ? " done" : ""}" aria-label="${esc(x.title)}"></a></li>`).join("")}</ol>
+      <span class="l-xp">${ICON.star}<b data-hud="xp">${P.xp}</b> XP</span></div>
     <article class="l-main st" style="--h:${u.hue}">
       <header class="l-head"><p class="l-kicker">Unit ${it.unit + 1}: ${esc(u.title)} · ${kicker} · ${it.mins} min</p><h1>${esc(it.title)}</h1>${it.sum ? `<p class="l-sum">${esc(it.sum)}</p>` : ""}</header>
       ${main}
       <div class="l-foot">${it.kind !== "quiz" ? `<button class="btn big ${S.done[it.id] ? "" : "solid"}" id="lDone" ${S.done[it.id] ? "disabled" : ""}>${S.done[it.id] ? "✓ Completed" : it.kind === "boss" ? "Beat the challenge to complete" : "Complete lesson · +20 XP"}</button>` : ""}
-        <span class="spacer"></span>${prev ? `<a class="btn" href="#lesson-llm-${prev.id}">← ${esc(prev.title)}</a>` : ""}${next ? `<a class="btn solid" href="#lesson-llm-${next.id}">${esc(next.title)} →</a>` : ""}</div>
+        <span class="spacer"></span>${prev ? `<a class="btn" href="#lesson-${CID}-${prev.id}">← ${esc(prev.title)}</a>` : ""}${next ? `<a class="btn solid" href="#lesson-${CID}-${next.id}">${esc(next.title)} →</a>` : ""}</div>
     </article>`;
   if (it.kind === "boss" && !S.done[it.id]) document.getElementById("lDone").disabled = true;
   if (it.lab && LABS[it.lab]){
@@ -769,10 +797,47 @@ function wireQuiz(it){
   });
 }
 
+const heroHues = h => `--h1:${h}; --h2:${(h + 50) % 360}; --h3:${(h + 110) % 360}`;
+const ART = {
+  llm:`<svg viewBox="0 0 200 120" aria-hidden="true"><g font-family="monospace" font-size="13" font-weight="700">${["The","pay","ment","was"," ap","proved"].map((t, i) => `<rect x="${12 + (i % 3) * 62}" y="${18 + Math.floor(i / 3) * 34}" width="54" height="24" rx="7" fill="rgba(255,255,255,${.18 + i * .08})"/><text x="${39 + (i % 3) * 62}" y="${35 + Math.floor(i / 3) * 34}" text-anchor="middle" fill="#fff">${t}</text>`).join("")}</g><rect x="12" y="88" width="176" height="10" rx="5" fill="rgba(255,255,255,.2)"/><rect x="12" y="88" width="118" height="10" rx="5" fill="#fff"/></svg>`,
+  spark:`<svg viewBox="0 0 200 120" aria-hidden="true"><g fill="none" stroke="rgba(255,255,255,.75)" stroke-width="2.5"><path d="M40 30 L100 60 M40 60 L100 60 M40 90 L100 60 M100 60 L160 35 M100 60 L160 85"/></g>${[[40,30],[40,60],[40,90],[160,35],[160,85]].map(([x, y]) => `<circle cx="${x}" cy="${y}" r="11" fill="rgba(255,255,255,.35)"/>`).join("")}<circle cx="100" cy="60" r="18" fill="#fff"/><path d="M100 48l-6 14h6l-2 10 8-14h-6z" fill="currentColor"/></svg>`,
+  kafka:`<svg viewBox="0 0 200 120" aria-hidden="true">${[0, 1, 2].map(r => `<g>${Array.from({length:8 - r * 2}, (_, i) => `<rect x="${14 + i * 22}" y="${20 + r * 32}" width="18" height="22" rx="4" fill="rgba(255,255,255,${.25 + i * .07})"/>`).join("")}<path d="M${16 + (8 - r * 2) * 22} ${31 + r * 32} h14" stroke="#fff" stroke-width="2.5" stroke-dasharray="3 3"/></g>`).join("")}<circle cx="182" cy="62" r="10" fill="#fff"/></svg>`
+};
+function courseCard(c){
+  prepCourse(c);
+  const p = prog(c.id), items = c._items, done = items.filter(i => p.done[i.id]).length, pct = Math.round(done / items.length * 100);
+  const labs = items.filter(i => i.lab).length, lessons = Object.keys(c._no).length, up = items.find(i => !p.done[i.id]);
+  return `<a class="cat-card" href="#course-${c.id}" style="${heroHues(c.hue)}">
+    <span class="cat-cover"><span class="cat-art">${ART[c.id] || ""}</span><span class="cat-level">${esc(c.level || "")}</span></span>
+    <span class="cat-body"><span class="cat-title">${esc(c.title)}</span><span class="cat-desc">${esc(c.short || c.tagline)}</span>
+      <span class="cat-meta"><span>${lessons} lessons</span><span>${labs} labs</span><span>~${c.hours || 3} h</span></span>
+      <span class="cat-prog"><span class="ring" style="--p:${pct}; --rc:oklch(.6 .17 ${c.hue})"></span><span>${done ? (up ? `${done}/${items.length} done · next: ${esc(up.title)}` : "Completed!") : "Not started"}</span></span></span></a>`;
+}
+function renderCatalog(){
+  document.title = "Dagdeep · Learn data and AI engineering by playing";
+  const list = Object.values(COURSES).sort((a, b) => (a.order || 9) - (b.order || 9));
+  root().innerHTML = `<section class="c-hero cat-top" style="${heroHues(265)}">
+      <div class="c-hero-txt"><p class="c-eyebrow">Dagdeep · learn by playing</p><h1>Learn data and AI engineering by doing it.</h1>
+        <p>Every lesson is a hands-on lab: drag sliders, run simulations, break pipelines on purpose and fix them. Earn XP, keep your streak and collect badges across all courses.</p>
+        <div class="c-cta"><a class="btn big solid" href="#course-${(list.find(c => { prepCourse(c); return c._items.some(i => !prog(c.id).done[i.id]) && Object.keys(prog(c.id).done).length; }) || list[0]).id}">${P.xp ? "Continue learning" : "Start learning"} →</a><span class="muted">${list.length} courses · ${list.reduce((a, c) => { prepCourse(c); return a + c._items.filter(i => i.lab).length; }, 0)} labs</span></div></div>
+      <div class="c-hero-side">${hudHTML()}<div class="c-badges">${BADGES.filter(b => !b.course).concat(BADGES.filter(b => b.course && P.badges.includes(b.id))).slice(0, 8).map(b => `<div class="bdg ${P.badges.includes(b.id) ? "on" : ""}" title="${esc(b.desc)}"><span>${P.badges.includes(b.id) ? ICON[b.ic] : ICON.lock}</span><small>${esc(b.name)}</small></div>`).join("")}</div></div>
+    </section>
+    <h2 class="cat-h">Courses</h2>
+    <div class="cat-grid">${list.map(courseCard).join("")}</div>
+    <a class="cat-flows" href="#mysql-write"><span class="cf-ic">${ICON.bolt}</span><span><b>Data flow player</b><small>Watch a write travel through MySQL, Iceberg and a CDC pipeline, one animated step at a time.</small></span><span class="cf-go">Open →</span></a>`;
+}
+
 window.loadCourse = function(h){
   showMode("courses");
-  touchStreak(); checkBadges();
-  if (h.startsWith("lesson-llm-")) renderItem(h.slice(11)); else renderHome();
+  touchStreak();
+  if (h.startsWith("lesson-")){
+    const rest = h.slice(7), k = rest.indexOf("-");
+    useCourse(k > 0 ? rest.slice(0, k) : "llm"); checkBadges(); renderItem(k > 0 ? rest.slice(k + 1) : rest);
+  } else if (h.startsWith("course-") && COURSES[h.slice(7)]){
+    useCourse(h.slice(7)); checkBadges(); renderHome();
+  } else {
+    CID = null; checkBadges(); renderCatalog();
+  }
   window.scrollTo(0, 0);
 };
 let rzT; window.addEventListener("resize", () => { clearTimeout(rzT); rzT = setTimeout(() => { if (document.querySelector(".c-track")) drawTrails(); }, 150); });

@@ -3,12 +3,12 @@
 <head>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
-<title>Data Flow Explorer</title>
-<meta name="description" content="Learn data engineering and AI engineering by doing: animated MySQL and Iceberg data flows, deep roadmaps with interview prep, and an interactive LLM course with live labs.">
+<title>Dagdeep · Learn data and AI engineering by playing</title>
+<meta name="description" content="Learn data and AI engineering by playing: hands-on courses on LLMs, Spark and Kafka with interactive labs, XP and badges, plus animated data flows.">
 <meta name="theme-color" content="#15202b">
 <meta property="og:type" content="website">
-<meta property="og:title" content="Data Flow Explorer">
-<meta property="og:description" content="Animated data flows, deep engineering roadmaps and a playable LLM course.">
+<meta property="og:title" content="Dagdeep">
+<meta property="og:description" content="Playable courses on LLMs, Spark and Kafka, plus animated data flows.">
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='9' fill='%2315202b'/%3E%3Cpath d='M9 11h6a4 4 0 0 1 4 4v2a4 4 0 0 0 4 4' fill='none' stroke='%23eef1f4' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='9' cy='11' r='3' fill='%23d9620f'/%3E%3Ccircle cx='23' cy='21' r='3' fill='%230f8a7a'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -805,7 +805,119 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
 .pool-b{padding:9px 13px; border-radius:11px; border:2px solid var(--line); background:var(--surface); cursor:pointer; font:600 .88rem var(--body); color:var(--ink); box-shadow:0 3px 0 var(--line); transition:transform .12s}
 .pool-b:hover{border-color:var(--sc); transform:translateY(-2px)}
 
+/* Catalog + course-family labs */
+.c-hero-txt{background:radial-gradient(120% 140% at 0% 0%, oklch(.62 .19 var(--h1, 28)) 0%, oklch(.55 .17 var(--h2, 300)) 55%, oklch(.45 .14 var(--h3, 245)) 100%)}
+.c-back{margin:0 0 12px}
+.cat-h{font:800 1.4rem var(--display); margin:0 0 14px}
+.cat-grid{display:grid; grid-template-columns:repeat(auto-fill, minmax(290px, 1fr)); gap:18px; margin-bottom:22px}
+.cat-card{display:flex; flex-direction:column; border-radius:22px; overflow:hidden; background:var(--surface); border:1px solid var(--line); text-decoration:none; color:var(--ink);
+  box-shadow:0 18px 40px -30px rgba(10,20,30,.5); transition:transform .25s cubic-bezier(.2,.7,.2,1), box-shadow .25s}
+.cat-card:hover{transform:translateY(-4px); box-shadow:0 26px 50px -28px oklch(.55 .17 var(--h1))}
+.cat-card:focus-visible{outline:3px solid var(--accent); outline-offset:3px}
+.cat-cover{position:relative; display:block; height:150px; background:radial-gradient(130% 150% at 0% 0%, oklch(.66 .18 var(--h1)) 0%, oklch(.55 .17 var(--h2)) 60%, oklch(.45 .14 var(--h3)) 100%); color:oklch(.55 .17 var(--h1))}
+.cat-art{position:absolute; inset:14px 20px; display:grid; place-items:center}
+.cat-art svg{width:100%; height:100%; max-width:240px}
+.cat-card:hover .cat-art svg{animation:floaty 2.4s ease-in-out infinite}
+@keyframes floaty{50%{transform:translateY(-4px)}}
+.cat-level{position:absolute; top:12px; right:12px; font:800 .66rem var(--body); letter-spacing:.1em; text-transform:uppercase; background:rgba(255,255,255,.92); color:#1b1f3a; padding:4px 9px; border-radius:8px}
+.cat-body{display:flex; flex-direction:column; gap:8px; padding:16px 18px 18px; flex:1}
+.cat-title{font:800 1.2rem/1.2 var(--display)}
+.cat-desc{color:var(--muted); font-size:.92rem; line-height:1.5}
+.cat-meta{display:flex; flex-wrap:wrap; gap:6px}
+.cat-meta span{font:600 .74rem var(--body); padding:3px 9px; border-radius:999px; background:var(--code-bg)}
+.cat-prog{display:flex; align-items:center; gap:10px; margin-top:auto; padding-top:8px; font-size:.84rem; color:var(--muted); border-top:1px solid var(--line)}
+.cat-flows{display:flex; align-items:center; gap:14px; padding:16px 18px; border-radius:18px; border:2px dashed var(--line); background:var(--surface); text-decoration:none; color:var(--ink); margin-bottom:30px; transition:border-color .2s}
+.cat-flows:hover{border-color:var(--accent)}
+.cat-flows b{display:block; font:800 1.02rem var(--display)} .cat-flows small{display:block; color:var(--muted); font-size:.86rem}
+.cf-ic{width:44px; height:44px; border-radius:12px; flex:none; display:grid; place-items:center; background:var(--accent); color:#fff} .cf-ic svg{width:24px; height:24px}
+.cf-go{margin-left:auto; font-weight:700; color:var(--accent); white-space:nowrap}
+.btn.sm{min-height:30px; padding:4px 10px; font-size:.8rem}
+.opts.four{grid-template-columns:repeat(4, minmax(0,1fr))}
+.opts.four .opt{font:800 1.4rem var(--display)}
+.scenario{font:600 1rem/1.5 var(--mono); padding:12px 14px; border-radius:12px; background:var(--code-bg); margin:0 0 12px}
+/* partitions */
+.waves{display:flex; flex-wrap:wrap; gap:3px; margin:12px 0; align-items:center}
+.waves i{width:12px; height:12px; border-radius:3px; background:oklch(.62 .15 calc(28 + var(--w) * 30)); animation:fadeUp .2s both; animation-delay:calc(var(--d) * 3ms)}
+.waves span{font-size:.78rem; color:var(--muted); margin-left:6px}
+.stack-bar{display:flex; height:30px; border-radius:10px; overflow:hidden; background:var(--code-bg); font:600 .74rem var(--body); color:#fff}
+.stack-bar span{display:flex; align-items:center; padding:0 8px; white-space:nowrap; overflow:hidden; transition:width .4s}
+.sb-open{background:var(--k-log)} .sb-work{background:var(--k-disk)}
+/* stages */
+.ops{list-style:none; margin:0; padding:0; display:flex; flex-direction:column; gap:6px}
+.ops li{display:flex; flex-direction:column; gap:4px}
+.cut-line{font:800 .68rem var(--body); letter-spacing:.08em; text-transform:uppercase; color:var(--accent); display:flex; align-items:center; gap:8px}
+.cut-line::before, .cut-line::after{content:""; flex:1; border-top:2px dashed var(--accent)}
+.op-b{display:flex; align-items:center; gap:10px; padding:10px 12px; border-radius:12px; border:2px solid var(--line); background:var(--surface); cursor:pointer; font:600 .92rem var(--mono); color:var(--ink); text-align:left}
+.op-b:hover:not(:disabled){border-color:var(--sc)}
+.op-b:disabled{cursor:default}
+.op-n{width:22px; height:22px; border-radius:6px; display:grid; place-items:center; background:var(--code-bg); font-size:.72rem}
+.ops li.ok .op-b{border-color:var(--k-disk)} .ops li.no .op-b{border-color:var(--k-log); background:color-mix(in srgb, var(--k-log) 8%, var(--surface))}
+/* shuffle grid */
+.mxr{padding:12px; border-radius:12px; background:var(--code-bg)}
+.mxr-grid{display:grid; grid-template-columns:repeat(var(--c), 1fr); gap:3px}
+.mxr-grid i{aspect-ratio:1.6; border-radius:3px; background:color-mix(in srgb, var(--sc) 55%, transparent); animation:fadeUp .3s both; animation-delay:calc(var(--d) * 10ms)}
+.mxr-grid i.tiny{transform:scale(.45); background:var(--k-log)}
+.mxr p{margin:8px 0 0; font-size:.82rem}
+/* skew */
+.skew-bars{display:flex; align-items:flex-end; gap:4px; height:150px; padding:10px; border-radius:12px; background:var(--code-bg)}
+.skew-bars span{flex:1; min-width:4px; border-radius:5px 5px 2px 2px; background:color-mix(in srgb, var(--sc) 60%, transparent); transition:height .45s cubic-bezier(.2,.7,.2,1)}
+.skew-bars span.hot{background:var(--k-log)}
+/* memory */
+.mem-bar{height:28px; border-radius:9px; background:var(--code-bg); overflow:hidden; margin:6px 0}
+.mem-bar span{display:flex; align-items:center; height:100%; padding:0 10px; color:#fff; font:600 .76rem var(--body); white-space:nowrap; background:var(--k-disk); transition:width .4s}
+.mem-bar.need span{background:var(--k-proc)} .mem-bar span.over{background:var(--k-log)}
+/* stage breakdown */
+.stage-bars{display:flex; flex-direction:column; gap:6px; margin:14px 0}
+.stb{display:grid; grid-template-columns:90px 1fr 76px; gap:10px; align-items:center}
+.stb-n{font-weight:600; font-size:.9rem} .stb-v{font:600 .82rem var(--mono); text-align:right}
+.stb-t{height:20px; border-radius:7px; background:var(--code-bg); overflow:hidden}
+.stb-f{display:block; height:100%; border-radius:7px; background:var(--sc); transition:width .5s cubic-bezier(.2,.7,.2,1)}
+.stb-f.worst{background:var(--k-log)}
+/* kafka logs */
+.logs{display:flex; flex-direction:column; gap:8px; margin:12px 0}
+.plog{display:grid; grid-template-columns:96px 1fr auto; gap:10px; align-items:center; padding:8px 10px; border-radius:12px; background:var(--code-bg)}
+.pl-h{font:700 .82rem var(--body)} .pl-h small{display:block; font:500 .72rem var(--mono); color:var(--muted)}
+.pl-row{display:flex; gap:4px; overflow-x:auto; padding:2px 0; min-height:42px; align-items:center}
+.rec{flex:none; display:flex; flex-direction:column; align-items:center; justify-content:center; width:40px; height:40px; border-radius:8px; background:var(--surface); border:2px solid color-mix(in srgb, var(--sc) 50%, var(--line)); font-family:var(--mono); animation:popIn .3s both}
+.rec b{font-size:.78rem} .rec small{font-size:.58rem; color:var(--muted)}
+.rec.read{opacity:.35} .rec.next{border-color:var(--accent); box-shadow:0 0 0 3px color-mix(in srgb, var(--accent) 25%, transparent)}
+.rec.ev-0{border-color:var(--k-proc)} .rec.ev-1{border-color:var(--k-disk)} .rec.ev-2{border-color:var(--k-meta)}
+@media (max-width:560px){ .plog{grid-template-columns:1fr} .stb{grid-template-columns:70px 1fr 64px} .opts.four{grid-template-columns:repeat(2, minmax(0,1fr))} }
+.brokers{display:grid; grid-template-columns:repeat(3, 1fr); gap:8px; margin:12px 0}
+.brk{padding:12px; border-radius:12px; border:2px solid var(--sc); background:color-mix(in srgb, var(--sc) 8%, var(--surface)); text-align:center}
+.brk b{display:block} .brk small{color:var(--muted); font-size:.76rem}
+.brk.dead{border-color:var(--k-log); background:color-mix(in srgb, var(--k-log) 10%, var(--surface)); animation:shake .4s}
+.brk.empty{border-style:dashed; border-color:var(--line); background:var(--surface); opacity:.6}
+.consumers{display:grid; grid-template-columns:repeat(auto-fill, minmax(130px, 1fr)); gap:8px; margin:12px 0}
+.cns{padding:10px; border-radius:12px; border:2px solid var(--line); background:var(--surface); display:flex; flex-direction:column; gap:6px; animation:fadeUp .25s both}
+.cns.idle{border-style:dashed; opacity:.6} .cns.hot{border-color:var(--k-log)}
+.cns-p{display:flex; flex-wrap:wrap; gap:3px} .cns-p span{font:600 .7rem var(--mono); padding:2px 6px; border-radius:6px; background:color-mix(in srgb, var(--sc) 15%, transparent)}
+.cns-bar{height:6px; border-radius:4px; background:var(--code-bg); overflow:hidden} .cns-bar span{display:block; height:100%; background:var(--k-disk)}
+.cns.hot .cns-bar span{background:var(--k-log)}
+.cns small{font-size:.72rem; color:var(--muted)}
+.db-rows{display:flex; flex-wrap:wrap; gap:6px}
+.dbr{display:flex; flex-direction:column; align-items:center; padding:8px 10px; border-radius:10px; font:700 .86rem var(--mono); min-width:52px; animation:popIn .3s both}
+.dbr sub{font-size:.62rem; font-weight:600}
+.dbr.ok{background:color-mix(in srgb, var(--k-disk) 16%, transparent)} .dbr.dup{background:color-mix(in srgb, var(--k-meta) 22%, transparent)} .dbr.miss{background:color-mix(in srgb, var(--k-log) 14%, transparent); color:var(--k-log); border:1.5px dashed var(--k-log)}
+.sc-list{display:flex; flex-direction:column; gap:6px}
+.sc-row{display:grid; grid-template-columns:1fr auto; gap:6px 10px; align-items:center; padding:10px 12px; border-radius:12px; border:2px solid var(--line); background:var(--surface)}
+.sc-row small{grid-column:1 / -1; color:var(--muted)} .sc-c{font:600 .88rem var(--mono)} .sc-b{display:flex; gap:6px}
+.sc-row.ok{border-color:var(--k-disk)} .sc-row.no{border-color:var(--k-log)}
+.tl{position:relative; height:170px; border-radius:12px; background:var(--code-bg); overflow:hidden; margin-top:6px}
+.tl i{position:absolute; width:7px; height:7px; border-radius:50%; transform:translate(-50%, 50%); transition:background .3s}
+.tl i.in{background:var(--k-disk)} .tl i.late{background:var(--k-log)}
+.tl-wm{position:absolute; left:0; right:0; border-top:2px dashed var(--ink); font:700 .68rem var(--body); padding:2px 6px; color:var(--ink); transition:bottom .3s}
+.tl-cap{font-size:.8rem; margin:6px 0 0}
+.ck-tl{position:relative; height:46px; border-radius:12px; background:linear-gradient(90deg, color-mix(in srgb, var(--sc) 18%, transparent), color-mix(in srgb, var(--sc) 6%, transparent)); margin-top:8px}
+.ck-tl i{position:absolute; top:8px; bottom:8px; width:3px; border-radius:2px; background:var(--sc)}
+.ck-crash{position:absolute; top:50%; transform:translate(-50%, -50%); background:var(--k-log); color:#fff; font:800 .66rem var(--body); text-transform:uppercase; padding:3px 7px; border-radius:6px}
+.boss-grid{display:grid; grid-template-columns:repeat(2, minmax(0,1fr)); gap:4px 18px}
+@media (max-width:640px){ .boss-grid{grid-template-columns:minmax(0,1fr)} }
+
+.qz-q, .qz-b, .scenario, .lab-note, .sc-c{overflow-wrap:anywhere}
+
 /* SVG */
+
 
 
 .edge{fill:none; stroke-width:1.6}
@@ -828,65 +940,22 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
 <body>
 <header class="appbar">
   <div class="appbar-in">
-    <a class="brand" href="#mysql-write" aria-label="Data Flow Explorer home">
+    <a class="brand" href="#courses" aria-label="Dagdeep home">
       <svg viewBox="0 0 32 32" aria-hidden="true">
         <rect x="1" y="1" width="30" height="30" rx="9" fill="var(--ink)"/>
         <path d="M9 11h6a4 4 0 0 1 4 4v2a4 4 0 0 0 4 4" fill="none" stroke="var(--bg)" stroke-width="2" stroke-linecap="round"/>
         <circle cx="9" cy="11" r="3" fill="var(--accent)"/>
         <circle cx="23" cy="21" r="3" fill="var(--k-disk)"/>
       </svg>
-      <span>Data Flow Explorer</span>
+      <span>Dagdeep</span>
     </a>
     <nav class="modes" aria-label="Sections">
+      <a href="#courses" id="modeCourses">Courses</a>
       <a href="#mysql-write" id="modeFlows">Data flows</a>
-      <a href="#map-de" id="modeRoadmaps">Roadmaps</a>
-      <a href="#course-llm" id="modeCourses">Courses</a>
     </nav>
   </div>
 </header>
 <div class="wrap">
-
-  <div id="roadmapView" hidden>
-    <div class="rm-head">
-      <div>
-        <h1>Engineering roadmaps</h1>
-        <p>Pick a path, follow the stages, and open any topic to see diagrams, examples, deep dives and interview questions.</p>
-      </div>
-      <div class="rm-views" role="tablist" aria-label="Roadmap view">
-        <a id="vMap" role="tab">Map</a>
-        <a id="vLearn" role="tab">Learn</a>
-        <a id="vIq" role="tab">Interview prep <span id="iqTotal"></span></a>
-      </div>
-    </div>
-    <nav class="rm-cards" id="rmCards" aria-label="Roadmaps"></nav>
-    <p class="rc-intro" id="rmIntro"></p>
-
-    <section id="mapView" hidden><div class="map" id="rmMap"></div></section>
-
-    <section id="iqView" hidden>
-      <div class="iq-bar">
-        <div class="iq-filters" id="iqFilters"></div>
-        <label class="iq-toggle"><input type="checkbox" id="iqShow"> Show all answers</label>
-      </div>
-      <div id="iqList"></div>
-    </section>
-
-    <div id="learnView">
-      <div class="panel journey-wrap"><ol class="journey" id="rmJourney" aria-label="Stages"></ol></div>
-      <div class="rm-toolbar">
-        <div class="rm-progress"><div class="rm-track"><div id="rmFill"></div></div><span id="rmCount"></span></div>
-        <div class="rm-actions">
-          <button class="btn" id="rmExpand" type="button">Expand all</button>
-          <button class="btn" id="rmCollapse" type="button">Collapse all</button>
-        </div>
-      </div>
-      <div class="rm-grid">
-        <ul class="tree" id="rmTree" role="tree" aria-label="Topics"></ul>
-        <div class="rm-side" id="rmSide"></div>
-      </div>
-    </div>
-    <article class="panel rm-detail st" id="rmDetail" aria-live="polite"></article>
-  </div>
 
   <div id="courseView" hidden><div id="cRoot"></div></div>
 
@@ -930,18 +999,13 @@ input[type=range]{accent-color:var(--sc); width:100%; height:28px}
   <footer>Simplified for learning. File names, IDs and counts are illustrative. MySQL assumes 8.0 InnoDB with <code>innodb_flush_log_at_trx_commit=1</code> and <code>sync_binlog=1</code>; Iceberg assumes format v2. Use ← and → keys to step.</footer>
   </div>
 </div>
-<script src="roadmaps.js"></script>
-<script src="roadmap-extras.js"></script>
-<script src="deep-de-1.js"></script>
-<script src="deep-de-2.js"></script>
-<script src="deep-de-3.js"></script>
-<script src="advanced-de-1.js"></script>
-<script src="advanced-de-2.js"></script>
 <script src="config.js"></script>
 <script src="course-llm-content.js"></script>
 <script src="course-llm-prod.js"></script>
 <script src="course-engine.js"></script>
 <script src="course-prod-labs.js"></script>
+<script src="course-spark.js"></script>
+<script src="course-kafka.js"></script>
 
 <script>
 const KIND_NAMES = {actor:"Client / engine", proc:"Compute layer", mem:"Memory", disk:"Durable storage", log:"Log / stream", meta:"Metadata / catalog"};
@@ -1213,12 +1277,11 @@ function play(){
 function showMode(m){
   if (m !== "flows" && typeof stop === "function") stop();
   $("flowsView").hidden = m!=="flows";
-  $("roadmapView").hidden = m!=="roadmaps";
   $("courseView").hidden = m!=="courses";
-  [["modeFlows","flows"],["modeRoadmaps","roadmaps"],["modeCourses","courses"]].forEach(([id, k]) => {
+  [["modeFlows","flows"],["modeCourses","courses"]].forEach(([id, k]) => {
     if (m === k) $(id).setAttribute("aria-current","page"); else $(id).removeAttribute("aria-current");
   });
-  document.title = m==="flows" ? "Data Flow Explorer" : m==="courses" ? "LLM Fundamentals, played · Data Flow Explorer" : "Engineering Roadmaps · Data Flow Explorer";
+  if (m === "flows") document.title = "Data flows · Dagdeep";
 }
 
 function loadFlow(id){
@@ -1237,11 +1300,8 @@ function loadFlow(id){
 
 function route(){
   const h = location.hash.slice(1);
-  if (h.startsWith("roadmap-")) loadRoadmap(h.slice(8), "learn");
-  else if (h.startsWith("interview-")) loadRoadmap(h.slice(10), "iq");
-  else if (h.startsWith("map-")) loadRoadmap(h.slice(4), "map");
-  else if (h.startsWith("course-") || h.startsWith("lesson-")) loadCourse(h);
-  else loadFlow(h);
+  if (FLOWS[h]) loadFlow(h);
+  else loadCourse(h.startsWith("course-") || h.startsWith("lesson-") ? h : "courses");
 }
 
 function checkCompact(){
@@ -1250,35 +1310,7 @@ function checkCompact(){
   if (c !== compact){ compact = c; if (flow){ const k = cur; renderDiagram(); go(k,false); } }
 }
 
-/* ---------- Roadmaps ---------- */
-const RM_ORDER = ["de","ai","fde"];
-const HUES = [28, 205, 275, 160, 340, 95, 55, 235, 310];
-const hueOf = i => HUES[i % HUES.length];
-let rm = null, rmKey = null, rmSel = null, rmOpen = new Set(), rmIndex = {}, RM_FLAT = {}, rmDetailTab = "overview";
-let rmDone = new Set();
-try { rmDone = new Set(JSON.parse(localStorage.getItem("rm-done-v1") || "[]")); } catch(e) {}
-function saveDone(){ try { localStorage.setItem("rm-done-v1", JSON.stringify([...rmDone])); } catch(e) {} }
-const narrow = () => window.matchMedia("(max-width: 900px)").matches;
-const descendants = n => (n.c||[]).flatMap(ch => [ch, ...descendants(ch)]);
-const ancestors = n => { const a = []; let p = n._parent; while (p){ a.unshift(rmIndex[p]); p = rmIndex[p]._parent; } return a; };
-const topOf = n => ancestors(n)[0] || n;
-const pct = n => { const d = descendants(n); return d.length ? Math.round(d.filter(x => rmDone.has(x._id)).length / d.length * 100) : (rmDone.has(n._id) ? 100 : 0); };
-const rmFlat = () => RM_FLAT[rmKey];
-
-function rmIndexAll(){
-  for (const key of RM_ORDER){
-    const flat = RM_FLAT[key] = [];
-    const walk = (nodes, nums, parentId) => nodes.forEach((n,i) => {
-      const ns = nums.concat(i+1), id = key+"-"+ns.join("-");
-      n._id = id; n._num = ns.join("."); n._parent = parentId; n._lvl = ns.length-1; n._i = i;
-      Object.assign(n, (window.RM_EXTRA || {})[id] || {}, (window.RM_DEEP || {})[id] || {});
-      rmIndex[id] = n; flat.push(n);
-      if (n.c) walk(n.c, ns, id);
-    });
-    walk(ROADMAPS[key].c, [], null);
-  }
-}
-
+/* ---------- Shared text helpers (used by courses) ---------- */
 /* ----- text helpers ----- */
 const LVL = {B:"Fundamentals", I:"Intermediate", S:"Senior"};
 function inl(t){ return esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/«(.+?)»/g, "<code>$1</code>"); }
@@ -1332,266 +1364,6 @@ function flowHTML(fl){
   if (fl[0] && fl[0].steps) return `<div class="flow lanes">${fl.map(l => `<div class="lane"><p class="lane-label">${esc(l.label)}</p>${lane(l.steps)}</div>`).join("")}</div>`;
   return `<div class="flow">${lane(fl)}</div>`;
 }
-function tagsHTML(n){
-  const t = [];
-  if (n.hard) t.push(`<em class="t-adv">Advanced</em>`);
-  if (n.dd) t.push(`<em class="t-deep">Deep dive</em>`);
-  if (n.iq) t.push(`<em class="t-iq">${n.iq.length} Q</em>`);
-  if (n.fl) t.push(`<em class="t-fl">Flow</em>`);
-  if (n.ex) t.push(`<em>Example</em>`);
-  return t.length ? `<span class="tags">${t.join("")}</span>` : "";
-}
-const CHEV = `<svg class="chev" viewBox="0 0 16 16" aria-hidden="true"><path d="M6 3.5l4.5 4.5L6 12.5" fill="none" stroke="currentColor" stroke-width="1.9" stroke-linecap="round" stroke-linejoin="round"/></svg>`;
-
-/* ----- builders (run once per roadmap) ----- */
-function rmBuildCards(tab){
-  $("rmCards").innerHTML = RM_ORDER.map(k => {
-    const r = ROADMAPS[k], flat = RM_FLAT[k];
-    const done = flat.filter(n => rmDone.has(n._id)).length, p = Math.round(done / flat.length * 100);
-    const q = flat.reduce((a, n) => a + (n.iq ? n.iq.length : 0), 0);
-    return `<a class="rm-card" href="#${tab === "iq" ? "interview" : tab === "map" ? "map" : "roadmap"}-${k}" data-k="${k}"${k === rmKey ? ' aria-current="page"' : ""}>` +
-      `<span class="ring lg" style="--p:${p}"><b>${p}%</b></span>` +
-      `<span><span class="rc-name">${esc(r.name)}</span><span class="rc-meta">${r.c.length} stages · ${flat.length} topics${q ? ` · ${q} questions` : ""}</span></span></a>`;
-  }).join("");
-}
-function rmBuildJourney(){
-  $("rmJourney").innerHTML = rm.c.map((n, i) =>
-    `<li class="st" data-id="${n._id}" style="--h:${hueOf(i)}"><button type="button" data-id="${n._id}" aria-label="Stage ${i+1}: ${esc(n.t)}">` +
-    `<span class="station"><span class="ring md" style="--p:0"></span><i>${i+1}</i></span><span class="jt">${esc(n.t)}</span></button></li>`).join("");
-}
-function rmBuildTree(){
-  const li = (n, i) => {
-    const kids = n.c && n.c.length, top = n._lvl === 0;
-    return `<li class="node-${Math.min(n._lvl, 2)}${top ? " st" : ""}" data-id="${n._id}" role="treeitem" style="--i:${i}${top ? `;--h:${hueOf(i)}` : ""}"${kids ? ' aria-expanded="false"' : ""}>` +
-      `<button class="row" type="button" data-id="${n._id}">` +
-        (top ? `<span class="num">${i+1}</span>` : `<span class="pt" aria-hidden="true"></span>`) +
-        `<span><span class="tname">${esc(n.t)}</span>${n.d && n._lvl < 2 ? `<span class="dd">${esc(n.d)}</span>` : ""}${top ? (n.hard ? `<span class="tags"><em class="t-adv">Advanced</em></span>` : "") : tagsHTML(n)}</span>` +
-        `<span class="end">${kids ? `<span class="ring" style="--p:0"></span>${CHEV}` : `<span class="tick" aria-hidden="true"></span>`}</span>` +
-      `</button>` +
-      (kids ? `<div class="kids" inert><div class="kids-in"><ul role="group">${n.c.map(li).join("")}</ul></div></div>` : "") +
-    `</li>`;
-  };
-  const det = $("rmDetail"); if (det.parentNode !== $("rmSide")) $("rmSide").appendChild(det);
-  $("rmTree").innerHTML = rm.c.map(li).join("");
-}
-
-/* ----- state sync (no rebuild, so transitions play) ----- */
-function rmSync(){
-  const sel = rmIndex[rmSel], path = new Set(ancestors(sel).map(a => a._id));
-  $("rmTree").querySelectorAll("li[data-id]").forEach(li => {
-    const id = li.dataset.id, n = rmIndex[id], open = rmOpen.has(id);
-    li.classList.toggle("open", open);
-    li.classList.toggle("sel", id === rmSel);
-    li.classList.toggle("path", path.has(id));
-    li.classList.toggle("done", rmDone.has(id));
-    const row = li.firstElementChild;
-    row.setAttribute("aria-current", id === rmSel ? "true" : "false");
-    if (n.c){
-      li.setAttribute("aria-expanded", open);
-      li.lastElementChild.inert = !open;
-      row.querySelector(".ring").style.setProperty("--p", pct(n));
-    }
-  });
-  const topId = topOf(sel)._id, topIdx = rm.c.findIndex(n => n._id === topId);
-  $("rmJourney").querySelectorAll("li").forEach((li, i) => {
-    li.classList.toggle("on", i === topIdx);
-    li.classList.toggle("reached", i <= topIdx);
-    li.querySelector(".ring").style.setProperty("--p", pct(rm.c[i]));
-  });
-  const flat = rmFlat(), done = flat.filter(n => rmDone.has(n._id)).length;
-  $("rmFill").style.width = (done / flat.length * 100) + "%";
-  $("rmCount").textContent = `${done} of ${flat.length} topics learned`;
-}
-
-/* ----- detail panel ----- */
-function rmRenderDetail(){
-  const n = rmIndex[rmSel], el = $("rmDetail");
-  if (!n){ el.innerHTML = ""; return; }
-  const top = topOf(n);
-  el.style.setProperty("--h", hueOf(top._i));
-  const flat = rmFlat(), next = flat[flat.indexOf(n) + 1];
-  const tabs = [["overview", "Overview"]];
-  if (n.dd) tabs.push(["deep", "Deep dive"]);
-  if (n.ex) tabs.push(["example", "Example"]);
-  if (n.iq) tabs.push(["interview", `Interview · ${n.iq.length}`]);
-  if (!tabs.some(t => t[0] === rmDetailTab)) rmDetailTab = "overview";
-
-  const chips = [];
-  if (n.c) chips.push(`${descendants(n).length} subtopics`);
-  if (n.fl) chips.push("Flow diagram");
-  if (n.hard) chips.push("Advanced");
-  if (n.dd) chips.push(`${Math.max(1, Math.round(n.dd.split(/\s+/).length / 200))} min deep dive`);
-  if (n.ex) chips.push("Worked example");
-  if (n.iq) chips.push(`${n.iq.length} interview Qs`);
-
-  let body = "";
-  if (rmDetailTab === "overview"){
-    body += (n.w ? `<p class="why"><b>Why it matters.</b> ${esc(n.w)}</p>` : "");
-    if (n.fl) body += `<h4>How it flows</h4>${flowHTML(n.fl)}`;
-    if (n.k) body += `<h4>What you need to know</h4><ul class="know">${n.k.map(k => `<li>${esc(k)}</li>`).join("")}</ul>`;
-    if (n.m) body += `<h4>Common mistakes</h4><ul class="mist">${n.m.map(x => `<li>${esc(x)}</li>`).join("")}</ul>`;
-    if (n.q) body += `<h4>Check yourself</h4><details class="quiz"><summary>${esc(n.q[0])}</summary><p>${esc(n.q[1])}</p></details>`;
-    if (n.p) body += `<div class="try"><b>Try this:</b> ${esc(n.p)}</div>`;
-    if (n.c && n.c.length) body += `<h4>Go deeper</h4><div class="subs">${n.c.map(ch =>
-      `<button type="button" data-go="${ch._id}"><i>${ch._num}</i><span><b>${esc(ch.t)}${rmDone.has(ch._id) ? " ✓" : ""}</b><small>${[ch.dd ? "Deep dive" : "", ch.iq ? ch.iq.length + " Q" : "", ch.c ? ch.c.length + " subtopics" : ""].filter(Boolean).join(" · ") || "Key points"}</small></span></button>`).join("")}</div>`;
-  } else if (rmDetailTab === "deep"){
-    const toc = tocOf(n.dd), words = n.dd.split(/\s+/).length, flows = (n.dd.match(/^:::(flow|lanes)/gm) || []).length;
-    body += `<div class="dd-meta"><span>${Math.max(1, Math.round(words / 200))} min read</span><span>${toc.length} sections</span>${flows ? `<span>${flows} diagram${flows > 1 ? "s" : ""}</span>` : ""}</div>` +
-      (toc.length > 2 ? `<nav class="toc"><p>In this chapter</p><ol>${toc.map((h, i) => `<li><button type="button" data-sec="${i}">${inl(h)}</button></li>`).join("")}</ol></nav>` : "") +
-      `<div class="deep">${md(n.dd)}</div>`;
-  } else if (rmDetailTab === "example"){
-    body += `<div class="codebox"><div class="codebar"><span>Worked example</span><button class="btn" type="button" data-copy>Copy</button></div><pre><code>${esc(n.ex.c)}</code></pre></div>` +
-      (n.ex.n ? `<p class="ex-note">${esc(n.ex.n)}</p>` : "");
-  } else if (rmDetailTab === "interview"){
-    body += `<div class="iqs">${n.iq.map(q => iqHTML(q, false)).join("")}</div>`;
-  }
-
-  const learned = rmDone.has(n._id);
-  el.innerHTML =
-    `<div class="dh"><p class="crumbs">${[rm.name, ...ancestors(n).map(a => a.t)].map(c => `<span>${esc(c)}</span>`).join("")}</p>` +
-      `<h2><span class="dnum">${n._num}</span>${esc(n.t)}</h2>${n.d ? `<p class="sum">${esc(n.d)}</p>` : ""}` +
-      (chips.length ? `<div class="dchips">${chips.map(c => `<span>${c}</span>`).join("")}</div>` : "") + `</div>` +
-    (tabs.length > 1 ? `<div class="dtabs" role="tablist">${tabs.map(([k, l]) => `<button type="button" role="tab" data-tab="${k}" aria-selected="${k === rmDetailTab}">${l}</button>`).join("")}</div>` : "") +
-    `<div class="dbody">${body}</div>` +
-    `<div class="dfoot"><button type="button" class="btn${learned ? " solid" : ""}" data-learn="${n._id}" aria-pressed="${learned}">${learned ? "✓ Learned" : "Mark as learned"}</button>` +
-      (n.f && FLOWS[n.f] ? `<a class="btn" href="#${n.f}">▶ Watch: ${FLOWS[n.f].tab} ${FLOWS[n.f].sub}</a>` : "") +
-      `<span class="spacer"></span>` +
-      (next ? `<button type="button" class="btn" data-go="${next._id}">Next: ${esc(next.t)} →</button>` : "") + `</div>`;
-}
-
-function rmPlaceDetail(){
-  const el = $("rmDetail");
-  if (narrow()){
-    const row = $("rmTree").querySelector(`button.row[data-id="${rmSel}"]`);
-    if (row && row.nextElementSibling !== el){ row.after(el); }
-    el.classList.add("inline");
-  } else {
-    if (el.parentNode !== $("rmSide")) $("rmSide").appendChild(el);
-    el.classList.remove("inline");
-  }
-}
-
-function rmSelect(id, {toggle=false, focus=false, scroll=false, keepTab=false} = {}){
-  const n = rmIndex[id]; if (!n) return;
-  if (toggle && n.c){ rmOpen.has(id) ? rmOpen.delete(id) : rmOpen.add(id); }
-  ancestors(n).forEach(a => rmOpen.add(a._id));
-  if (id !== rmSel && !keepTab) rmDetailTab = "overview";
-  rmSel = id;
-  rmSync(); rmRenderDetail(); rmPlaceDetail();
-  if (!narrow()) $("rmSide").scrollTop = 0;
-  const row = $("rmTree").querySelector(`button.row[data-id="${id}"]`);
-  if (focus && row) row.focus({preventScroll:true});
-  if (scroll && row) setTimeout(() => row.scrollIntoView({block: narrow() ? "start" : "nearest", behavior: reduceMotion ? "auto" : "smooth"}), 60);
-}
-
-/* ----- interview view ----- */
-let rmTab = "learn", iqLevel = "all";
-function setRmTab(t){
-  rmTab = t;
-  $("learnView").hidden = t !== "learn";
-  $("rmDetail").hidden = t !== "learn";
-  $("iqView").hidden = t !== "iq";
-  $("mapView").hidden = t !== "map";
-  $("vMap").setAttribute("aria-selected", t === "map");
-  if (t === "map") renderMap();
-  $("vLearn").setAttribute("aria-selected", t === "learn");
-  $("vIq").setAttribute("aria-selected", t === "iq");
-  if (t === "iq") renderIq();
-}
-function renderMap(){
-  const chip = n => `<button type="button" class="m-chip${rmDone.has(n._id) ? " done" : ""}${n.hard ? " adv" : ""}" data-map="${n._id}">${esc(n.t)}</button>`;
-  $("rmMap").innerHTML = `<div class="m-start"><span>Start</span></div>` + rm.c.map((st, si) => {
-    const p = pct(st);
-    return `<section class="m-stage st" style="--h:${hueOf(si)}; --si:${si}">` +
-      `<button type="button" class="m-node" data-map="${st._id}"><span class="ring md" style="--p:${p}"></span><i>${si+1}</i>` +
-        `<span class="m-node-txt"><b>${esc(st.t)}</b><small>${esc(st.d || "")}</small>${st.hard ? `<em class="m-adv">Advanced</em>` : ""}</span></button>` +
-      `<div class="m-topics">${(st.c || []).map((t, ti) => `<div class="m-topic ${ti % 2 ? "r" : "l"}" style="--i:${ti}">` +
-          `<button type="button" class="m-card${rmDone.has(t._id) ? " done" : ""}" data-map="${t._id}">` +
-            `<span class="m-card-h"><i>${t._num}</i><b>${esc(t.t)}</b></span>${tagsHTML(t)}</button>` +
-          (t.c && t.c.length ? `<div class="m-chips">${t.c.map(chip).join("")}</div>` : "") +
-        `</div>`).join("")}</div></section>`;
-  }).join("") + `<div class="m-end"><span>Job ready</span></div>`;
-}
-function renderIq(){
-  const levels = [["all","All"],["B","Fundamentals"],["I","Intermediate"],["S","Senior"]];
-  $("iqFilters").innerHTML = levels.map(([k,l]) => `<button type="button" data-lv="${k}" aria-pressed="${iqLevel===k}">${l}</button>`).join("");
-  const open = $("iqShow").checked;
-  let html = "";
-  rm.c.forEach((stage, si) => {
-    const topics = [stage, ...descendants(stage)].filter(t => t.iq && t.iq.some(q => iqLevel === "all" || q[0] === iqLevel));
-    if (!topics.length) return;
-    html += `<div class="iq-stage st" style="--h:${hueOf(si)}"><h3><span class="num">${si+1}</span>${esc(stage.t)}</h3>`;
-    for (const t of topics){
-      const qs = t.iq.filter(q => iqLevel === "all" || q[0] === iqLevel);
-      html += `<div class="iq-topic"><h4>${t._num} ${esc(t.t)} <a href="#roadmap-${rmKey}" data-learn-go="${t._id}">Study this topic →</a></h4><div class="iqs">${qs.map(q => iqHTML(q, open)).join("")}</div></div>`;
-    }
-    html += `</div>`;
-  });
-  $("iqList").innerHTML = html || `<p class="iq-empty">Interview questions for the ${esc(rm.name)} roadmap are coming next. The Data Engineer roadmap has them now.</p>`;
-}
-
-/* ----- routing entry ----- */
-function loadRoadmap(key, tab){
-  if (!ROADMAPS[key]) key = RM_ORDER[0];
-  tab = tab || "learn";
-  stop();
-  showMode("roadmaps");
-  $("modeRoadmaps").href = "#map-" + key;
-  if (rmKey !== key){
-    rmKey = key; rm = ROADMAPS[key];
-    rmBuildJourney(); rmBuildTree();
-    rmOpen = new Set(); rmSel = rm.c[0]._id; rmDetailTab = "overview";
-    requestAnimationFrame(() => { rmOpen.add(rm.c[0]._id); if (rmTab === "learn") rmSync(); });
-  }
-  rmBuildCards(tab);
-  $("rmIntro").textContent = rm.intro;
-  const total = rmFlat().reduce((a, n) => a + (n.iq ? n.iq.length : 0), 0);
-  $("iqTotal").textContent = total ? `${total}` : "";
-  $("vLearn").href = "#roadmap-" + key; $("vIq").href = "#interview-" + key; $("vMap").href = "#map-" + key;
-  setRmTab(tab);
-  if (tab === "learn") rmSelect(rmSel, {keepTab:true});
-}
-
-/* ----- events ----- */
-$("rmTree").addEventListener("click", e => {
-  if (e.target.closest("#rmDetail")) return;
-  const b = e.target.closest("button.row"); if (!b) return;
-  const id = b.dataset.id, n = rmIndex[id];
-  const toggle = n.c && (!rmOpen.has(id) || rmSel === id);
-  rmSelect(id, {toggle, focus:true});
-});
-$("rmJourney").addEventListener("click", e => {
-  const b = e.target.closest("button[data-id]"); if (!b) return;
-  rmOpen.add(b.dataset.id); rmSelect(b.dataset.id, {scroll:true});
-});
-$("rmDetail").addEventListener("click", e => {
-  const sb = e.target.closest(".toc button[data-sec]");
-  if (sb){ const h = $("rmDetail").querySelector(`.deep h5[data-sec="${sb.dataset.sec}"]`); if (h) h.scrollIntoView({block:"start", behavior: reduceMotion ? "auto" : "smooth"}); return; }
-  const g = e.target.closest("[data-go]"), l = e.target.closest("[data-learn]"), t = e.target.closest("[data-tab]"), c = e.target.closest("[data-copy]");
-  if (t){ rmDetailTab = t.dataset.tab; rmRenderDetail(); const bar = $("rmDetail").querySelector(".dtabs"); if (bar && narrow()) bar.scrollIntoView({block:"nearest"}); return; }
-  if (c){ const code = rmIndex[rmSel].ex.c; navigator.clipboard.writeText(code).then(() => { c.textContent = "Copied"; }, () => { c.textContent = "Select and copy"; }); return; }
-  if (g){ const id = g.dataset.go; rmOpen.add(id); rmSelect(id, {scroll:true}); }
-  if (l){ const id = l.dataset.learn; rmDone.has(id) ? rmDone.delete(id) : rmDone.add(id); saveDone(); rmBuildCards(rmTab); rmSelect(id, {keepTab:true}); }
-});
-$("rmMap").addEventListener("click", e => {
-  const b = e.target.closest("[data-map]"); if (!b) return;
-  const id = b.dataset.map;
-  history.pushState(null, "", "#roadmap-" + rmKey);
-  rmBuildCards("learn"); setRmTab("learn");
-  rmOpen.add(id); rmSelect(id, {scroll:true});
-  window.scrollTo({top: $("learnView").getBoundingClientRect().top + scrollY - 70, behavior: reduceMotion ? "auto" : "smooth"});
-});
-$("iqFilters").addEventListener("click", e => { const b = e.target.closest("button[data-lv]"); if (b){ iqLevel = b.dataset.lv; renderIq(); } });
-$("iqShow").addEventListener("change", renderIq);
-$("iqList").addEventListener("click", e => {
-  const a = e.target.closest("[data-learn-go]"); if (!a) return;
-  e.preventDefault(); const id = a.dataset.learnGo;
-  history.pushState(null, "", "#roadmap-" + rmKey);
-  rmBuildCards("learn"); setRmTab("learn"); rmOpen.add(id); rmSelect(id, {scroll:true});
-});
-$("rmExpand").onclick = () => { rmFlat().forEach(n => n.c && rmOpen.add(n._id)); rmSync(); };
-$("rmCollapse").onclick = () => { rmOpen.clear(); rmSel = topOf(rmIndex[rmSel])._id; rmSync(); rmRenderDetail(); rmPlaceDetail(); };
-
 
 $("prev").onclick = () => { stop(); go(cur-1); };
 $("next").onclick = () => { stop(); go(cur+1); };
@@ -1604,10 +1376,9 @@ document.addEventListener("keydown", e => {
   if (e.key==="ArrowLeft"){ stop(); go(cur-1); }
 });
 window.addEventListener("hashchange", route);
-let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(() => { checkCompact(); if (!$("roadmapView").hidden) rmPlaceDetail(); }, 150); });
+let rz; window.addEventListener("resize", () => { clearTimeout(rz); rz = setTimeout(checkCompact, 150); });
 
 buildTabs();
-rmIndexAll();
 route();
 </script>
 </body>

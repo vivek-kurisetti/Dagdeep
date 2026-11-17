@@ -1,22 +1,36 @@
-# Data Flow Explorer
+# Dagdeep
 
-A learning site for data and AI engineers:
+**Learn data and AI engineering by playing.** Every lesson is a hands-on lab: drag sliders, run simulations, break pipelines on purpose and fix them, then beat a challenge for XP.
 
-- **Data flows** – animated, step-by-step views of how data moves through MySQL (InnoDB), Apache Iceberg, and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
-- **Roadmaps** – Data Engineer, AI Engineer and Forward Deployed Engineer roadmaps with a visual map, deep-dive chapters, flow diagrams, worked examples and interview questions.
-- **Courses** – *LLM Fundamentals, played*: 20 lessons with interactive labs, quizzes, XP, streaks, badges and a final project, ending with a full production-readiness unit.
+Live site: https://vivek0803.github.io/Dagdeep/
 
-It is a static site: plain HTML, CSS and JavaScript with no build step. Progress is saved in the visitor's browser.
+## Courses
+
+| Course | Level | What you play with |
+|---|---|---|
+| **LLM Fundamentals, played** | Beginner | Tokens, sampling, prompts, JSON, evals, cost, latency, then a production unit: retries and fallbacks, prompt injection, tracing, safe releases, architecture. Prompt labs can call a live model. |
+| **Spark Internals, played** | Intermediate | Job counting, partition planning and small files, stage boundaries, shuffle simulator, join strategy game, skew fixer, executor tuner, and a final "rescue the nightly job" project. |
+| **Kafka & Streaming, played** | Intermediate | Log playground, key/ordering game, broker crash test, consumer group balancer, crash lab for delivery guarantees, schema compatibility, watermark tuner, checkpoint tuner, exactly-once sink designer, and a launch-day drill. |
+
+Plus the **Data flow player**: animated, step-by-step views of a write through MySQL (InnoDB), Apache Iceberg, and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
+
+XP, levels, streaks and badges are shared across courses; progress is saved per course in the visitor's browser.
 
 ## Files
 
 | File | What it is |
 |---|---|
-| `index.html` | The page, styles and core logic |
-| `roadmaps.js`, `roadmap-extras.js`, `deep-de-*.js`, `advanced-de-*.js` | Roadmap content |
-| `course-*.js` | The LLM course content, engine and labs |
+| `index.html` | The page, styles, data-flow player and routing |
+| `course-engine.js` | Course engine: catalog, course map, lessons, quizzes, XP, badges, LLM labs |
+| `course-llm-content.js`, `course-llm-prod.js`, `course-prod-labs.js` | LLM course content and production labs |
+| `course-spark.js` | Spark course content and labs |
+| `course-kafka.js` | Kafka & Streaming course content and labs |
 | `config.js` | Site settings (optional live-model endpoint) |
 | `api/worker.js` | Optional serverless proxy for live LLM labs |
+
+## Adding a course
+
+Create `course-<id>.js` that registers `window.COURSES.<id> = {id, title, short, tagline, story, hue, level, hours, order, units:[...]}` and adds its labs to `window.COURSE_LABS`, then add a `<script>` tag after `course-engine.js` in `index.html`. Each lesson has `title, mins, sum, mission, body` (Markdown-like text with `:::flow`, `:::lanes`, `:::tip` blocks and tables), `lab, labTitle, challenge` and `take`; quizzes use `kind:"quiz"` with `questions`; a final project uses `kind:"boss"`.
 
 ## Run locally
 
