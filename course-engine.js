@@ -19,8 +19,8 @@ function useCourse(cid){
 // One shared profile (XP, level, streak, badges) and separate progress per course.
 const PKEY = "dagdeep-profile-v1";
 let P = {xp:0, badges:[], streak:0, last:null};
-const loadProg = cid => { const d = {done:{}, ch:{}, quiz:{}}; try { const o = JSON.parse(localStorage.getItem("course-" + cid + "-v1") || "{}"); return {done:o.done || {}, ch:o.ch || {}, quiz:o.quiz || {}}; } catch(e){ return d; } };
-let S = {done:{}, ch:{}, quiz:{}};
+const loadProg = cid => { const d = {done:{}, ch:{}, quiz:{}, stars:{}}; try { const o = JSON.parse(localStorage.getItem("course-" + cid + "-v1") || "{}"); return {done:o.done || {}, ch:o.ch || {}, quiz:o.quiz || {}, stars:o.stars || {}}; } catch(e){ return d; } };
+let S = {done:{}, ch:{}, quiz:{}, stars:{}};
 try {
   const raw = localStorage.getItem(PKEY);
   if (raw) Object.assign(P, JSON.parse(raw));
@@ -698,7 +698,7 @@ function renderHome(){
         <div class="c-track"><svg class="c-trail" aria-hidden="true"></svg><ol class="c-nodes">${u.items.map((it, ii) => {
           const isDone = !!S.done[it.id], cur = it === up;
           return `<li style="--x:${[0, 1, 1.5, 1, 0, -1, -1.5, -1][ii % 8]}; --i:${ii}"><a class="c-node k-${it.kind}${isDone ? " done" : ""}${cur ? " cur" : ""}" href="#lesson-${CID}-${it.id}" aria-label="${esc(it.title)}">${isDone ? ICON.check : nodeIcon(it)}${cur ? `<span class="c-bubble">${doneN ? "NEXT" : "START"}</span>` : ""}</a>` +
-            `<div class="c-node-lbl"><b>${esc(it.title)}</b><small>${it.mins} min${it.labTitle ? ` · ${it.kind === "boss" ? "Project" : "Lab"}: ${esc(it.labTitle)}` : it.kind === "quiz" ? ` · ${it.questions.length} questions` : ""}</small></div></li>`;
+            `<div class="c-node-lbl"><b>${esc(it.title)}</b>${C.game && it.kind !== "quiz" ? GameKit.starRow((S.stars || {})[it.id] || 0, "map") : ""}<small>${it.mins} min${it.labTitle ? ` · ${it.kind === "boss" ? "Project" : "Lab"}: ${esc(it.labTitle)}` : it.kind === "quiz" ? ` · ${it.questions.length} questions` : ""}</small></div></li>`;
         }).join("")}</ol></div></section>`;
     }).join("")}</div>`;
   requestAnimationFrame(drawTrails);
@@ -721,7 +721,8 @@ function renderItem(id){
   const u = C.units[it.unit], idx = ITEMS.indexOf(it), prev = ITEMS[idx - 1], next = ITEMS[idx + 1];
   const kicker = it.kind === "quiz" ? "Checkpoint" : it.kind === "boss" ? "Final project" : `Lesson ${LESSON_NO[it.id]}`;
   let main = "";
-  if (it.kind === "quiz") main = quizHTML(it);
+  if (C.game && it.kind !== "quiz") main = gameItemHTML(it);
+  else if (it.kind === "quiz") main = quizHTML(it);
   else {
     main = `<div class="l-mission"><span class="m-ic">${ICON.flask}</span><div><b>Mission</b><p>${esc(it.mission)}</p></div></div>
       <div class="l-body deep">${md(it.body)}</div>
@@ -736,9 +737,10 @@ function renderItem(id){
     <article class="l-main st" style="--h:${u.hue}">
       <header class="l-head"><p class="l-kicker">Unit ${it.unit + 1}: ${esc(u.title)} · ${kicker} · ${it.mins} min</p><h1>${esc(it.title)}</h1>${it.sum ? `<p class="l-sum">${esc(it.sum)}</p>` : ""}</header>
       ${main}
-      <div class="l-foot">${it.kind !== "quiz" ? `<button class="btn big ${S.done[it.id] ? "" : "solid"}" id="lDone" ${S.done[it.id] ? "disabled" : ""}>${S.done[it.id] ? "✓ Completed" : it.kind === "boss" ? "Beat the challenge to complete" : "Complete lesson · +20 XP"}</button>` : ""}
+      <div class="l-foot">${it.kind !== "quiz" && !C.game ? `<button class="btn big ${S.done[it.id] ? "" : "solid"}" id="lDone" ${S.done[it.id] ? "disabled" : ""}>${S.done[it.id] ? "✓ Completed" : it.kind === "boss" ? "Beat the challenge to complete" : "Complete lesson · +20 XP"}</button>` : ""}
         <span class="spacer"></span>${prev ? `<a class="btn" href="#lesson-${CID}-${prev.id}">← ${esc(prev.title)}</a>` : ""}${next ? `<a class="btn solid" href="#lesson-${CID}-${next.id}">${esc(next.title)} →</a>` : ""}</div>
     </article>`;
+  if (C.game && it.kind !== "quiz"){ wireGameItem(it); return; }
   if (it.kind === "boss" && !S.done[it.id]) document.getElementById("lDone").disabled = true;
   if (it.lab && LABS[it.lab]){
     initSample();
@@ -758,6 +760,47 @@ function renderItem(id){
   const btn = document.getElementById("lDone");
   if (btn && it.kind === "lesson") btn.addEventListener("click", () => completeItem(it));
 }
+/* ---------- game-course lessons: story, codex, level, interview drill ---------- */
+const CAST = {
+  priya:{n:"Priya", r:"Tech lead", h:205}, arjun:{n:"Arjun", r:"Finance", h:28}, ui:{n:"Spark UI", r:"bot", h:150},
+  you:{n:"You", r:"Data engineer", h:300}, ravi:{n:"Ravi", r:"On-call SRE", h:340}, meera:{n:"Meera", r:"Analyst", h:95}
+};
+function gameItemHTML(it){
+  const words = (it.codex || "").split(/\s+/).length, toc = tocOf(it.codex || ""), stars = (S.stars || {})[it.id] || 0;
+  const scene = (it.scene || []).map(([who, line], i) => { const c = CAST[who] || {n:who, r:"", h:200}; return `<div class="sc-line ${who === "you" ? "me" : ""}" style="--i:${i}; --ch:${c.h}"><span class="sc-av">${c.n[0]}</span><div class="sc-bub"><b>${esc(c.n)}<small>${esc(c.r)}</small></b><p>${inl(line)}</p></div></div>`; }).join("");
+  return `<nav class="g-nav">${[["gStory","Story"],["gCodex","Codex"],["gPlay","Play"],["gDrill","Interview drill"]].map(([id, l]) => `<a href="#${id}" data-jump="${id}">${l}</a>`).join("")}</nav>
+    ${scene ? `<section class="g-scene" id="gStory"><p class="g-h">${it.kind === "boss" ? "Boss fight" : "Story"}</p>${scene}</section>` : ""}
+    <section class="g-codex" id="gCodex"><div class="g-codex-h"><p class="g-h">Codex</p><span>${Math.max(1, Math.round(words / 200))} min read · ${toc.length} sections</span></div>
+      ${toc.length > 2 ? `<nav class="toc"><p>In this chapter</p><ol>${toc.map((h, i) => `<li><button type="button" data-sec="${i}">${inl(h)}</button></li>`).join("")}</ol></nav>` : ""}
+      <div class="l-body deep">${md(it.codex || it.body || "")}</div></section>
+    <section class="g-level" id="gPlay"><div class="g-level-h"><span class="lab-tag">${it.kind === "boss" ? "Boss" : "Level"}</span><h2>${esc(it.game.title)}</h2>${GameKit.starRow(stars, "sm")}</div><div class="g-arena" id="gArena"></div></section>
+    ${it.iq ? `<section class="g-drill" id="gDrill"><p class="g-h">Interview drill</p><p class="muted">Answer out loud first, then reveal the model answer.</p><div class="iqs">${it.iq.map(q => iqHTML(q, false)).join("")}</div></section>` : ""}
+    <section class="l-take"><h3>Key takeaways</h3><ul>${(it.take || []).map(t => `<li>${esc(t)}</li>`).join("")}</ul></section>`;
+}
+function wireGameItem(it){
+  const art = document.querySelector(".l-main");
+  art.addEventListener("click", e => {
+    const j = e.target.closest("[data-jump]"); if (j){ e.preventDefault(); document.getElementById(j.dataset.jump).scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block:"start"}); return; }
+    const sb = e.target.closest(".toc button[data-sec]"); if (sb){ const h = art.querySelector(`.deep h5[data-sec="${sb.dataset.sec}"]`); if (h) h.scrollIntoView({behavior: reduceMotion ? "auto" : "smooth", block:"start"}); }
+  });
+  const gameDef = it.game, maker = window.COURSE_GAMES && window.COURSE_GAMES[gameDef.id];
+  if (!maker) return;
+  const cfg = Object.assign({}, maker(), {title:gameDef.title, best:(S.stars || {})[it.id] || 0});
+  GameKit.start(document.getElementById("gArena"), cfg, (stars) => {
+    if (!stars) return;
+    S.stars = S.stars || {};
+    const prev = S.stars[it.id] || 0;
+    if (stars > prev){
+      S.stars[it.id] = stars; save();
+      addXP((stars - prev) * (it.kind === "boss" ? 60 : 30), `${stars} star${stars > 1 ? "s" : ""}`);
+      if (stars === 3) confetti();
+      document.querySelectorAll(".g-level-h .gk-stars span").forEach((s, i) => s.classList.toggle("on", i < stars));
+    }
+    if (!S.ch[it.id]){ S.ch[it.id] = true; save(); }
+    completeItem(it, true);
+  });
+}
+
 function completeItem(it, silent){
   if (S.done[it.id]) return;
   S.done[it.id] = true; save();

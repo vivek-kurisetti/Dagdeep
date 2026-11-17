@@ -1,528 +1,757 @@
-// Course: Spark Internals, played. Registers the course and its labs with the course engine.
+// Course: Spark Internals: The Nightly Job (story + puzzle game). Games live in course-spark-games.js.
 (function(){
 const COURSES = window.COURSES = window.COURSES || {};
-const LABS = window.COURSE_LABS, U = window.COURSE_UTIL;
-
 COURSES.spark = {
-id:"spark", order:2, level:"Intermediate", hue:28, hours:3,
-title:"Spark Internals, played",
-short:"Partitions, stages, shuffles, joins, skew and memory, by running and fixing Spark jobs.",
-tagline:"See what Spark really does with your DataFrame code. Size partitions, cut stages, simulate shuffles, pick join strategies, kill skew and rescue a four-hour nightly job.",
-story:"You're the new data engineer at Paydesk. The nightly payments job takes four hours and finance wants its reports by 6 AM. Learn how Spark executes work, then make that job fast.",
+id:"spark", order:2, level:"Intermediate", hue:28, hours:6, game:true,
+title:"Spark Internals: The Nightly Job",
+short:"A story-driven game: rescue a 4-hour Spark job, chapter by chapter, with deep codex chapters and arcade levels.",
+tagline:"Seven chapters, seven games, one boss. Read the codex to learn how Spark really works, then prove it in arcade levels with lives, combos and stars.",
+story:"Paydesk's nightly payments job takes 4 h 10 min. Finance needs its reports by 6 AM. Priya, your tech lead, gives you two weeks and one rule: understand it before you change it.",
 units:[
-{title:"How Spark runs your code", hue:28, desc:"Lazy plans, partitions, tasks and stages.",
+{title:"Act I · How Spark thinks", hue:28, desc:"Plans, partitions and stages.",
 items:[
-{id:"1", title:"Lazy plans and actions", mins:7, lab:"jobCounter", labTitle:"Job counter",
-sum:"Transformations only describe work. Actions make Spark do it, and every action can run the whole plan again.",
-mission:"A teammate's notebook scans the payments table seven times and nobody knows why. Learn to count jobs by reading code.",
-challenge:"Predict the right number of jobs for at least 4 of 5 snippets.",
-body:`## Two kinds of operations
-Spark splits DataFrame operations into two groups:
-- **Transformations** (filter, select, withColumn, join, groupBy) return a new DataFrame and only add a step to the plan. Nothing runs.
-- **Actions** (count, collect, show, write, toPandas) need a result, so Spark builds a physical plan and runs a **job**.
+/* ======================= CHAPTER 1 ======================= */
+{id:"1", title:"The plan before the work", mins:22,
+sum:"Spark builds a plan from your code, optimises it, compiles it, and only then runs anything.",
+scene:[
+ ["priya","Welcome to Paydesk. Our nightly job reads every payment, joins merchants, aggregates by day and writes the finance mart. It takes **4 hours 10 minutes**."],
+ ["arjun","And I need those numbers by 6 AM. Every morning I'm explaining to the CFO why they're late."],
+ ["priya","Before you touch it, learn how Spark reads code. Half the problems in this job are code that *looks* cheap and isn't."],
+ ["you","Where do I start?"],
+ ["priya","With one question: when does Spark actually do work? Read the codex, then show me you can tell a plan from a job, fast."]
+],
+game:{id:"planOrRun", title:"Plan or Run?"},
+codex:`## DataFrames are recipes, not results
+A DataFrame doesn't hold data. It holds a **logical plan**: a tree describing where data comes from and which operations to apply. When you write «df.filter(...).select(...)», Spark adds two nodes to the tree and returns immediately. No file is opened, no executor is busy. This is **lazy evaluation**, and it's what lets Spark optimise the whole pipeline before running any of it.
 
-:::flow What happens when you call an action
-Your transformations :: a chain of steps, the logical plan
-Action called :: e.g. df.count()
-Catalyst optimises :: pushes filters down, prunes columns, picks joins
-Physical plan → DAG of stages :: split at shuffles
-Tasks run on executors :: one per partition
-Result returns or is written :: the job finishes
-:::
+## Transformations and actions
+Operations fall into two groups:
+- **Transformations** return a new DataFrame and only extend the plan: «select», «filter», «withColumn», «join», «groupBy().agg()», «union», «orderBy», «repartition», «cache».
+- **Actions** need an actual result, so they trigger a **job**: «count», «collect», «show», «take», «first», «toPandas», «foreach», «write…save/saveAsTable/insertInto».
 
-## The trap: actions recompute everything
-A DataFrame is a recipe, not stored data. Each action re-reads the source and re-runs every transformation. Calling «df.count()» and then «df.write...» reads the input twice.
-
-:::lanes Without vs with cache
-# No cache
-count() :: read + filter + join, job 1
-show() :: read + filter + join again, job 2
-write() :: read + filter + join a third time, job 3
-# cache() then actions
-count() :: computes and keeps partitions in memory, job 1
-show() :: reads the cached partitions
-write() :: reads the cached partitions
-:::
-
-## When caching is worth it
-- The same DataFrame feeds **two or more actions** and is expensive to compute.
-- It fits comfortably in executor memory (or you use «MEMORY_AND_DISK»).
-- You call «unpersist()» when you are done.
-Caching something used once just wastes memory needed for shuffles and joins.
-
-:::note Some "transformations" sneak in jobs
-Reading CSV or JSON with schema inference, «sort» with range partitioning (it samples the data), and some «pivot» calls without explicit values can trigger extra small jobs. The Spark UI's Jobs tab shows every one.
-:::`,
-take:["Transformations build a plan; actions run jobs.","Every action recomputes the plan unless you cache.","Cache only DataFrames reused by several actions, then unpersist."]},
-
-{id:"2", title:"Partitions, tasks and the small-files problem", mins:8, lab:"partitionPlanner", labTitle:"Partition planner",
-sum:"Spark splits input into partitions; each partition becomes one task. Too many tiny files or partitions waste most of the time.",
-mission:"The first stage of the nightly job reads 500 GB stored as two million 250 KB files and takes minutes before any real work. Fix it.",
-challenge:"Bring the read stage under 90 seconds.",
-body:`## Partitions are the unit of parallelism
-When Spark reads files it groups their bytes into **input partitions**, about «spark.sql.files.maxPartitionBytes» each (128 MB by default). Each partition becomes one **task**, and each executor core runs one task at a time.
-
-:::flow From files to tasks
-List the files :: from the catalog or the storage listing
-Pack bytes into partitions :: up to maxPartitionBytes each
-One task per partition :: scheduled onto free cores
-Waves :: tasks ÷ total cores, rounded up
-Stage time ≈ waves × task time :: plus scheduling overhead
-:::
-
-## Why small files hurt
-Every file costs something regardless of size: a request to S3, opening it, reading its footer, and a little planning work. Spark even adds «spark.sql.files.openCostInBytes» (4 MB) per file when packing, to account for that overhead.
-| Layout | Files for 500 GB | Effect |
+Some cases surprise people:
+| Code | Runs a job? | Why |
 |---|---|---|
-| 250 KB files | 2,000,000 | Minutes of listing and opening before useful work |
-| 128 MB files | 4,000 | Good |
-| 512 MB files | 1,000 | Good, fewer, larger tasks |
+| «df.cache()» | No | Marks the DataFrame for caching; the next action fills the cache |
+| «df.checkpoint()» | Yes | Eager by default: computes and writes the data to reliable storage |
+| «spark.read.option("inferSchema", True).csv(p)» | Yes | Spark scans data to guess column types |
+| «spark.read.parquet(p)» | Small one at most | Schema comes from file footers; may list files |
+| «df.explain()» | No | Prints the plan only |
+| «df.columns», «df.schema» | No | Known from the plan |
+| «df.rdd.getNumPartitions()» | No | Plans the RDD but runs nothing |
+| «df.show()» | Yes | Runs a job that fetches the first rows (limit) |
+| «df.write.parquet(p)» | Yes | The most common action in pipelines |
 
-## Sizing partitions
-- Aim for roughly **100-500 MB per task** of input; small enough to fit in memory, large enough that overhead is minor.
-- Too few partitions leave cores idle and make each task heavy.
-- Too many partitions spend more time scheduling than computing.
-
-:::tip Fix the data, not just the reader
-Raising maxPartitionBytes only changes packing. The real fix for small files is to **compact** them where they are written (rewrite_data_files for Iceberg, or repartition before writing), so every future reader benefits.
-:::`,
-take:["One partition = one task; tasks run in waves across cores.","Each file has fixed overhead; millions of tiny files dominate runtime.","Compact files at write time and aim for 100-500 MB tasks."]},
-
-{id:"3", title:"Narrow vs wide: where stages begin", mins:7, lab:"stageCutter", labTitle:"Stage cutter",
-sum:"Stages break wherever data must move between partitions. Learn to spot shuffles by reading code.",
-mission:"The Spark UI shows 4 stages for a job you expected to run in one. Find out which lines create the boundaries.",
-challenge:"Place every stage boundary correctly in both pipelines.",
-body:`## Narrow transformations stay in place
-A **narrow** transformation computes each output partition from exactly one input partition: «filter», «select», «withColumn», «map», union of DataFrames. Spark chains these together and runs them in a single pass inside one task.
-
-## Wide transformations move data
-A **wide** transformation needs rows from many input partitions to land together: «groupBy().agg()», «join» (unless one side is broadcast), «distinct», «repartition», «orderBy», window functions with PARTITION BY. Spark must **shuffle**: write the data out by key, then read it back on the other side. Every shuffle ends one stage and starts the next.
-
-:::lanes Narrow vs wide
-# Narrow (pipelined)
-Partition 1 :: filter → select → withColumn
-Partition 2 :: filter → select → withColumn
-No data moves :: one stage
-# Wide (shuffle)
-Every partition :: writes rows grouped by key
-Network exchange :: each reducer fetches its keys from all mappers
-New stage :: aggregates, joins or sorts
+## From code to execution
+:::flow What happens when an action is called
+Unresolved logical plan :: names and columns not yet checked
+Analysis :: the catalog resolves tables, columns and types
+Logical optimisation :: Catalyst applies rewrite rules until nothing changes
+Physical planning :: strategies choose join algorithms, aggregations, scans
+Code generation :: Tungsten compiles stages into Java bytecode
+DAG scheduling :: the plan is cut into stages at shuffles
+Tasks run :: one per partition, on executor cores
 :::
 
-## Reading the plan
-In «df.explain()», every **Exchange** node is a shuffle and therefore a stage boundary. «BroadcastExchange» is different: it copies a small table to every executor and does not split the big side's stage.
+## Catalyst's logical optimisations
+Catalyst applies batches of rules repeatedly until the plan stops changing:
+- **Predicate pushdown:** filters move down, into the scan. For Parquet and Iceberg this means whole files and row groups are skipped using min/max statistics.
+- **Column pruning:** columns nobody uses are dropped, so the scan reads fewer column chunks.
+- **Constant folding and simplification:** «x > 1 + 2» becomes «x > 3»; «a AND true» becomes «a».
+- **Operator collapsing:** adjacent filters merge; adjacent projections merge.
+- **Join reordering:** with cost-based optimisation and statistics, joins are reordered to keep intermediate results small.
 
-| Operation | Shuffle? |
-|---|---|
-| filter, select, withColumn | No |
-| groupBy + agg | Yes (hash partitioning by key) |
-| join with a broadcast side | No for the big side |
-| join of two large tables | Yes, both sides |
-| orderBy | Yes (range partitioning) |
-| coalesce(n) | No (merges partitions locally) |
-| repartition(n) | Yes |`,
-take:["Narrow ops are pipelined inside a stage.","Wide ops shuffle and start a new stage.","Each Exchange in explain() is a stage boundary."]},
+### Cost-based optimisation needs statistics
+«spark.sql.cbo.enabled» uses table- and column-level statistics: row counts, distinct counts, min/max, null counts. Collect them with «ANALYZE TABLE t COMPUTE STATISTICS FOR COLUMNS merchant_id, created_at». Without statistics, Spark estimates from file sizes, which are often wrong after filters. Adaptive Query Execution (chapter 5) fixes many bad estimates at runtime.
 
-{id:"q1", kind:"quiz", title:"Checkpoint: how Spark runs your code", mins:3,
+## Physical planning and Tungsten
+For each logical operator, planner strategies produce physical candidates: broadcast hash join or sort-merge join, hash aggregate or sort aggregate. Then **Tungsten** makes execution efficient:
+- **UnsafeRow:** rows stored as compact binary in managed memory, not Java objects, so less garbage collection.
+- **Whole-stage code generation:** a chain like scan → filter → project → partial aggregate becomes *one* generated Java method with a tight loop, instead of virtual calls per row per operator. In «explain()» output, operators marked «*(1)» run inside generated stage 1.
+- **Vectorised reads:** Parquet and ORC are read in column batches, thousands of values at a time.
+
+## Reading explain output
+~~~
+daily = (spark.table("lake.pay.payments")
+           .filter("created_at >= '2026-11-16' AND status = 'SUCCESS'")
+           .groupBy("merchant_id").agg(F.sum("amount").alias("gmv")))
+daily.explain("formatted")
+
+(1) BatchScan lake.pay.payments
+    Output: [merchant_id, amount, status, created_at]
+    PushedFilters: [created_at >= 2026-11-16, status = SUCCESS]
+(2) Filter                      -- re-checks rows; the scan skipped whole files
+(3) Project [merchant_id, amount]
+(4) HashAggregate (partial)     *(1)  -- pre-aggregates before the shuffle
+(5) Exchange hashpartitioning(merchant_id, 200)
+(6) HashAggregate (final)       *(2)
+~~~
+Check four things: **PushedFilters / PartitionFilters** reached the scan; the scan's **Output** lists only needed columns; count the **Exchange** nodes (each is a shuffle); and the **join node names**.
+
+## Caching: when and how
+Without caching, every action recomputes the plan from source. Calling «count()» then «write()» reads and processes the input twice.
+| Storage level | Where | Use |
+|---|---|---|
+| MEMORY_AND_DISK | Memory, spill to disk | Default for «DataFrame.cache()» |
+| MEMORY_ONLY | Memory; recompute evicted parts | Small, hot data |
+| DISK_ONLY | Local disk | Expensive to compute, too big for memory |
+| OFF_HEAP | Off-heap memory | Rare; needs off-heap configured |
+
+:::lanes Cache vs checkpoint vs write a table
+# cache / persist
+Keeps partitions on executors :: fast reuse in this application
+Lineage is kept :: lost partitions are recomputed
+Gone when the app ends :: or on unpersist()
+# checkpoint
+Writes data to reliable storage :: HDFS or S3 checkpoint dir
+Truncates lineage :: useful for very long iterative plans
+Eager by default :: runs a job immediately
+# Write an intermediate table
+Durable and visible to other jobs :: Iceberg or Parquet
+Restartable pipeline :: rerun only later steps
+Costs storage and a write :: worth it for expensive steps
+:::
+
+Cache only when a DataFrame feeds **two or more actions** and is expensive to compute; call «unpersist()» when you're done. Cached data competes with execution memory for shuffles and joins.
+
+:::warn UDFs blind the optimiser
+A Python or Scala UDF is opaque. Catalyst can't push a UDF-based filter into the scan, can't prune columns the UDF might use, and the UDF breaks whole-stage code generation. Python UDFs also serialise every row to a Python worker. Prefer built-in functions; if you must use Python, use pandas UDFs (Arrow-batched).
+:::
+
+## Mistakes that cost hours
+- «df.count()» just to log row counts in production code: a whole extra job each time.
+- Caching a DataFrame used once.
+- «inferSchema» on large CSV in a nightly job: an extra full scan. Declare the schema.
+- Filters written on transformed columns (cast, date_format) that can't be pushed down.
+- Calling «collect()» on large results: everything goes to the driver.`,
+iq:[
+ ["B","What's the difference between a transformation and an action?","Transformations return a new DataFrame and only extend the logical plan; nothing runs. Actions need a result (count, show, collect, write), so Spark optimises the plan and runs a job. Laziness lets Catalyst optimise the whole pipeline at once."],
+ ["I","Is cache() an action? What happens when you call it?","No. cache() marks the DataFrame to be stored at MEMORY_AND_DISK; the first action that computes it fills the cache, and later actions read cached partitions. checkpoint(), by contrast, is eager by default and runs a job immediately."],
+ ["I","How do you check that predicate pushdown worked?","Run explain('formatted') and look at the scan node: PushedFilters and PartitionFilters should list your conditions, and Output should list only needed columns. If a filter is missing, look for casts, functions or UDFs wrapping the column."],
+ ["S","What does whole-stage code generation do and why is it faster?","It fuses a chain of operators inside a stage into a single generated Java method with a tight loop, instead of each operator calling the next per row through iterators. That removes virtual calls and object creation and lets the JIT optimise the loop. Operators marked *(n) in explain output run in generated stage n."],
+ ["S","When would you checkpoint instead of cache?","When the lineage is very long (iterative algorithms, many chained transformations), so recomputing a lost partition would be expensive or the plan itself becomes huge. Checkpoint writes to reliable storage and truncates lineage. For pipeline restartability, writing an intermediate table is often better still."]
+],
+take:["Transformations build a plan; actions run jobs.","Catalyst pushes filters and prunes columns; check explain() to confirm.","Cache only DataFrames reused by several actions, then unpersist.","UDFs block pushdown and code generation."]},
+
+/* ======================= CHAPTER 2 ======================= */
+{id:"2", title:"Partitions, tasks and the small-files trap", mins:24,
+sum:"How Spark cuts data into partitions, schedules tasks in waves, and why millions of tiny files ruin everything.",
+scene:[
+ ["ui","Stage 0 · 2,097,152 files listed · 69,212 tasks · median task 0.9 s · stage time 8 min 49 s"],
+ ["you","Sixty-nine thousand tasks just to read 500 GB?"],
+ ["priya","The upstream streaming job writes a new file every few seconds. Two million tiny files. Spark spends more time opening files than reading them."],
+ ["ravi","And every one of those tasks hits S3. We get throttled at 3 AM."],
+ ["priya","Learn how partitions and tasks work, then fix the layout. Packing data well is a puzzle; let's see you solve it."]
+],
+game:{id:"packer", title:"Partition Packer"},
+codex:`## Three kinds of partitions
+"Partition" means three different things in Spark, and mixing them up causes confusion:
+| Kind | Decided by | Typical setting |
+|---|---|---|
+| Input partitions (reading files) | File sizes and split settings | spark.sql.files.maxPartitionBytes |
+| Shuffle partitions (after groupBy, join) | Shuffle partition count, AQE | spark.sql.shuffle.partitions |
+| Table partitions (on storage) | How the table is laid out | PARTITIONED BY (days(created_at)) |
+This chapter is mostly about the first and third; shuffle partitions are chapter 4.
+
+## How Spark splits files into input partitions
+For file sources, Spark computes a target split size:
+~~~
+bytesPerCore  = totalBytes / defaultParallelism
+maxSplitBytes = min(maxPartitionBytes, max(openCostInBytes, bytesPerCore))
+~~~
+- «spark.sql.files.maxPartitionBytes» defaults to **128 MB**.
+- «spark.sql.files.openCostInBytes» defaults to **4 MB**: an estimate of the cost of opening a file, expressed as bytes. Each file is counted as at least this big when packing.
+Large splittable files are cut into maxSplitBytes chunks (for Parquet, aligned to row groups). Small files are packed together into partitions until a partition reaches maxSplitBytes. Non-splittable files (gzip-compressed CSV or JSON) become one partition each, however big they are.
+
+## Tasks, cores and waves
+:::flow From partitions to stage time
+One task per partition :: the unit of scheduling
+Tasks run on executor cores :: one task per core at a time
+Waves = tasks ÷ total cores :: rounded up
+Stage time ≈ waves × typical task time :: plus the slowest task in the last wave
+:::
+Example: 500 GB in 128 MB partitions is about 4,000 tasks. On 200 cores that's 20 waves. If each task takes 3 seconds, the stage takes about a minute, as long as no task is much slower than the rest.
+
+### Stragglers
+The stage isn't done until its slowest task finishes. One slow node, one oversized partition, or one skewed key creates a **straggler**. «spark.speculation=true» launches duplicate copies of very slow tasks on other executors and uses whichever finishes first: useful for flaky nodes, useless for skew (the copy has the same data).
+
+## The small-files problem
+Every file has fixed costs regardless of size:
+- **Listing:** S3 returns 1,000 keys per LIST request; two million files means thousands of requests before planning even ends (table formats avoid this by tracking files in metadata).
+- **Opening:** an HTTP request and connection per file, often plus a footer read for Parquet.
+- **Metadata:** each file is an entry in Iceberg manifests or Hive partitions; planning slows down.
+- **Packing overhead:** with openCostInBytes, two million 250 KB files count as ~8.4 TB for packing purposes, producing tens of thousands of tasks.
+- **S3 throttling:** around 5,500 GET requests per second per prefix before you see 503 Slow Down errors.
+
+:::lanes Where small files come from
+# Streaming writers
+Commit every few seconds :: each commit writes new files
+Many partitions × many tasks :: files multiply
+# Over-partitioned tables
+Partitioned by hour, or by a high-cardinality column :: tiny partitions
+Each partition gets its own files :: per task
+# Careless batch writes
+200 shuffle partitions × 30 dates :: up to 6,000 files
+No repartition before write :: every task writes to every date
+:::
+
+## Fixing small files
+1. **Compact where they live.** For Iceberg: «CALL system.rewrite_data_files(table => 'pay.payments', options => map('target-file-size-bytes','536870912'))». For Hive-style tables: rewrite partitions with a repartition. Schedule it.
+2. **Write well in the first place.** Repartition by the table's partition columns before writing, so each task writes few partition values:
+~~~
+(df.repartition("dt")                      # rows for a date go to the same task
+   .sortWithinPartitions("merchant_id")     # tight min/max per file
+   .writeTo("lake.pay.payments").overwritePartitions())
+
+# Iceberg can do the distribution for you
+spark.sql("ALTER TABLE lake.pay.payments SET TBLPROPERTIES ("
+          "'write.distribution-mode'='hash', 'write.target-file-size-bytes'='536870912')")
+~~~
+3. **Cap file size** with «maxRecordsPerFile» when one partition value holds a lot of data.
+4. **Streaming:** longer trigger or checkpoint intervals, plus scheduled compaction.
+Raising maxPartitionBytes only hides the reader-side cost for one job; compaction fixes it for every reader.
+
+## repartition vs coalesce
+| | repartition(n) | coalesce(n) |
+|---|---|---|
+| Shuffle | Yes, full | No |
+| Can increase partitions | Yes | No |
+| Balance | Even (hash or round-robin) | Merges neighbours; can be uneven |
+| Upstream parallelism | Unaffected | Reduced if placed early (the whole stage runs with n tasks) |
+Use coalesce at the very end to reduce output files cheaply; use repartition when you need balance, more partitions, or a specific key distribution.
+
+## Choosing sizes
+- Input tasks of roughly **128-512 MB** each.
+- Data files of roughly **256 MB-1 GB** in the lake.
+- Table partitions that hold at least a few hundred MB: partition by day, not by hour, for a table that gets 1 GB a day.
+
+:::tip Quick diagnosis
+Stage with tens of thousands of sub-second tasks → small files or tiny partitions. Stage with a few hundred multi-minute tasks and spills → partitions too big. Look at the task count and median duration first.
+:::`,
+iq:[
+ ["B","Why are many small files bad?","Each file has fixed overhead: listing, opening, footer reads, metadata entries and task scheduling. Millions of tiny files make planning slow, create huge numbers of tiny tasks, trigger S3 throttling, and spend more time on overhead than on reading data."],
+ ["I","How does Spark decide input partition sizes for files?","It computes maxSplitBytes = min(maxPartitionBytes, max(openCostInBytes, totalBytes / defaultParallelism)), splits large splittable files into chunks of that size, and packs small files together, counting each file as at least openCostInBytes. Non-splittable files like gzip CSV become one partition each."],
+ ["I","repartition or coalesce before writing output?","coalesce is cheaper (no shuffle) and fine for reducing file count at the end if partitions are reasonably balanced, but it can shrink upstream parallelism if the optimiser pushes it earlier. repartition (often by the table's partition column) shuffles but gives even files and groups each partition value into few tasks."],
+ ["S","A job writes 40,000 files a day into an Iceberg table. How do you fix it?","Set write.distribution-mode to hash (or repartition by partition columns) so each task writes few partition values, set write.target-file-size-bytes, sort by a common filter column, and let AQE coalesce shuffle partitions. Schedule rewrite_data_files for residual small files and check the partition spec isn't too fine."]
+],
+take:["One partition becomes one task; tasks run in waves across cores.","Small files cost listing, opening, metadata and tasks; compact them where they're written.","Use repartition for balance, coalesce for cheap file-count reduction at the end."]},
+
+/* ======================= CHAPTER 3 ======================= */
+{id:"3", title:"Stages, shuffles and the DAG", mins:20,
+sum:"Spark cuts every job into stages at shuffle boundaries. Read code the way the DAG scheduler does.",
+scene:[
+ ["ui","Job 14 · 6 stages · Stage 3: Exchange hashpartitioning(merchant_id, 200) · shuffle write 1.1 TB"],
+ ["you","Six stages for one write? I counted two shuffles in my head."],
+ ["priya","Then your head is missing four. Every Exchange in the plan is a stage boundary, and each one writes everything to disk and sends it over the network."],
+ ["priya","Train your eye. In this level, operations roll past on a conveyor. Catch every shuffle before it escapes, and don't touch the narrow ones."]
+],
+game:{id:"shuffleHunter", title:"Shuffle Hunter"},
+codex:`## Narrow and wide dependencies
+Every DataFrame operation creates a dependency between the partitions of its input and output:
+- **Narrow:** each output partition depends on a bounded set of input partitions, usually one. «filter», «select», «withColumn», «union», «coalesce», «sample». No data crosses the network.
+- **Wide:** an output partition depends on data from many or all input partitions. «groupBy().agg()», «join» of two large tables, «distinct», «dropDuplicates», «orderBy», «repartition», window functions with «PARTITION BY». Data must be **shuffled**.
+
+## How the DAG scheduler cuts stages
+:::flow From a job to stages
+Action submits a job :: with the final physical plan
+Scheduler walks back from the result :: following dependencies
+Each wide dependency ends a stage :: a ShuffleMapStage writes shuffle files
+Narrow operations are pipelined :: chained inside the same stage
+Stages run in dependency order :: parents first, independent stages in parallel
+The last stage is the ResultStage :: it returns rows or writes output
+:::
+Inside a stage, all narrow operations run back-to-back in each task: one pass over the data, no intermediate materialisation. Whole-stage code generation (chapter 1) turns that chain into a single loop.
+
+## Which operations shuffle?
+| Operation | Shuffle? | Notes |
+|---|---|---|
+| filter, select, withColumn, explode | No | Narrow |
+| union | No | Partitions are concatenated |
+| coalesce(n) | No | Merges partitions locally |
+| repartition(n), repartition(col) | Yes | Round-robin or hash |
+| groupBy().agg() | Yes | Partial aggregation first reduces data |
+| distinct / dropDuplicates | Yes | Hash on all (or chosen) columns |
+| join, small side broadcast | No for the big side | BroadcastExchange copies the small side |
+| join, both sides large | Yes | Both sides hash-partitioned by key |
+| orderBy / sort | Yes | Range partitioning after sampling |
+| sortWithinPartitions | No | Sorts each partition locally |
+| Window with PARTITION BY | Yes | Hash by partition keys, then sort |
+| Window without PARTITION BY | Yes, to one partition | Everything goes to a single task |
+
+## Partial aggregation shrinks shuffles
+For «groupBy(merchant_id).sum(amount)», Spark doesn't shuffle every row. Each task first aggregates its own rows (HashAggregate partial), then only one row per merchant per task crosses the network, and a final HashAggregate combines them. That's why aggregations are often cheap to shuffle while joins and distinct on high-cardinality keys are not.
+
+## Reading the plan for stage boundaries
+~~~
+== Physical Plan ==
+*(5) Project [...]
++- *(5) SortMergeJoin [merchant_id], [merchant_id], Inner
+   :- *(2) Sort [merchant_id ASC]
+   :  +- Exchange hashpartitioning(merchant_id, 4000)       <- shuffle 1
+   :     +- *(1) Filter (status = SUCCESS)
+   :        +- *(1) ColumnarToRow
+   :           +- BatchScan lake.pay.payments
+   +- *(4) Sort [merchant_id ASC]
+      +- Exchange hashpartitioning(merchant_id, 4000)       <- shuffle 2
+         +- *(3) Filter isnotnull(merchant_id)
+            +- BatchScan lake.pay.merchants
+~~~
+Each «Exchange» is a boundary. Here two scan stages feed one join stage. Replace the merchants side with a broadcast and the second exchange disappears; so does the shuffle of the big side.
+
+## Skipped stages and exchange reuse
+In the Spark UI you'll see **skipped** stages. When a later job needs the output of a shuffle that was already written (same lineage), Spark reuses the shuffle files instead of recomputing. «ReusedExchange» in a plan means the same exchange appears twice (for example a self-join) and is computed once.
+
+## Fault tolerance comes from lineage
+If an executor dies, Spark recomputes only the lost partitions by replaying their lineage from the last shuffle files. If shuffle files themselves are lost, the parent stage is partially re-run (that's a FetchFailed in chapter 4). Long lineages without shuffles or checkpoints are expensive to recover.
+
+## Avoiding shuffles you don't need
+- **Broadcast** small dimension tables (chapter 5).
+- **Pre-aggregate** before joining: join merchants to daily totals, not to every payment.
+- **Bucketed or storage-partitioned joins:** two tables bucketed identically by the join key can join without a shuffle.
+- **Don't repartition twice:** a repartition right before a groupBy on the same key is wasted.
+- **Global sort only when required:** sortWithinPartitions is enough for writing well-clustered files.`,
+iq:[
+ ["B","What creates a new stage in Spark?","A wide dependency, which requires a shuffle: groupBy aggregations, joins of two large tables, distinct, repartition, orderBy, window functions with PARTITION BY. Narrow operations are pipelined within the current stage."],
+ ["I","Why is a groupBy aggregation often cheaper to shuffle than a join?","Spark does partial (map-side) aggregation: each task aggregates its own rows first, so only one row per key per task is shuffled. A join has to shuffle every row of both sides."],
+ ["I","What are skipped stages in the Spark UI?","Stages whose shuffle output already exists from an earlier job with the same lineage. Spark reuses those shuffle files instead of recomputing the stage."],
+ ["S","How does Spark recover when an executor dies mid-job?","Lost cached or in-progress partitions are recomputed from lineage. If the executor held shuffle output needed downstream, reducers get FetchFailed and the scheduler re-runs the affected map tasks of the parent stage, then retries the downstream stage. The external shuffle service or decommissioning with shuffle migration reduces this cost."]
+],
+take:["Narrow ops are pipelined; wide ops shuffle and start a stage.","Every Exchange in explain() is a stage boundary.","Partial aggregation shrinks shuffles; broadcasts remove them."]},
+
+{id:"q1", kind:"quiz", title:"Act I checkpoint", mins:4,
 questions:[
- {q:"df = spark.read.parquet(p).filter(...).select(...) — how many jobs have run?", o:["0","1","2","Depends on file count"], a:0, e:"Reading Parquet with a known schema and adding transformations only builds a plan. Nothing runs until an action."},
- {q:"You call count() and then write() on the same uncached DataFrame. What happens?", o:["The second action reuses the first result","The input is read and processed twice","Spark errors","Only the write runs"], a:1, e:"Without caching, each action recomputes the plan from the source."},
- {q:"500 GB in 128 MB partitions on a cluster with 200 cores runs in about how many waves?", o:["1","4","20","4,000"], a:2, e:"500 GB / 128 MB ≈ 4,000 tasks; 4,000 / 200 cores = 20 waves."},
- {q:"Which operation does NOT cause a shuffle?", o:["groupBy().count()","distinct()","withColumn()","repartition(100)"], a:2, e:"withColumn is narrow: each output partition depends on one input partition."},
- {q:"Best long-term fix for millions of small files?", o:["More executors","Compact the files where they are written","Raise driver memory","Cache the table"], a:1, e:"Compaction fixes the layout for every reader; reader tuning only hides the cost."}
+ {q:"Which of these runs a Spark job immediately?", o:["df.cache()","df.checkpoint()","df.explain()","df.columns"], a:1, e:"checkpoint() is eager by default; cache() is lazy and only marks the DataFrame."},
+ {q:"500 GB in 128 MB input partitions on 200 cores: roughly how many waves?", o:["1","4","20","4,000"], a:2, e:"About 4,000 tasks / 200 cores = 20 waves."},
+ {q:"Why does reading 2 million 250 KB files produce so many tasks?", o:["Parquet can't be split","Each file counts as at least openCostInBytes (4 MB) when packing","S3 limits partitions","Spark uses one task per file always"], a:1, e:"Packing treats each file as ≥ 4 MB, so tiny files inflate the task count."},
+ {q:"Which operation does NOT shuffle?", o:["distinct()","sortWithinPartitions()","orderBy()","repartition(100)"], a:1, e:"sortWithinPartitions sorts each partition locally without moving data."},
+ {q:"A window function with no PARTITION BY on 1 TB will…", o:["Run in parallel everywhere","Send all rows to a single task","Be skipped","Broadcast"], a:1, e:"Without partition keys, all rows must be in one partition to compute the window."},
+ {q:"Speculation helps most with…", o:["Data skew","A flaky or slow node","Small files","Spills"], a:1, e:"A duplicate task on another node helps hardware slowness, not data that is genuinely bigger."}
 ]}
 ]},
 
-{title:"Shuffles, joins and skew", hue:205, desc:"Where most Spark time and money goes.",
+{title:"Act II · Data on the move", hue:205, desc:"Shuffles, joins, skew and memory.",
 items:[
-{id:"4", title:"Inside a shuffle", mins:8, lab:"shuffleSim", labTitle:"Shuffle simulator",
-sum:"Every map task writes a block for every reducer. Partition counts decide whether the shuffle is fast or a disaster.",
-mission:"The join stage shuffles 1 TB and keeps failing with fetch timeouts. Find shuffle settings that keep blocks and partitions healthy.",
-challenge:"Keep reduce partitions between 100 and 300 MB and avoid the tiny-block problem.",
-body:`## Two sides of a shuffle
-:::flow Map side, then reduce side
-Map tasks compute a target partition per row :: hash(key) % spark.sql.shuffle.partitions
-Rows are sorted by target partition :: spilled to disk if memory fills
-One data file + index file per map task :: on the executor's local disk
-Reduce tasks fetch their block from every map task :: over the network
-Reducers merge and process :: aggregate, join or sort
+/* ======================= CHAPTER 4 ======================= */
+{id:"4", title:"Inside a shuffle", mins:24,
+sum:"Map tasks write sorted blocks, reducers fetch one from every mapper. Hash partitioning decides who gets what.",
+scene:[
+ ["ravi","3:12 AM. FetchFailedException on stage 4. Then again at 3:40. Then the spot nodes went away."],
+ ["you","What's actually being fetched?"],
+ ["priya","Shuffle blocks. Every map task writes one block for every reducer: 4,000 mappers times 4,000 reducers is sixteen million blocks, mostly tiny."],
+ ["priya","To feel it, be the partitioner. Rows arrive with a key hash; send each one to the reducer that owns it. Fast."]
+],
+game:{id:"hashRouter", title:"Hash Router"},
+codex:`## Why rows have to move
+Wide operations need rows with the same key in the same task. Rows start spread across every input partition, so Spark redistributes them by key: the shuffle. It's usually the most expensive thing a job does: rows are serialised, sorted, written to local disk, sent over the network, read back and deserialised.
+
+## Who gets which row
+For hash partitioning (groupBy, join, repartition by column):
+~~~
+target = pmod(murmur3_hash(key), spark.sql.shuffle.partitions)
+~~~
+Every row with the same key lands in the same reduce partition. Change the number of partitions and almost every key moves to a different reducer: harmless here because the shuffle is recomputed each run, but the same maths is why Kafka warns you about adding partitions.
+
+## The map side
+:::flow Writing shuffle output (sort-based shuffle)
+Compute the target partition :: hash(key) % numPartitions for each row
+Buffer records in memory :: ordered by target partition
+Spill sorted runs when memory fills :: to local disk
+Merge runs into one data file :: ordered by target partition
+Write an index file :: byte offset where each reducer's block starts
+Report locations to the driver :: the MapOutputTracker
+:::
+Spark picks one of three writers:
+| Writer | When | Why |
+|---|---|---|
+| BypassMergeSortShuffleWriter | Few partitions (≤ 200) and no map-side aggregation | Writes one file per reducer then concatenates; avoids sorting |
+| UnsafeShuffleWriter (serialized) | Serializer supports relocation, no aggregation, < 16M partitions | Sorts serialized bytes by partition ID; very efficient |
+| SortShuffleWriter | Everything else, e.g. map-side combine | General path; sorts deserialised records |
+
+## The reduce side
+:::flow Reading shuffle input
+Ask where blocks live :: MapOutputTracker returns locations and sizes
+Fetch blocks from every map output :: in parallel, up to maxSizeInFlight (48 MB)
+Decompress and deserialise :: LZ4 by default
+Aggregate, sort or join :: spilling to disk if it doesn't fit
+Produce the stage output :: or feed the next shuffle
 :::
 
 ## The M × R problem
-With M map tasks and R reduce partitions there are **M × R blocks**. 4,000 map tasks × 4,000 reducers = 16 million blocks. If 1 TB is shuffled, each block averages about 60 KB: millions of tiny random reads, slow fetches, and timeouts.
-
-## Choosing shuffle partitions
-| Too few reducers | Too many reducers |
+There are M × R blocks: every reducer fetches one from every mapper. 4,000 × 4,000 = 16 million blocks. If 1 TB is shuffled, each averages ~65 KB. Tiny blocks mean millions of small random disk reads and network requests, slow stages with idle CPUs, and fetch timeouts.
+| Fix | Effect |
 |---|---|
-| Huge partitions (GBs each) | Tiny partitions |
-| Spills to disk, out-of-memory errors | Tiny blocks, scheduling overhead |
-| Few tasks, idle cores | Small output files |
-Target about **100-300 MB per reduce partition**: partitions ≈ shuffled bytes ÷ 200 MB. With AQE on, set the number high and let Spark coalesce small partitions at runtime.
+| Shuffle less data | Filter and project early, pre-aggregate, broadcast small sides |
+| Fewer map tasks | Larger input splits or compacted files |
+| Sensible reduce partitions | ~100-300 MB each; let AQE coalesce |
+| Push-based shuffle (Spark 3.2+, YARN) | Mappers push blocks to shuffle services that merge them per reducer |
+| Remote shuffle service (Celeborn, Uniffle) | Shuffle data lives on dedicated servers; good for Kubernetes and spot |
 
-:::tip When blocks are tiny no matter what
-Reduce the map side too (larger input splits), shuffle less data (filter and project before the shuffle, pre-aggregate), or use **push-based shuffle** / a remote shuffle service, which merges blocks per reducer so reducers read a few large files.
+## Choosing the number of shuffle partitions
+The default of 200 is a placeholder. Size by data: **partitions ≈ shuffled bytes ÷ 200 MB**. With AQE («spark.sql.adaptive.enabled», on by default since Spark 3.2), set a generous number and let Spark coalesce:
+~~~
+spark.conf.set("spark.sql.shuffle.partitions", "4000")
+spark.conf.set("spark.sql.adaptive.coalescePartitions.enabled", "true")
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "256m")
+~~~
+At each shuffle boundary AQE looks at actual partition sizes and merges small neighbours up to the advisory size.
+
+## Where shuffle files live, and why executors dying hurts
+Shuffle files sit on the executor's local disks. Lose the executor and its blocks are gone; reducers throw **FetchFailedException**, Spark marks those map outputs lost, re-runs the needed map tasks and retries. Ways to protect them:
+- The **external shuffle service** serves files from a separate process on the node, so they survive executor removal (needed for dynamic allocation on YARN).
+- **Graceful decommissioning** («spark.decommission.enabled», shuffle block migration) moves blocks off nodes about to be reclaimed.
+- **Remote shuffle services** take shuffle data off executors entirely.
+
+:::warn Signs of a shuffle in trouble
+Shuffle read time much larger than compute time; "Fetch wait time" high; repeated FetchFailed on the same hosts; local disks filling up; huge "Shuffle spill (disk)". Fix the data volume first, then the partitioning, then the infrastructure.
 :::
 
-## Shuffle files and failures
-Shuffle files sit on executor disks. If an executor disappears (for example a spot node is reclaimed), its blocks are lost, reducers hit FetchFailedException and Spark re-runs part of the map stage. The external shuffle service, graceful decommissioning or a remote shuffle service keep those files available.`,
-take:["A shuffle has M × R blocks; tiny blocks kill performance.","Size reduce partitions around 100-300 MB; let AQE coalesce.","Shuffle less data before tuning partition counts."]},
+## Settings worth knowing
+| Setting | Default | Note |
+|---|---|---|
+| spark.sql.shuffle.partitions | 200 | Size it to your data |
+| spark.sql.adaptive.advisoryPartitionSizeInBytes | 64 MB | AQE coalescing target |
+| spark.reducer.maxSizeInFlight | 48 MB | Fetch parallelism per reducer |
+| spark.shuffle.file.buffer | 32 KB | Bigger buffer, fewer disk writes |
+| spark.shuffle.compress / io.compression.codec | true / lz4 | Keep compression on; zstd for better ratios |
+| spark.shuffle.sort.bypassMergeThreshold | 200 | Bypass writer threshold |`,
+iq:[
+ ["I","What files does a map task produce in sort-based shuffle?","One data file holding all its output ordered by target reduce partition, plus an index file with the byte offset of each partition's block. Reducers use the index to fetch only their block."],
+ ["I","How would you choose spark.sql.shuffle.partitions?","Divide the shuffled data size by a target of about 100-300 MB per partition. With AQE enabled, set it generously and let coalescing merge small partitions toward the advisory size."],
+ ["S","Explain the M × R problem and how push-based shuffle helps.","Every reducer fetches one block from every map task, so blocks grow as M×R and become tiny, causing millions of small random reads. Push-based shuffle has map tasks push blocks to shuffle services which merge them per reduce partition, so reducers read a few large merged files."],
+ ["S","A job repeatedly fails with FetchFailedException on spot instances. What do you do?","The lost nodes held shuffle files. Use on-demand core nodes for shuffle-heavy stages, enable graceful decommissioning with shuffle migration or the external shuffle service, consider a remote shuffle service, reduce partition sizes so recomputation is cheaper, and tune network timeouts and retries."]
+],
+take:["Hash partitioning sends each key to exactly one reducer.","M × R blocks: keep blocks and partitions sensibly sized.","Protect shuffle files from executor loss on spot clusters."]},
 
-{id:"5", title:"Choosing a join strategy", mins:8, lab:"joinPicker", labTitle:"Join strategy game",
-sum:"Spark picks between broadcast, shuffle hash, sort-merge and nested-loop joins. Knowing why tells you how to make joins cheap.",
-mission:"Five joins in the nightly job, five different situations. Pick the strategy Spark should use for each.",
-challenge:"Choose the right strategy in at least 4 of 5 scenarios.",
-body:`## The four strategies
-:::lanes How each strategy works
+/* ======================= CHAPTER 5 ======================= */
+{id:"5", title:"Join strategies", mins:22,
+sum:"Broadcast, shuffle hash, sort-merge or nested loop: how Spark chooses, and how you make joins cheap.",
+scene:[
+ ["ui","Stage 6 · SortMergeJoin · payments 2.1 TB × merchants 58 MB · shuffle write 2.2 TB"],
+ ["you","We're shuffling two terabytes to join a 58 MB table?"],
+ ["priya","Statistics are stale, so Spark thinks merchants is huge. That's one join. There are seven more in the codebase, all different."],
+ ["priya","The Slow Query is waiting for you. Every right strategy hits it; every wrong one heals it."]
+],
+game:{id:"joinDuel", title:"Join Duel"},
+codex:`## The four physical join strategies
+:::lanes How each strategy executes
 # Broadcast hash join
-Collect the small side :: on the driver
-Send a copy to every executor :: broadcast
-Each task joins its big-side partition locally :: no shuffle of the big table
+Driver collects the small side :: then broadcasts it to every executor
+Each task builds a hash table :: from the broadcast copy
+Each big-side partition probes it :: no shuffle of the big side
+# Shuffle hash join
+Shuffle both sides by key :: same partitioner
+Build a hash table per partition :: from the smaller side
+Probe with the other side :: no sort, but the build side must fit in memory
 # Sort-merge join
 Shuffle both sides by key :: same partitioner
-Sort each partition :: may spill to disk
-Merge matching keys :: robust for huge inputs
-# Shuffle hash join
-Shuffle both sides by key :: like sort-merge
-Build a hash table per partition :: on the smaller side
-Probe with the other side :: no sort, needs memory
+Sort each partition by key :: spills to disk if needed
+Merge the sorted streams :: robust for any size
 # Broadcast nested loop
-Broadcast one side :: required for non-equi joins
-Compare every pair :: very expensive
-Avoid at scale :: rewrite to an equi-join when possible
+Broadcast one side :: required for non-equi conditions
+Compare every pair of rows :: O(n × m)
+Only for small inputs :: or rewrite the condition
 :::
 
-## How Spark decides
-1. **Hints** win: «broadcast(df)», «/*+ MERGE */», «/*+ SHUFFLE_HASH */».
-2. For equi-joins, if one side's estimated size is under «spark.sql.autoBroadcastJoinThreshold» (10 MB by default), it is broadcast.
-3. Otherwise sort-merge join is the default, because it can spill and rarely runs out of memory.
-4. Non-equi joins (ranges, inequalities) fall back to broadcast nested loop or a cartesian product.
-With AQE enabled, Spark can switch a planned sort-merge join to a broadcast join at runtime if one side turns out small after filtering.
+## How Spark chooses
+1. **Hints first:** «broadcast(df)» or «/*+ BROADCAST(m) */», «/*+ MERGE */», «/*+ SHUFFLE_HASH */», «/*+ SHUFFLE_REPLICATE_NL */».
+2. For **equi-joins**, if one side's estimated size is below «spark.sql.autoBroadcastJoinThreshold» (10 MB default) and the join type allows that side to be broadcast, use broadcast hash join.
+3. Else if «spark.sql.join.preferSortMergeJoin» is false and one side is much smaller and fits per partition, shuffle hash join.
+4. Else **sort-merge join**: the safe default.
+5. **Non-equi joins** (ranges, inequalities): broadcast nested loop if one side is small enough, otherwise a cartesian product. Very expensive at scale.
 
-| Situation | Usually best |
+### Which side can be broadcast?
+| Join type | Can broadcast |
 |---|---|
-| Big fact × small dimension (tens of MB) | Broadcast hash |
-| Big × big on an equality key | Sort-merge |
-| Big × medium, medium side fits per-partition in memory | Shuffle hash |
-| Range condition, small side | Broadcast nested loop |
+| Inner | Either side |
+| Left outer, left semi, left anti | Right side only |
+| Right outer | Left side only |
+| Full outer | Neither (falls back to sort-merge) |
 
-:::warn Broadcasting too much
-Size on disk is not size in memory: a 300 MB compressed Parquet table can expand to several GB and crash executors or the driver. Broadcast only sides that are comfortably small in memory.
-:::`,
-take:["Broadcast small sides to avoid shuffling the big one.","Sort-merge is the safe default for big × big.","Non-equi joins are expensive; avoid them on large data."]},
+## Why estimates go wrong, and AQE
+Spark decides from **estimated** sizes: table statistics, or file sizes. A 2 TB table filtered to one day may be tiny, but the static plan doesn't know. Stale or missing statistics make small tables look big.
+With **Adaptive Query Execution**, Spark re-plans at shuffle boundaries using real sizes: a sort-merge join whose side turns out smaller than «spark.sql.adaptive.autoBroadcastJoinThreshold» is converted to a broadcast join at runtime. AQE can also convert to shuffle hash joins when partitions are small (local shuffle reader avoids reading across the network).
 
-{id:"6", title:"Taming skew", mins:9, lab:"skewFix", labTitle:"Skew fixer",
-sum:"One hot key can make one task run for an hour while 199 finish in a minute. Measure it, then split it.",
-mission:"One merchant generates 40% of all payments. The join stage waits on a single task. Make the stage finish on time.",
-challenge:"Get the slowest task under 2× the median task time.",
-body:`## What skew looks like
-In the Spark UI's stage page, the task summary shows the median task taking 40 seconds and the max taking 40 minutes. Shuffle read size for that one task is enormous. The stage, and the whole job, waits for it.
+## Broadcasting safely
+- Size on disk ≠ size in memory. A 300 MB Parquet table can decompress to several GB as a hash table.
+- The broadcast is built on the **driver** first: large broadcasts need driver memory («spark.driver.maxResultSize», driver heap).
+- «spark.sql.broadcastTimeout» (300 s) fails slow broadcasts.
+- Rule of thumb: broadcast what's comfortably under a few hundred MB in memory, and set hints deliberately rather than raising the global threshold.
 
-:::flow Diagnosing skew
-Find the slow stage :: Jobs → Stages, sorted by duration
-Compare median vs max task :: duration and shuffle read size
-Find the hot keys :: groupBy(key).count() ordered descending
-Pick a fix :: depends on the key and the join
+## Making big × big joins cheaper
+- **Filter and project before joining.** Join one day, not all history; select needed columns.
+- **Pre-aggregate** one side if you only need totals.
+- **Bucketing / storage-partitioned joins:** two tables bucketed into the same number of buckets on the join key can sort-merge join without a shuffle. Iceberg supports storage-partitioned joins with «bucket(N, key)» transforms in recent Spark versions.
+- **Semi and anti joins** («left_semi», «left_anti») instead of join + distinct or join + filter isNull.
+- **Join order:** join the most selective tables first; CBO with statistics can do this.
+
+~~~
+from pyspark.sql import functions as F
+pay = spark.table("lake.pay.payments").filter("dt = '2026-11-16'").select("payment_id", "merchant_id", "amount")
+mer = spark.table("lake.pay.merchants").select("merchant_id", "city", "category")
+enriched = pay.join(F.broadcast(mer), "merchant_id", "left")      # right side broadcast, left join OK
+enriched.explain()   # look for BroadcastHashJoin, BroadcastExchange
+~~~
+
+:::warn Non-equi joins hide in innocent SQL
+«ON p.ts BETWEEN r.valid_from AND r.valid_to» has no equality key. With two large sides this becomes a cartesian product. Add an equality condition (for example on a day bucket) so Spark can hash-partition, then apply the range as a filter.
 :::
+
+## Checklist for a slow join
+- Which strategy did Spark pick? (explain, SQL tab in the UI)
+- Are size estimates sane? Refresh statistics.
+- Can the small side be broadcast? Does the join type allow it?
+- Are both sides filtered and pruned before the join?
+- Is one key hot? (chapter 6)`,
+iq:[
+ ["B","What is a broadcast join and when do you use it?","Spark sends the small table to every executor and each task joins its partition of the large table locally, so the large table is never shuffled. Use it when one side is comfortably small in memory, like a dimension table."],
+ ["I","Why can't Spark broadcast the left side of a left outer join?","The left side must be fully preserved, including rows with no match. If the left side were broadcast, each task would only see part of the right side and couldn't decide that a left row has no match anywhere, so it would emit wrong NULL rows."],
+ ["I","Spark chose sort-merge for a join with a 50 MB table. Why, and how do you fix it?","Its size estimate was probably above the broadcast threshold: stale or missing statistics, or estimating from unfiltered file sizes. Refresh statistics, add a broadcast hint, or rely on AQE to convert at runtime after seeing the real size."],
+ ["S","How do you make a join between two multi-terabyte tables efficient?","Filter and project both sides first, pre-aggregate where possible, make sure the key isn't skewed, size shuffle partitions properly with AQE, and for recurring joins bucket both tables identically on the join key (or use storage-partitioned joins) so the shuffle disappears."],
+ ["S","How would you handle a range join like timestamp BETWEEN valid_from AND valid_to on large data?","Add an equality key to enable hash partitioning, for example explode each validity interval into the days it covers and join on day plus the range filter, or broadcast the range side if small. Avoid a pure cartesian/nested-loop plan."]
+],
+take:["Broadcast small sides; sort-merge is the safe default for big × big.","Bad estimates cause bad joins: keep statistics fresh and use AQE.","Outer join types limit which side can be broadcast."]},
+
+/* ======================= CHAPTER 6 ======================= */
+{id:"6", title:"Taming skew", mins:22,
+sum:"One hot key turns one task into a 45-minute straggler. Diagnose it, then smash it with the right tool.",
+scene:[
+ ["ui","Stage 7 · tasks 4,000 · median 31 s · max 46 min · max shuffle read 180 GB (task 1,271)"],
+ ["meera","That's MegaMart. They're 40% of our volume since the festival sale."],
+ ["you","And 10% of rows have a NULL merchant_id from the old checkout."],
+ ["priya","Two different skews, two different fixes. You have limited tools and a budget; spend them wisely."]
+],
+game:{id:"skewSmasher", title:"Skew Smasher"},
+codex:`## What skew is
+**Data skew** means a few keys hold a large share of rows. After a shuffle, all rows for a key land in one reduce partition, so one task gets gigabytes while others get megabytes. The stage, and the job, wait for that task.
+
+## Diagnosing it
+:::flow From symptom to hot key
+Find the slow stage :: Stages tab, sorted by duration
+Open the task summary :: compare median and max duration
+Compare shuffle read size :: max far above median means skew
+Find the keys :: count rows per key
+Decide on a fix :: by cause and operation
+:::
+~~~
+(spark.table("lake.pay.payments").filter("dt = '2026-11-16'")
+   .groupBy("merchant_id").count()
+   .orderBy(F.desc("count")).show(10))
+# merchant_id | count
+# MegaMart    | 41,203,118
+# null        | 10,377,402
+# M-77812     |    612,233
+~~~
+If a few keys dominate, it's skew. If all tasks are slow, it's not skew: look at partition sizes, spills or I/O.
 
 ## Common causes
-- **NULL or default keys:** missing merchant IDs all hash to one partition.
-- **Natural hot keys:** a marketplace's biggest merchant, a test account, a bot.
-- **Low-cardinality keys:** joining on a status column.
+- **NULL or placeholder keys:** missing IDs, 0, "unknown", "N/A".
+- **Natural hot keys:** the biggest merchant, a test account, a bot.
+- **Low-cardinality keys:** joining or grouping on country or status.
+- **Skewed writes:** «partitionBy("dt")» where one date has 10× the data.
 
-## Fixes, from easiest
-| Fix | How | Trade-off |
-|---|---|---|
-| Filter junk keys | Drop or separately handle NULL keys before the join | Only for keys that can't match |
-| AQE skew join | spark.sql.adaptive.skewJoin.enabled splits big partitions | Works for joins, automatic |
-| Broadcast | If the other side is small, no shuffle means no skew | Only when it fits |
-| Salting | Add salt 0..N-1 to the big side, replicate the small side N times | N× copies of the small side |
-| Isolate hot keys | Process hot keys in a separate job, union results | More code |
+## Fix 1: deal with NULL keys
+NULL keys never match in an inner join, yet they all hash to one partition and get shuffled. Filter them before the join, or handle them separately and union back:
+~~~
+valid  = pay.filter("merchant_id IS NOT NULL")
+nulls  = pay.filter("merchant_id IS NULL").withColumn("city", F.lit(None))
+result = valid.join(F.broadcast(mer), "merchant_id", "left").unionByName(nulls, allowMissingColumns=True)
+~~~
 
-:::tip Salting in one picture
-The hot key M42 becomes M42-0 … M42-15 on the big side, spread across 16 partitions. Each salted key still finds its match, because the small side was copied once per salt value.
-:::`,
-take:["Skew shows as one task far slower than the median.","Filter NULL keys, then try AQE skew handling or broadcasting.","Salting spreads a hot key at the cost of replicating the other side."]},
+## Fix 2: AQE skew join
+With «spark.sql.adaptive.skewJoin.enabled» (default true in Spark 3.2+), Spark detects partitions larger than both «skewedPartitionFactor» × median (5) and «skewedPartitionThresholdInBytes» (256 MB), splits them into smaller pieces, and replicates the matching partition of the other side. It's automatic, but it only applies to **sort-merge joins** (and shuffle hash joins in newer versions) and has limits: it doesn't fix skewed aggregations.
 
-{id:"7", title:"Memory, spills and executor sizing", mins:8, lab:"memoryTuner", labTitle:"Executor tuner",
-sum:"Each task gets a share of executor memory. When its data doesn't fit, Spark spills to disk and slows down.",
-mission:"The aggregation stage spills hundreds of gigabytes to disk and two executors died with out-of-memory errors. Size the cluster properly.",
-challenge:"Remove spills and memory risk while keeping 4-5 cores per executor.",
-body:`## Where executor memory goes
-:::flow Executor memory, roughly
-Executor heap :: spark.executor.memory
-Reserved :: 300 MB
-Unified memory :: spark.memory.fraction (60%) of the rest, shared by execution and cache
-User memory :: the remaining 40%, for your objects and UDFs
-Overhead (off-heap) :: spark.executor.memoryOverhead, for JVM internals and Python workers
+## Fix 3: broadcast
+If the other side is small enough, broadcasting removes the shuffle entirely, so there's no skewed partition at all.
+
+## Fix 4: salting a join
+:::flow Salting a hot key
+Choose N :: e.g. 16, from the skew ratio
+Big side: add salt :: random 0..N-1 per row
+Small side: replicate :: one copy of each row per salt value
+Join on key + salt :: the hot key now spreads over N partitions
+Drop the salt :: results are identical
 :::
-Execution memory (sorts, hash tables for joins and aggregations, shuffle buffers) is shared by all tasks running on the executor, so **memory per task ≈ unified memory ÷ cores per executor**.
+~~~
+N = 16
+big   = pay.withColumn("salt", (F.rand() * N).cast("int"))
+small = mer.withColumn("salt", F.explode(F.array(*[F.lit(i) for i in range(N)])))
+joined = big.join(small, ["merchant_id", "salt"]).drop("salt")
+~~~
+Cost: the small side grows N×. To limit that, salt **only the hot keys**: give rows with hot keys a random salt and everything else salt 0, and replicate only the hot keys' rows on the small side.
+
+## Fix 5: two-phase aggregation for skewed groupBy
+Partial aggregation helps, but a single hot key still ends up in one final task. Aggregate twice:
+~~~
+step1 = (pay.withColumn("salt", (F.rand() * 16).cast("int"))
+            .groupBy("merchant_id", "salt").agg(F.sum("amount").alias("part")))
+step2 = step1.groupBy("merchant_id").agg(F.sum("part").alias("gmv"))
+~~~
+This works for any associative aggregate (sum, count, min, max); averages need sum and count separately.
+
+## Fix 6: isolate the hot keys
+Process the top few keys in their own job (or with broadcast and higher parallelism), process the rest normally, and union. More code, but precise.
+
+| Situation | Best fix |
+|---|---|
+| NULL or junk keys | Filter or handle separately |
+| Skewed sort-merge join | AQE skew join, then salting if needed |
+| Other side is small | Broadcast |
+| Skewed groupBy | Two-phase aggregation |
+| A handful of known whales | Isolate hot keys |
+| Skewed writes to one table partition | Repartition by (dt, salt) or by dt plus a bucket |
+
+:::tip Speculation won't save you
+Speculative execution launches a copy of a slow task elsewhere, but the copy reads the same 180 GB. Skew is a data problem; fix the data distribution.
+:::`,
+iq:[
+ ["B","How do you recognise data skew in the Spark UI?","In the stage's task summary, the max task duration and shuffle read size are far above the median: one or a few tasks process most of the data while the rest finish quickly."],
+ ["I","Walk through salting a skewed join.","Add a random salt 0..N-1 to the large side's hot key rows, replicate the small side's rows once per salt value, join on key plus salt, then drop the salt. The hot key is spread across N partitions; the cost is N× copies of the small side, which you limit by salting only hot keys."],
+ ["I","Does AQE fix all skew?","No. AQE skew join splits oversized partitions in sort-merge (and in newer versions shuffle hash) joins. It doesn't fix skewed aggregations, skew in writes, or skew where the other side can't be split usefully; those need two-phase aggregation, salting or isolating hot keys."],
+ ["S","A groupBy on merchant_id has one merchant with 40% of rows. How do you speed it up?","Use two-phase aggregation: add a random salt, aggregate by (merchant_id, salt), then aggregate again by merchant_id. For non-associative aggregates, compute components (sum and count for averages). Also make sure partial aggregation is enabled and NULL keys are handled."]
+],
+take:["Skew shows as max task ≫ median task.","Handle NULL keys first; then AQE, broadcast, salting or two-phase aggregation.","Speculation doesn't help skew."]},
+
+/* ======================= CHAPTER 7 ======================= */
+{id:"7", title:"Memory, spills and executors", mins:22,
+sum:"How executor memory is divided, why tasks spill or die, and how to size executors that fit the cluster.",
+scene:[
+ ["ravi","Two executors killed last night: Container killed by YARN for exceeding memory limits. 33.1 GB of 33 GB used."],
+ ["you","But the heap is only 30 GB."],
+ ["priya","Exactly. Memory isn't just the heap. And our executors are 16 cores with 110 GB each, which is its own problem."],
+ ["priya","Your last puzzle: fit executors onto the nodes so nothing spills, nothing is wasted, and nothing gets killed."]
+],
+game:{id:"executorFit", title:"Executor Fit"},
+codex:`## The executor memory model
+An executor is a JVM process. Its memory is more than the heap:
+:::flow Memory requested for one executor container
+spark.executor.memory :: the JVM heap
+Reserved :: 300 MB of the heap, for Spark internals
+Unified memory :: spark.memory.fraction (0.6) × (heap − 300 MB)
+User memory :: the remaining 40%: your objects, UDF data, metadata
+memoryOverhead :: off-heap: max(384 MB, 10% of heap), for JVM internals, buffers, Python workers
+spark.executor.pyspark.memory :: optional cap for Python workers
+:::
+The container size the cluster manager enforces is **heap + overhead (+ PySpark memory, + off-heap if enabled)**. "Container killed for exceeding memory limits" means the process's total usage went past that, usually because of off-heap usage, not the heap.
+
+## Unified memory: execution and storage
+Unified memory is shared by:
+- **Execution:** hash tables for joins and aggregations, sort buffers, shuffle buffers.
+- **Storage:** cached DataFrames and broadcast variables.
+«spark.memory.storageFraction» (0.5) is a protected region for storage. Execution can borrow free storage memory and **evict** cached blocks beyond the protected region; storage can borrow free execution memory but can't evict execution data. When execution needs memory nobody can give up, it **spills**.
+
+## Memory per task
+All tasks on an executor share its execution memory, so roughly:
+~~~
+memory per task ≈ (heap − 300 MB) × 0.6 ÷ cores per executor
+~~~
+A 16 GB heap with 4 cores gives each task about 2.4 GB for sorts and hash tables. If a task's partition needs more, it spills; if a single record or hash table can't fit at all, you get OutOfMemoryError.
 
 ## Spills
-When a task's sort or hash table outgrows its share, Spark writes sorted runs to disk and merges them later. Small spills are fine; large spills mean lots of extra disk I/O. Fixes:
-- More shuffle partitions, so each task holds less data.
-- More memory per task: more memory per executor, or fewer cores per executor.
-- Less data per task: filter earlier, avoid skew.
+"Spill (memory)" is the size of data that was in memory when spilled; "Spill (disk)" is the serialised size written. Some spill is normal. Large spills multiply I/O and slow tasks dramatically. Fixes, in order:
+1. **Smaller partitions:** more shuffle partitions, or AQE advisory size.
+2. **Less data per task:** filter and project earlier, fix skew.
+3. **More memory per task:** more heap per core, or fewer cores per executor.
+
+## Out-of-memory errors decoded
+| Error | Where | Usual cause | Fix |
+|---|---|---|---|
+| java.lang.OutOfMemoryError: Java heap space | Executor | Huge partition, giant record, skew, big broadcast | More partitions, fix skew, smaller broadcast |
+| Container killed … exceeding memory limits | Executor | Off-heap use: Python workers, Netty buffers, native libs | Raise memoryOverhead / pyspark.memory |
+| GC overhead limit exceeded | Executor | Heap almost full, constant GC | Smaller partitions, more memory, fewer cores per executor |
+| OutOfMemoryError on the driver | Driver | collect(), toPandas(), large broadcast build, huge plans | Don't collect big data; raise driver memory; fewer files in plan |
 
 ## Sizing executors
-| Choice | Problem |
-|---|---|
-| Huge executors (30+ cores, 200 GB) | Long garbage-collection pauses; one failure loses a lot |
-| Tiny executors (1 core) | Overhead per executor; broadcast tables copied many times |
-| 4-5 cores, 4-8 GB per core | Common sweet spot |
+:::lanes Three sizing styles
+# Fat executors (30+ cores, 200 GB)
+Few JVMs, big heaps :: long garbage-collection pauses
+One failure loses a lot :: of cached and shuffle data
+HDFS / S3 client throughput limits :: per JVM
+# Tiny executors (1 core, 4 GB)
+Many JVMs :: overhead per executor adds up
+Broadcasts copied to every executor :: lots of memory
+No sharing within an executor :: less efficient
+# Balanced (4-5 cores, 4-8 GB per core)
+Good parallelism per JVM :: moderate heap
+Common sweet spot :: start here and measure
+:::
+Worked example for nodes with 32 cores and 256 GB:
+- Leave 1 core and ~8 GB for the OS and node agents: 31 cores, ~248 GB usable.
+- 5 cores per executor → 6 executors per node (30 cores).
+- 248 GB ÷ 6 ≈ 41 GB per executor container → heap ~37 GB + overhead ~4 GB.
+- Memory per task ≈ (37 − 0.3) × 0.6 ÷ 5 ≈ 4.4 GB.
 
-:::warn Container killed by YARN or Kubernetes
-"Exceeding memory limits" usually means **overhead** is too small, especially in PySpark where Python workers live outside the heap. Raise spark.executor.memoryOverhead before raising the heap.
+## Driver memory
+The driver holds the plan, task metadata, accumulator values, results of «collect()», and builds broadcast tables. Planning a scan over millions of files also needs driver memory. Keep collect() for small results; write large outputs from executors.
+
+## Dynamic allocation
+«spark.dynamicAllocation.enabled» adds executors when tasks queue up and removes idle ones, which saves money on spiky jobs. It needs the external shuffle service or shuffle tracking so removed executors' shuffle files remain available.
+
+:::tip PySpark specifics
+Python UDFs and pandas UDFs run in separate Python processes outside the JVM heap. Their memory counts against overhead (or «spark.executor.pyspark.memory»). For PySpark-heavy jobs, overhead of 15-25% of the heap is common.
 :::`,
-take:["Memory per task ≈ unified memory ÷ cores per executor.","Spills mean tasks hold too much data: more partitions or more memory per task.","4-5 cores per executor and enough overhead is a solid default."]},
+iq:[
+ ["B","What is a spill?","When a task's sort buffers or hash tables outgrow its share of execution memory, Spark writes sorted data to local disk and merges it later. It's correct but slow; large spills mean partitions are too big or memory per task too small."],
+ ["I","Executors are killed for exceeding container memory limits, but the heap isn't full. Why?","The container limit includes off-heap memory: JVM internals, Netty buffers, and especially Python worker processes in PySpark. Raise spark.executor.memoryOverhead (or set spark.executor.pyspark.memory), or reduce memory used by UDFs."],
+ ["I","How is unified memory shared between execution and storage?","Both use spark.memory.fraction of the heap. Execution can borrow free storage memory and evict cached blocks above the storageFraction-protected region; storage can use free execution memory but can't evict it. If execution can't get memory, it spills."],
+ ["S","Size executors for 10 nodes with 32 cores and 256 GB each.","Reserve a core and some memory per node for the OS, use about 5 cores per executor for 6 executors per node, give each container about 41 GB split into ~37 GB heap and ~4 GB overhead (more for PySpark). That's 60 executors and 300 cores, with ~4.4 GB of execution memory per task. Then tune shuffle partitions so partitions fit."]
+],
+take:["Container memory = heap + overhead (+ Python); the heap is only part of it.","Memory per task ≈ unified memory ÷ cores; spills mean partitions don't fit.","4-5 cores per executor with enough overhead is a strong default."]},
 
-{id:"q2", kind:"quiz", title:"Checkpoint: shuffles, joins and skew", mins:3,
+{id:"q2", kind:"quiz", title:"Act II checkpoint", mins:4,
 questions:[
- {q:"Shuffling 1 TB, what's a sensible number of shuffle partitions?", o:["200","~5,000","1,000,000","1"], a:1, e:"1 TB ÷ 200 MB ≈ 5,000 partitions of a healthy size."},
- {q:"Fact table 2 TB, dimension 40 MB. Best join?", o:["Sort-merge","Broadcast hash","Broadcast nested loop","Cartesian"], a:1, e:"The small dimension fits in memory everywhere, so the 2 TB side never shuffles."},
- {q:"Median task 30 s, max task 45 min, max task read 120 GB. Diagnosis?", o:["Too few executors","Data skew","Small files","Driver out of memory"], a:1, e:"One partition holds far more data than the others."},
- {q:"In salting, what happens to the smaller side?", o:["It is filtered","It is replicated once per salt value","It is broadcast","Nothing"], a:1, e:"Each salt value needs a matching copy of the small side's rows."},
- {q:"PySpark executors are killed for exceeding memory limits. First knob?", o:["spark.executor.memoryOverhead","spark.sql.shuffle.partitions","spark.driver.cores","autoBroadcastJoinThreshold"], a:0, e:"Python workers and off-heap buffers count against overhead, not the JVM heap."}
+ {q:"With 4,000 shuffle partitions, which reducer gets key K?", o:["The least busy one","pmod(hash(K), 4000)","A random one","The one on the same node"], a:1, e:"Hash partitioning is deterministic: the same key always goes to the same partition."},
+ {q:"Shuffling 1 TB: a sensible starting number of shuffle partitions?", o:["200","~5,000","1,000,000","1"], a:1, e:"1 TB ÷ ~200 MB ≈ 5,000; with AQE you can set it higher and let it coalesce."},
+ {q:"LEFT OUTER JOIN payments (2 TB) with merchants (40 MB). What can be broadcast?", o:["Payments","Merchants","Both","Neither"], a:1, e:"In a left outer join only the right side can be broadcast."},
+ {q:"Max task 46 min, median 31 s, max shuffle read 180 GB. First diagnosis?", o:["Too few executors","Data skew","Small files","Driver OOM"], a:1, e:"One partition holds far more data than the rest."},
+ {q:"A groupBy is skewed on one merchant. Best fix?", o:["AQE skew join","Two-phase (salted) aggregation","Speculation","More driver memory"], a:1, e:"AQE skew join handles joins, not aggregations; aggregate by (key, salt), then by key."},
+ {q:"PySpark executors are killed for exceeding memory limits. First knob?", o:["spark.executor.memoryOverhead","spark.sql.shuffle.partitions","spark.driver.cores","autoBroadcastJoinThreshold"], a:0, e:"Python workers use memory outside the JVM heap, counted against overhead."}
 ]},
 
-{id:"boss", kind:"boss", title:"Final project: rescue the nightly job", mins:15, lab:"sparkRescue", labTitle:"Job rescue",
-sum:"Apply everything to one real job: four stages, four problems, one deadline.",
-mission:"The nightly payments job takes 4 h 10 min. Finance needs results by 6 AM, which means under 45 minutes. Every fix has a cost; choose wisely.",
-challenge:"Get the job under 45 minutes while writing at most 300 output files.",
-body:`## The job
-:::flow Nightly payments job
-Read payments :: 500 GB in 2 million small files
-Join with merchants :: 60 MB dimension, currently sort-merge
-Aggregate by merchant and day :: one merchant holds 40% of rows
-Write the daily mart :: currently 24,000 tiny files
+/* ======================= BOSS ======================= */
+{id:"boss", kind:"boss", title:"Boss: The Nightly Job", mins:20,
+sum:"Six symptoms, six fixes, one deadline. Bring the 4 h 10 min job under 45 minutes before 6 AM.",
+scene:[
+ ["arjun","It's Thursday. Board meeting at 9. I need the numbers by 6 AM, no excuses."],
+ ["priya","You know everything you need now. The job will throw its problems at you one at a time. Read each symptom like the Spark UI shows it and pick the fix."],
+ ["ravi","Wrong fixes cost time. Run out of lives and we're explaining to the board."],
+ ["you","Let's go."]
+],
+game:{id:"nightlyBoss", title:"The Nightly Job"},
+codex:`## The performance playbook
+Every Spark performance problem can be handled with the same loop:
+:::flow Measure, classify, fix, repeat
+Measure :: find the stage that dominates job time
+Classify :: is it I/O, shuffle volume, skew, spill, join strategy, or output layout?
+Fix the cause :: not the symptom, and change one thing at a time
+Re-measure :: the bottleneck moves; find the next one
+Stop at the target :: 45 minutes, not "as fast as possible"
 :::
 
-## Your toolbox
-Every fix you learned is available as a switch: compaction, partition sizing, join strategy, skew handling, shuffle partitions, early filtering, caching and output layout. The breakdown shows which stage dominates after each change, just like the Spark UI would.
+## Symptom → cause → fix
+| What the UI shows | Likely cause | Fix |
+|---|---|---|
+| Tens of thousands of sub-second tasks reading tiny inputs | Small files | Compact files; write with distribution mode and target file size |
+| Whole table scanned for one day's data | No partition pruning | Filter on the partition column early; avoid functions on it |
+| SortMergeJoin with a small side, terabytes of shuffle write | Bad size estimate | Broadcast hint, refresh statistics, AQE |
+| Max task ≫ median, one task reads 100+ GB | Skew | Handle NULLs, AQE skew join, salting, two-phase aggregation |
+| Huge "Spill (disk)", GC time high | Partitions too big for memory per task | More shuffle partitions, better executor sizing |
+| Output of tens of thousands of files | Every task writes every partition value | Repartition by partition column before write |
+| A cached DataFrame used once | Unnecessary cache | Remove it; free memory for execution |
+| Executors lost, FetchFailed | Unstable nodes holding shuffle files | On-demand core nodes, decommissioning, remote shuffle |
 
-:::tip Work like a performance engineer
-Fix the biggest stage first, re-run, and check the breakdown again. Some switches cost money or memory; the goal is the deadline, not every switch on.
-:::`,
-take:["Find the dominant stage, fix it, measure again.","Layout (small files) and joins usually beat cluster size.","Output layout matters as much as input layout."]}
+## Before you scale up
+Doubling the cluster rarely halves the time: skewed stages stay skewed, small-file overhead stays, and the bill doubles every night. Fix layout, joins and skew first; scale only for what's left.
+
+## After the fix: keep it fixed
+- Add the job's runtime and per-stage durations to a dashboard and alert on regressions.
+- Schedule compaction for the source table.
+- Keep statistics fresh on dimension tables.
+- Record the reasoning in the repo: the next person will thank you.`,
+iq:[
+ ["S","Walk me through how you'd speed up a slow Spark job.","Find the dominant stage in the Spark UI, then classify the problem: small files and I/O, missing pruning, shuffle volume and join strategy, skew (max ≫ median task), spills (partition too big for memory per task), or output layout. Fix the cause in that stage, re-measure, and repeat until the target is met; scale the cluster only for what remains."],
+ ["S","Why doesn't doubling the cluster halve the runtime?","Skewed stages are limited by their largest task, small-file overhead and S3 request limits don't shrink, driver-side planning stays the same, and shuffles get more blocks. Only well-balanced, CPU-bound stages scale linearly, while cost always doubles."]
+],
+take:["Measure → classify → fix → re-measure.","Layout, pruning, joins and skew beat cluster size.","Lock in wins with monitoring and scheduled maintenance."]}
 ]}
 ]};
-
-/* ======================= LABS ======================= */
-const fmtT = s => s >= 3600 ? `${Math.floor(s / 3600)} h ${Math.round(s % 3600 / 60)} min` : s >= 60 ? `${Math.floor(s / 60)} min ${Math.round(s % 60)} s` : `${s.toFixed(1)} s`;
-
-LABS.jobCounter = (el, ctx) => {
-  const R = [
-    {code:`df = spark.read.parquet("s3://lake/payments")\nok = df.filter("status = 'SUCCESS'")\nby_m = ok.groupBy("merchant_id").sum("amount")`, a:0, e:"Only transformations. Spark has built a plan and run nothing."},
-    {code:`ok = spark.table("payments").filter("status = 'SUCCESS'")\nprint(ok.count())\nok.write.parquet("s3://out/ok")`, a:2, e:"Two actions, and no cache: the table is read and filtered twice."},
-    {code:`ok = spark.table("payments").filter("status = 'SUCCESS'").cache()\nprint(ok.count())\nok.show(5)\nok.write.parquet("s3://out/ok")`, a:3, e:"Three actions are still three jobs, but after the first one the later jobs read cached partitions instead of the source."},
-    {code:`m = spark.table("merchants")\njoined = spark.table("payments").join(m, "merchant_id")\njoined.write.saveAsTable("mart.payments_enriched")`, a:1, e:"One action (the write) runs one job; the join is just a step in its plan, even if it causes several stages."},
-    {code:`for d in ["2026-11-14", "2026-11-15", "2026-11-16"]:\n    (spark.table("payments")\n       .filter(f"dt = '{d}'")\n       .write.mode("overwrite").parquet(f"s3://out/dt={d}"))`, a:3, e:"The loop calls write three times: three jobs, each reading one day thanks to partition pruning."}
-  ];
-  let i = 0, score = 0, picked = null;
-  const draw = () => {
-    if (i >= R.length){ el.innerHTML = `<div class="lab-result"><p class="big">${score} / ${R.length}</p><p>${score >= 4 ? "You read code like the Spark scheduler." : "Count the actions, then ask: is anything cached?"}</p><button class="btn" data-a="again">Play again</button></div>`; if (score >= 4) ctx.win(); return; }
-    const r = R[i];
-    el.innerHTML = `<div class="game-top"><span>Snippet ${i+1} of ${R.length}</span><span>Score ${score}</span></div><pre><code>${esc(r.code)}</code></pre>
-      <p class="lab-q">How many Spark jobs does this run?</p><div class="opts four">${[0,1,2,3].map(k => `<button class="opt${picked != null ? (k === r.a ? " good" : k === picked ? " bad" : "") : ""}" data-k="${k}" ${picked != null ? "disabled" : ""}>${k}</button>`).join("")}</div>
-      ${picked != null ? `<p class="lab-note ${picked === r.a ? "good" : ""}"><b>${picked === r.a ? "Correct." : "Not quite."}</b> ${esc(r.e)}</p><div class="lab-actions"><button class="btn solid" data-a="next">${i === R.length - 1 ? "See score" : "Next snippet →"}</button></div>` : ""}`;
-  };
-  el.addEventListener("click", e => {
-    const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.a === "again"){ i = 0; score = 0; picked = null; draw(); return; }
-    if (b.dataset.a === "next"){ i++; picked = null; draw(); return; }
-    if (b.dataset.k != null && picked == null){ picked = +b.dataset.k; if (picked === R[i].a) score++; draw(); }
-  });
-  draw();
-};
-
-LABS.partitionPlanner = (el, ctx) => {
-  const TOTAL = 500 * 1024; // MB
-  const s = {fileKB:250, partMB:128, cores:200};
-  el.innerHTML = `<p class="lab-q">500 GB of payments. Choose how the files are laid out and how Spark packs them.</p>
-    <p class="lab-lbl">File size on S3</p><div class="seg seg4">${[[250,"250 KB"],[8192,"8 MB"],[131072,"128 MB"],[524288,"512 MB"]].map(([v, l]) => `<button data-f="${v}" role="radio">${l}<small>${v < 1024 ? "as written today" : v >= 131072 ? "compacted" : "partly"}</small></button>`).join("")}</div>
-    <div class="slider-row"><label for="ppPart">maxPartitionBytes <b id="ppPartV"></b></label><input id="ppPart" type="range" min="0" max="5" step="1" value="2"></div>
-    <div class="slider-row"><label for="ppCores">Cluster cores <b id="ppCoresV"></b></label><input id="ppCores" type="range" min="50" max="400" step="50" value="200"></div>
-    <div id="ppOut"></div>`;
-  const PARTS = [32, 64, 128, 256, 512, 1024];
-  const draw = () => {
-    const files = Math.round(TOTAL * 1024 / s.fileKB), fileMB = s.fileKB / 1024;
-    const tasks = Math.ceil((TOTAL + files * Math.min(4, fileMB < 4 ? 4 : 0)) / s.partMB);
-    const waves = Math.ceil(tasks / s.cores), taskMB = TOTAL / tasks;
-    const openSec = files * 0.02 / s.cores;              // 20 ms to open each file, spread across cores
-    const taskSec = 0.8 + taskMB / 60;                    // scheduling overhead + 60 MB/s per core
-    const total = openSec + waves * taskSec;
-    el.querySelectorAll("[data-f]").forEach(b => b.setAttribute("aria-checked", +b.dataset.f === s.fileKB));
-    el.querySelector("#ppPartV").textContent = s.partMB >= 1024 ? "1 GB" : s.partMB + " MB"; el.querySelector("#ppCoresV").textContent = s.cores;
-    const cells = Math.min(240, tasks), shown = Array.from({length:cells}, (_, k) => k % Math.max(1, Math.min(waves, 8)));
-    el.querySelector("#ppOut").innerHTML = `<div class="lat-grid four"><div><small>Files</small><b>${files.toLocaleString()}</b></div><div><small>Tasks</small><b>${tasks.toLocaleString()}</b></div><div><small>Waves</small><b>${waves.toLocaleString()}</b></div><div class="${total < 90 ? "good" : "bad"}"><small>Stage time</small><b>${fmtT(total)}</b></div></div>
-      <div class="waves">${shown.map((w, k) => `<i style="--w:${w}; --d:${k}"></i>`).join("")}${tasks > cells ? `<span>+${(tasks - cells).toLocaleString()} more</span>` : ""}</div>
-      <div class="stack-bar"><span class="sb-open" style="width:${openSec / total * 100}%">opening files ${fmtT(openSec)}</span><span class="sb-work" style="width:${waves * taskSec / total * 100}%">processing ${fmtT(waves * taskSec)}</span></div>
-      <p class="lab-note ${total < 90 ? "good" : ""}">${total < 90 ? "<b>Fast read.</b> Files are big enough that opening them is negligible, and tasks are a healthy size." : openSec > waves * taskSec ? "Most of the time goes into opening files, not reading data. Change the layout, not just the reader." : taskMB < 48 ? "Tasks are tiny: scheduling overhead dominates. Pack more bytes per partition." : "Tasks are big but there are many waves. More cores or larger partitions?"} Each task reads about ${taskMB >= 1024 ? (taskMB / 1024).toFixed(1) + " GB" : Math.round(taskMB) + " MB"}.</p>`;
-    if (total < 90) ctx.win();
-  };
-  el.addEventListener("click", e => { const b = e.target.closest("[data-f]"); if (b){ s.fileKB = +b.dataset.f; draw(); } });
-  el.addEventListener("input", e => { if (e.target.id === "ppPart") s.partMB = PARTS[+e.target.value]; if (e.target.id === "ppCores") s.cores = +e.target.value; draw(); });
-  draw();
-};
-
-LABS.stageCutter = (el, ctx) => {
-  const P = [
-    {ops:["read payments", "filter status = SUCCESS", "withColumn day", "groupBy merchant, day", "agg sum(amount)", "write"], wide:[3]},
-    {ops:["read payments", "select columns", "join merchants (both large)", "filter country = IN", "orderBy amount desc", "write ranked report"], wide:[2, 4]}
-  ];
-  let pi = 0, marks = new Set(), checked = false, solved = 0;
-  const draw = () => {
-    if (pi >= P.length){ el.innerHTML = `<div class="lab-result"><p class="big">${solved} / 2</p><p>${solved === 2 ? "Every shuffle found. That's how you read a Spark UI." : "Look for operations that need rows from many partitions."}</p><button class="btn" data-a="again">Try again</button></div>`; if (solved === 2) ctx.win(); return; }
-    const p = P[pi], correct = checked && p.wide.length === marks.size && p.wide.every(w => marks.has(w));
-    let stage = 1;
-    el.innerHTML = `<div class="game-top"><span>Pipeline ${pi+1} of 2</span><span>Solved ${solved}</span></div><p class="lab-q">Tap the operations that start a new stage (they cause a shuffle).</p>
-      <ol class="ops">${p.ops.map((o, k) => { if (marks.has(k) && k) stage++; const cls = checked ? (p.wide.includes(k) === marks.has(k) ? (marks.has(k) ? "ok cut" : "") : "no" + (marks.has(k) ? " cut" : "")) : (marks.has(k) ? "cut" : ""); return `<li class="${cls}">${marks.has(k) ? `<span class="cut-line">Stage ${stage} starts · shuffle</span>` : ""}<button class="op-b" data-k="${k}" ${k === 0 || checked ? "disabled" : ""}><span class="op-n">${k+1}</span>${esc(o)}</button></li>`; }).join("")}</ol>
-      <p class="lab-note">Stages so far: <b>${marks.size + 1}</b></p>
-      <div class="lab-actions">${checked ? `<button class="btn solid" data-a="next">${pi === P.length - 1 ? "See result" : "Next pipeline →"}</button>` : `<button class="btn solid" data-a="check">Check</button>`}</div>
-      ${checked ? `<p class="lab-note ${correct ? "good" : ""}"><b>${correct ? "Exactly right." : "Not quite."}</b> ${pi === 0 ? "Only the groupBy needs all rows of a merchant-day together. Filter and withColumn run inside the first stage." : "The join of two large tables shuffles both sides, and a global orderBy shuffles again with range partitioning. The filter and the write stay in place."}</p>` : ""}`;
-    if (checked && correct && !el.dataset["s" + pi]){ el.dataset["s" + pi] = 1; solved++; }
-  };
-  el.addEventListener("click", e => {
-    const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.a === "again"){ pi = 0; marks = new Set(); checked = false; solved = 0; delete el.dataset.s0; delete el.dataset.s1; draw(); return; }
-    if (b.dataset.a === "check"){ checked = true; draw(); return; }
-    if (b.dataset.a === "next"){ pi++; marks = new Set(); checked = false; draw(); return; }
-    if (b.dataset.k != null){ const k = +b.dataset.k; marks.has(k) ? marks.delete(k) : marks.add(k); draw(); }
-  });
-  draw();
-};
-
-LABS.shuffleSim = (el, ctx) => {
-  const DATA = 1024 * 1024; // MB (1 TB)
-  const MAPS = [1000, 2000, 4000, 8000], REDS = [200, 1000, 2000, 4000, 8000, 20000];
-  const s = {m:2, r:0, push:false};
-  el.innerHTML = `<p class="lab-q">1 TB is shuffled from the map stage to the join stage.</p>
-    <div class="slider-row"><label for="shM">Map tasks <b id="shMV"></b></label><input id="shM" type="range" min="0" max="3" step="1" value="2"></div>
-    <div class="slider-row"><label for="shR">spark.sql.shuffle.partitions <b id="shRV"></b></label><input id="shR" type="range" min="0" max="5" step="1" value="0"></div>
-    <div class="toggles"><label><input type="checkbox" id="shPush"> Push-based shuffle <small>(blocks are merged per reducer on shuffle servers)</small></label></div>
-    <div id="shOut"></div>`;
-  const draw = () => {
-    const M = MAPS[s.m], R = REDS[s.r], blocks = M * R, blockKB = DATA * 1024 / blocks, redMB = DATA / R;
-    const tinyBlocks = blockKB < 1024 && !s.push, okRed = redMB >= 100 && redMB <= 300, win = okRed && !tinyBlocks;
-    el.querySelector("#shMV").textContent = M.toLocaleString(); el.querySelector("#shRV").textContent = R.toLocaleString();
-    const gm = 12, gr = 18;
-    el.querySelector("#shOut").innerHTML = `<div class="mxr"><div class="mxr-grid" style="--c:${gr}">${Array.from({length:gm * gr}, (_, k) => `<i class="${tinyBlocks ? "tiny" : ""}" style="--d:${k % 37}"></i>`).join("")}</div><p class="muted">Each square is one block from a map task (row) to a reducer (column). Real count: <b>${blocks.toLocaleString()}</b></p></div>
-      <div class="lat-grid four"><div class="${tinyBlocks ? "bad" : "good"}"><small>Avg block</small><b>${blockKB >= 1024 ? (blockKB / 1024).toFixed(1) + " MB" : Math.round(blockKB) + " KB"}</b></div><div><small>Blocks</small><b>${blocks >= 1e6 ? (blocks / 1e6).toFixed(1) + " M" : blocks.toLocaleString()}</b></div><div class="${okRed ? "good" : "bad"}"><small>Per reducer</small><b>${redMB >= 1024 ? (redMB / 1024).toFixed(1) + " GB" : Math.round(redMB) + " MB"}</b></div><div><small>Push-based</small><b>${s.push ? "on" : "off"}</b></div></div>
-      <p class="lab-note ${win ? "good" : ""}">${win ? "<b>Healthy shuffle.</b> Reducers get a few hundred MB each and blocks are big enough to fetch efficiently." : redMB > 300 ? "Reducers hold too much: expect spills and out-of-memory errors. More shuffle partitions." : redMB < 100 ? "Reducer partitions are tiny: overhead and small output files. Fewer shuffle partitions." : "Millions of tiny blocks mean slow random reads and fetch timeouts. Fewer map tasks, or merge blocks with push-based shuffle."}</p>`;
-    if (win) ctx.win();
-  };
-  el.addEventListener("input", e => { if (e.target.id === "shM") s.m = +e.target.value; if (e.target.id === "shR") s.r = +e.target.value; if (e.target.id === "shPush") s.push = e.target.checked; draw(); });
-  draw();
-};
-
-LABS.joinPicker = (el, ctx) => {
-  const ST = ["Broadcast hash", "Sort-merge", "Shuffle hash", "Broadcast nested loop"];
-  const R = [
-    {t:"payments (2 TB) JOIN merchants (40 MB) ON merchant_id", a:0, e:"The dimension fits easily in memory on every executor, so the 2 TB side is never shuffled."},
-    {t:"payments (2 TB) JOIN refunds (900 GB) ON payment_id", a:1, e:"Both sides are huge. Sort-merge shuffles both, sorts and merges, and can spill safely."},
-    {t:"payments (2 TB) JOIN fx_rates (5 MB) ON payments.ts BETWEEN rates.valid_from AND rates.valid_to", a:3, e:"A range condition can't use hash or sort-merge. The tiny side is broadcast and compared per row. Fine at 5 MB, dangerous if both are large."},
-    {t:"payments (2 TB) JOIN customers (150 GB) ON customer_id, with ~10 GB per side after filtering and plenty of executor memory", a:2, e:"Both sides are shuffled, but each partition of the smaller side is small enough to hash in memory, so Spark can skip sorting. Sort-merge would also work, just slower."},
-    {t:"orders (300 GB) JOIN order_items (1.2 TB) ON order_id, both bucketed by order_id into 512 buckets", a:1, e:"Matching bucketing lets a sort-merge join skip the shuffle entirely: each bucket joins with its partner."}
-  ];
-  let i = 0, score = 0, picked = null;
-  const draw = () => {
-    if (i >= R.length){ el.innerHTML = `<div class="lab-result"><p class="big">${score} / 5</p><p>${score >= 4 ? "You'd make a good query optimiser." : "Ask: is one side small? Is the condition an equality? How big is each side per partition?"}</p><button class="btn" data-a="again">Play again</button></div>`; if (score >= 4) ctx.win(); return; }
-    const r = R[i];
-    el.innerHTML = `<div class="game-top"><span>Join ${i+1} of 5</span><span>Score ${score}</span></div><p class="scenario">${esc(r.t)}</p>
-      <div class="opts">${ST.map((o, k) => `<button class="opt${picked != null ? (k === r.a ? " good" : k === picked ? " bad" : "") : ""}" data-k="${k}" ${picked != null ? "disabled" : ""}>${o}</button>`).join("")}</div>
-      ${picked != null ? `<p class="lab-note ${picked === r.a ? "good" : ""}"><b>${picked === r.a ? "Right." : "Better: " + ST[r.a] + "."}</b> ${esc(r.e)}</p><div class="lab-actions"><button class="btn solid" data-a="next">${i === 4 ? "See score" : "Next join →"}</button></div>` : ""}`;
-  };
-  el.addEventListener("click", e => {
-    const b = e.target.closest("button"); if (!b) return;
-    if (b.dataset.a === "again"){ i = 0; score = 0; picked = null; draw(); return; }
-    if (b.dataset.a === "next"){ i++; picked = null; draw(); return; }
-    if (b.dataset.k != null && picked == null){ picked = +b.dataset.k; if (picked === R[i].a) score++; draw(); }
-  });
-  draw();
-};
-
-LABS.skewFix = (el, ctx) => {
-  const s = {nulls:false, aqe:false, salt:1};
-  el.innerHTML = `<p class="lab-q">16 reduce partitions after the join shuffle. Merchant M42 has 40% of rows; 10% of rows have a NULL merchant_id.</p>
-    <div class="toggles"><label><input type="checkbox" id="skN"> Filter NULL merchant_id before the join <small>(they can never match)</small></label><label><input type="checkbox" id="skA"> AQE skew join <small>(splits oversized partitions into up to 4 pieces)</small></label></div>
-    <div class="slider-row"><label for="skS">Salt factor for M42 <b id="skSV">1</b></label><input id="skS" type="range" min="0" max="5" step="1" value="0"></div>
-    <div id="skOut"></div>`;
-  const SALTS = [1, 2, 4, 8, 16, 32];
-  const draw = () => {
-    // base rows per partition (units), partition 0 has NULLs, partition 7 has M42
-    let parts = Array.from({length:16}, () => 3.1);
-    if (!s.nulls) parts[0] += 10;
-    const hot = 40, salt = s.salt;
-    if (salt > 1){ const share = hot / salt; for (let k = 0; k < salt; k++) parts[(7 + k * 5) % 16] += share; } else parts[7] += hot;
-    if (s.aqe){ const med0 = [...parts].sort((a, b) => a - b)[8]; parts = parts.flatMap(p => p > med0 * 5 ? Array.from({length:4}, () => p / 4) : [p]); }
-    const sorted = [...parts].sort((a, b) => a - b), med = sorted[Math.floor(sorted.length / 2)], max = sorted[sorted.length - 1], ratio = max / med;
-    const win = ratio <= 2;
-    el.querySelector("#skSV").textContent = salt;
-    el.querySelector("#skOut").innerHTML = `<div class="skew-bars">${parts.map((p, k) => `<span class="${p === max ? "hot" : ""}" style="height:${p / max * 100}%" title="${p.toFixed(1)}"></span>`).join("")}</div>
-      <div class="lat-grid four"><div><small>Tasks</small><b>${parts.length}</b></div><div><small>Median task</small><b>${(med * 12).toFixed(0)} s</b></div><div class="${win ? "good" : "bad"}"><small>Slowest task</small><b>${fmtT(max * 12)}</b></div><div class="${salt > 16 ? "bad" : ""}"><small>Small-side copies</small><b>${salt}×</b></div></div>
-      <p class="lab-note ${win ? "good" : ""}">${win ? "<b>Balanced.</b> The stage now finishes close to the median task time." : !s.nulls && parts[0] > med * 2 ? "Partition 0 is swollen with NULL keys that can never match. Start there." : "M42 still lands in one or a few partitions. Spread it out: salting, AQE, or both."} Slowest / median = ${ratio.toFixed(1)}×.</p>`;
-    if (win) ctx.win();
-  };
-  el.addEventListener("input", e => { if (e.target.id === "skN") s.nulls = e.target.checked; if (e.target.id === "skA") s.aqe = e.target.checked; if (e.target.id === "skS") s.salt = SALTS[+e.target.value]; draw(); });
-  draw();
-};
-
-LABS.memoryTuner = (el, ctx) => {
-  const SHUFFLE_GB = 800, NODE_CORES = 32, NODE_MEM = 256, NODES = 10;
-  const s = {cores:16, mem:110, overhead:5, parts:2000};
-  el.innerHTML = `<p class="lab-q">An aggregation shuffles 800 GB on 10 nodes (32 cores, 256 GB each). Size the executors.</p>
-    <div class="slider-row"><label for="mtC">Cores per executor <b id="mtCV"></b></label><input id="mtC" type="range" min="1" max="32" step="1" value="16"></div>
-    <div class="slider-row"><label for="mtM">Heap per executor <b id="mtMV"></b></label><input id="mtM" type="range" min="4" max="200" step="2" value="110"></div>
-    <div class="slider-row"><label for="mtO">memoryOverhead <b id="mtOV"></b></label><input id="mtO" type="range" min="1" max="20" step="1" value="5"></div>
-    <div class="slider-row"><label for="mtP">Shuffle partitions <b id="mtPV"></b></label><input id="mtP" type="range" min="200" max="20000" step="200" value="2000"></div>
-    <div id="mtOut"></div>`;
-  const draw = () => {
-    const perNode = Math.max(1, Math.min(Math.floor((NODE_CORES - 1) / s.cores), Math.floor((NODE_MEM - 8) / (s.mem + s.overhead))));
-    const execs = perNode * NODES, cores = execs * s.cores;
-    const perTaskMB = (s.mem - 0.3) * 0.6 * 1024 / s.cores, partMB = SHUFFLE_GB * 1024 / s.parts, needMB = partMB * 2.2;
-    const spill = needMB > perTaskMB, gc = s.mem > 64, ohRisk = s.overhead < Math.max(0.384, s.mem * 0.1);
-    const coresOk = s.cores >= 4 && s.cores <= 5, win = !spill && !gc && !ohRisk && coresOk && cores >= 200;
-    [["mtCV", s.cores], ["mtMV", s.mem + " GB"], ["mtOV", s.overhead + " GB"], ["mtPV", s.parts.toLocaleString()]].forEach(([id, v]) => el.querySelector("#" + id).textContent = v);
-    el.querySelector("#mtOut").innerHTML = `<div class="mem-bar"><span class="mb-ex" style="width:${Math.min(100, perTaskMB / Math.max(perTaskMB, needMB) * 100)}%">memory per task ${Math.round(perTaskMB)} MB</span></div><div class="mem-bar need"><span style="width:${Math.min(100, needMB / Math.max(perTaskMB, needMB) * 100)}%" class="${spill ? "over" : ""}">a partition needs ~${Math.round(needMB)} MB in memory</span></div>
-      <div class="lat-grid four"><div><small>Executors</small><b>${execs}</b></div><div class="${cores >= 200 ? "" : "bad"}"><small>Total cores</small><b>${cores}</b></div><div class="${spill ? "bad" : "good"}"><small>Spill</small><b>${spill ? "yes" : "none"}</b></div><div class="${gc || ohRisk ? "bad" : "good"}"><small>Memory risk</small><b>${gc ? "GC pauses" : ohRisk ? "overhead" : "low"}</b></div></div>
-      <p class="lab-note ${win ? "good" : ""}">${win ? "<b>Well sized.</b> Tasks fit in memory, executors are a sensible size, and overhead covers off-heap use." : !coresOk ? "Aim for 4-5 cores per executor." : gc ? "Heaps above ~64 GB bring long garbage-collection pauses. Use more, smaller executors." : ohRisk ? "Overhead below ~10% of heap risks containers being killed (worse with PySpark)." : spill ? "Each task's share of memory is smaller than its partition needs. More partitions, or more memory per core." : "Use enough executors to keep at least 200 cores busy."}</p>`;
-    if (win) ctx.win();
-  };
-  el.addEventListener("input", e => { const v = +e.target.value; if (e.target.id === "mtC") s.cores = v; if (e.target.id === "mtM") s.mem = v; if (e.target.id === "mtO") s.overhead = v; if (e.target.id === "mtP") s.parts = v; draw(); });
-  draw();
-};
-
-LABS.sparkRescue = (el, ctx) => {
-  const F = [
-    {id:"compact", n:"Compact input files to 512 MB", d:"One-off rewrite; future reads are fast"},
-    {id:"prune", n:"Filter to yesterday early", d:"Partition pruning before the join"},
-    {id:"bcast", n:"Broadcast the merchants table", d:"60 MB dimension, no big-side shuffle"},
-    {id:"aqe", n:"Enable AQE + skew join", d:"Coalesce partitions, split M42"},
-    {id:"parts", n:"Set shuffle partitions to 4,000", d:"From the default 200"},
-    {id:"cache", n:"Cache the joined DataFrame", d:"It is used by one action only"},
-    {id:"outrep", n:"Repartition output by day", d:"Before writing the mart"},
-    {id:"bigger", n:"Double the cluster", d:"Twice the cost every night"}
-  ];
-  const on = new Set();
-  el.innerHTML = `<div class="def-grid">${F.map(f => `<button class="def" data-f="${f.id}" aria-pressed="false"><b>${f.n}</b><small>${f.d}</small></button>`).join("")}</div>
-    <div class="lab-actions"><button class="btn solid" data-a="run">Run the job</button></div><div id="srOut"></div>`;
-  const run = () => {
-    const k = x => on.has(x), speed = k("bigger") ? 2 : 1;
-    let read = k("compact") ? 4 : 38; if (k("prune")) read *= 0.12;
-    let join = k("bcast") ? 6 : 70; if (k("prune")) join *= 0.15; if (!k("bcast") && !k("parts") && !k("aqe")) join *= 1.3;
-    let agg = 95; if (k("aqe")) agg = 14; if (k("parts")) agg *= k("aqe") ? 1 : 0.8; if (k("prune")) agg *= 0.2;
-    let write = k("outrep") ? 3 : 27; if (k("cache")) write += 9;
-    const st = [["Read", read], ["Join", join], ["Aggregate", agg], ["Write", write]].map(([n, m]) => [n, m / speed]);
-    const total = st.reduce((a, x) => a + x[1], 0), files = k("outrep") ? 120 : (k("aqe") ? 2400 : 24000);
-    const win = total <= 45 && files <= 300, max = Math.max(...st.map(x => x[1]));
-    el.querySelector("#srOut").innerHTML = `<div class="stage-bars">${st.map(([n, m]) => `<div class="stb"><span class="stb-n">${n}</span><span class="stb-t"><span class="stb-f${m === max ? " worst" : ""}" style="width:${m / max * 100}%"></span></span><span class="stb-v">${m.toFixed(1)} min</span></div>`).join("")}</div>
-      <div class="lat-grid four"><div class="${total <= 45 ? "good" : "bad"}"><small>Job time</small><b>${total >= 60 ? Math.floor(total / 60) + " h " + Math.round(total % 60) + " min" : Math.round(total) + " min"}</b></div><div class="${files <= 300 ? "good" : "bad"}"><small>Output files</small><b>${files.toLocaleString()}</b></div><div class="${k("bigger") ? "bad" : "good"}"><small>Cluster cost</small><b>${k("bigger") ? "2×" : "1×"}</b></div><div><small>Fixes used</small><b>${on.size}</b></div></div>
-      <p class="lab-note ${win ? "good" : ""}">${win ? `<b>Deadline met${k("bigger") ? ", but at double the cost" : " without a bigger cluster"}.</b> ${k("cache") ? "Caching a DataFrame used once only added memory pressure and time." : "Layout, pruning, the right join and skew handling did the work."}` : `The slowest stage is <b>${st.find(x => x[1] === max)[0]}</b>. Fix that one next.${files > 300 ? " The mart is still written as thousands of tiny files." : ""}`}</p>`;
-    if (win) ctx.win();
-  };
-  el.addEventListener("click", e => {
-    const d = e.target.closest("[data-f]");
-    if (d){ const id = d.dataset.f; on.has(id) ? on.delete(id) : on.add(id); d.setAttribute("aria-pressed", on.has(id)); return; }
-    if (e.target.closest("[data-a=run]")) run();
-  });
-};
 })();

@@ -9,7 +9,7 @@ Live site: https://vivek0803.github.io/Dagdeep/
 | Course | Level | What you play with |
 |---|---|---|
 | **LLM Fundamentals, played** | Beginner | Tokens, sampling, prompts, JSON, evals, cost, latency, then a production unit: retries and fallbacks, prompt injection, tracing, safe releases, architecture. Prompt labs can call a live model. |
-| **Spark Internals, played** | Intermediate | Job counting, partition planning and small files, stage boundaries, shuffle simulator, join strategy game, skew fixer, executor tuner, and a final "rescue the nightly job" project. |
+| **Spark Internals: The Nightly Job** | Intermediate | A story + puzzle game. Seven chapters, each with a deep codex (Catalyst, partitions and small files, stages, shuffle internals, joins, skew, memory) and an arcade level with lives, combos and stars: Plan or Run?, Partition Packer, Shuffle Hunter, Hash Router, Join Duel, Skew Smasher, Executor Fit, and the boss fight. |
 | **Kafka & Streaming, played** | Intermediate | Log playground, key/ordering game, broker crash test, consumer group balancer, crash lab for delivery guarantees, schema compatibility, watermark tuner, checkpoint tuner, exactly-once sink designer, and a launch-day drill. |
 
 Plus the **Data flow player**: animated, step-by-step views of a write through MySQL (InnoDB), Apache Iceberg, and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
@@ -23,7 +23,9 @@ XP, levels, streaks and badges are shared across courses; progress is saved per 
 | `index.html` | The page, styles, data-flow player and routing |
 | `course-engine.js` | Course engine: catalog, course map, lessons, quizzes, XP, badges, LLM labs |
 | `course-llm-content.js`, `course-llm-prod.js`, `course-prod-labs.js` | LLM course content and production labs |
-| `course-spark.js` | Spark course content and labs |
+| `game-kit.js` | GameKit: shared arcade shell (lives, combo, timer, stars) for game courses |
+| `course-spark.js` | Spark course story, codex chapters and quizzes (`game:true`) |
+| `course-spark-games.js` | The Spark levels, registered on `window.COURSE_GAMES` |
 | `course-kafka.js` | Kafka & Streaming course content and labs |
 | `config.js` | Site settings (optional live-model endpoint) |
 | `api/worker.js` | Optional serverless proxy for live LLM labs |
