@@ -47,7 +47,7 @@ const ZMAP = Object.fromEntries(ZONES.map(z => [z.id, z]));
 const RANKS = [[0,"Intern"],[300,"Junior engineer"],[900,"Engineer"],[2000,"Senior engineer"],[4000,"Staff engineer"],[7000,"Principal"],[11000,"Distinguished"]];
 const CAST = {priya:["Priya","Tech lead",205], arjun:["Arjun","Finance",28], ravi:["Ravi","On-call SRE",340], meera:["Meera","Analyst",95], kai:["Kai","AI lead",265], sana:["Sana","Security",355], dev:["Dev","Platform",150], you:["You","Engineer",300]};
 
-const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }};
+const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }, more(id, levels){ const Z = this.data[id]; if (Z) Z.levels.push(...levels); }};
 const ld = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k)) || {}); } catch(e){ return d; } };
 const P = ld("dagdeep-quest-v1", {stars:{}, cards:{}, lv:{}, last:null});
 const PR = ld("dagdeep-profile-v1", {xp:0, streak:0, last:null});
@@ -55,6 +55,27 @@ Q.progress = P;
 const save = () => { try { localStorage.setItem("dagdeep-quest-v1", JSON.stringify(P)); localStorage.setItem("dagdeep-profile-v1", JSON.stringify(PR)); } catch(e){} };
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fm = t => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/«(.+?)»/g, "<code>$1</code>").replace(/\n/g, "<br>");
+// Deep text, line-based: "### " headings, "- " bullets, "~~~" code fences, "| a | b |" tables, blank lines split paragraphs.
+const md = t => {
+  const L = String(t || "").split("\n"), out = []; let i = 0;
+  const special = l => l.startsWith("~~~") || l.startsWith("### ") || l.startsWith("- ") || l.trim().startsWith("|") || !l.trim();
+  while (i < L.length){
+    const l = L[i];
+    if (!l.trim()){ i++; continue; }
+    if (l.startsWith("~~~")){ const buf = []; i++; while (i < L.length && !L[i].startsWith("~~~")) buf.push(L[i++]); i++; out.push(`<pre class="q-code">${esc(buf.join("\n"))}</pre>`); continue; }
+    if (l.startsWith("### ")){ out.push(`<h4>${fm(l.slice(4))}</h4>`); i++; continue; }
+    if (l.startsWith("- ")){ const buf = []; while (i < L.length && L[i].startsWith("- ")) buf.push(L[i++].slice(2)); out.push(`<ul>${buf.map(x => `<li>${fm(x)}</li>`).join("")}</ul>`); continue; }
+    if (l.trim().startsWith("|")){
+      const buf = []; while (i < L.length && L[i].trim().startsWith("|")) buf.push(L[i++].trim());
+      const rows = buf.filter(x => !/^\|[\s:|-]+\|$/.test(x)).map(x => x.replace(/^\||\|$/g, "").split("|").map(c => c.trim()));
+      out.push(`<div class="q-tw"><table><thead><tr>${rows[0].map(x => `<th>${fm(x)}</th>`).join("")}</tr></thead><tbody>${rows.slice(1).map(r => `<tr>${r.map(x => `<td>${fm(x)}</td>`).join("")}</tr>`).join("")}</tbody></table></div>`);
+      continue;
+    }
+    const buf = []; while (i < L.length && !special(L[i])) buf.push(L[i++]);
+    out.push(`<p>${buf.map(fm).join(" ")}</p>`);
+  }
+  return out.join("");
+};
 const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
 const reduce = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const root = () => document.getElementById("cRoot");
@@ -123,7 +144,7 @@ function zoneView(id){
     const Z = Q.data[id]; P.last = id; P.lv[id] = Z.levels.length; save();
     document.title = `${z.title} · Dagdeep`;
     const deck = [];
-    Z.levels.forEach((L, li) => (L.rounds || []).forEach((r, ri) => { if (r[0] === "learn") deck.push({id:`${li}-${ri}`, li, t:r[1], b:r[2], L}); }));
+    Z.levels.forEach((L, li) => (L.rounds || []).forEach((r, ri) => { if (r[0] === "learn") deck.push({id:`${li}-${ri}`, li, t:r[1], b:r[2], d:r[5], L}); }));
     const got = new Set(P.cards[id] || []);
     const m = Z.mission ? (CAST[Z.mission[0]] || [Z.mission[0], "", 200]) : null;
     root().innerHTML = `<div class="q-wrap" style="--h:${z.hue}">
@@ -131,13 +152,13 @@ function zoneView(id){
       <section class="q-zhero"><span class="q-mono big">${esc(z.mono)}</span><div><p class="q-eyebrow">${esc(WORLDS.find(w => w.id === z.world).title)} zone</p><h1>${esc(z.title)}</h1><p>${esc(z.short)}</p>
         <div class="q-me-row"><span>${STAR} <b>${zStars(id)}</b>/${Z.levels.length * 3}</span><span><b>${got.size}</b>/${deck.length} cards</span><span><b>${Z.levels.length}</b> levels</span></div></div></section>
       ${m ? `<div class="q-say" style="--ch:${m[2]}"><span class="q-av">${esc(m[0][0])}</span><div><b>${esc(m[0])} <small>${esc(m[1])}</small></b><p>${fm(Z.mission[1])}</p></div></div>` : ""}
-      <ol class="q-path">${Z.levels.map((L, li) => { const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
-        return `<li class="q-node ${kind} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
+      <ol class="q-path">${Z.levels.map((L, li) => { const head = L.act && (li === 0 || Z.levels[li - 1].act !== L.act) ? `<li class="q-act"><span>${esc(L.act)}</span></li>` : ""; const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
+        return head + `<li class="q-node ${kind} ${L.act ? "expert" : ""} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
           ${open ? `<a href="#lvl-${id}-${li}" class="q-dot">` : `<span class="q-dot">`}${L.boss ? "👑" : L.arcade ? "🕹" : li + 1}${open ? "</a>" : "</span>"}
-          <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? "Boss fight" : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${L.sub ? " · " + esc(L.sub) : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>
+          <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${L.sub ? " · " + esc(L.sub) : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>
       <section class="q-deck"><div class="q-deck-h"><h2>Card deck</h2><span>${got.size}/${deck.length} collected</span></div>
         <p class="muted">Concept cards you collect while playing. Tap one to flip it.</p>
-        <div class="q-cards">${deck.map(c => got.has(c.id) ? `<button class="q-card got" type="button"><span class="q-card-k">${esc(c.L.t)}</span><b>${esc(c.t)}</b><span class="q-card-b">${fm(c.b)}</span></button>` : `<div class="q-card lock"><span class="q-card-k">${esc(c.L.t)}</span><b>?</b><small>Play level ${c.li + 1} to collect</small></div>`).join("")}</div></section>
+        <div class="q-cards">${deck.map(c => got.has(c.id) ? `<button class="q-card got" type="button"><span class="q-card-k">${esc(c.L.t)}</span><b>${esc(c.t)}</b><span class="q-card-b">${fm(c.b)}</span>${c.d ? `<span class="q-card-d">${md(c.d)}</span><small class="q-card-more">Deep card · tap to read</small>` : ""}</button>` : `<div class="q-card lock"><span class="q-card-k">${esc(c.L.t)}</span><b>?</b><small>Play level ${c.li + 1} to collect</small></div>`).join("")}</div></section>
     </div>`;
     root().querySelectorAll(".q-card.got").forEach(b => b.onclick = () => b.classList.toggle("open"));
   });
@@ -272,15 +293,16 @@ function play(id, li, z, Z, L){
 }
 const WORDS_OK = ["Nice!", "Correct!", "Spot on.", "Exactly.", "Nailed it.", "Clean."], WORDS_NO = ["Not quite.", "Almost.", "Close, but no.", "Careful."];
 const pickWord = ok => { const a = ok ? WORDS_OK : WORDS_NO; return a[Math.floor(Math.random() * a.length)]; };
-const whyOf = r => ({pick:r[4], sort:r[3], order:r[3], match:r[3], fill:r[5], bug:r[4]})[r[0]] || "";
+const whyOf = r => ({pick:r[4], sort:r[3], order:r[3], match:r[3], fill:r[5], bug:r[4], num:r[5]})[r[0]] || "";
 
 /* ================= Round types ================= */
 const ROUND = {};
 ROUND.learn = (r, st, c) => {
-  const [, title, body, flow, code] = r;
-  st.innerHTML = `<div class="q-learn"><p class="q-kick">⚡ Power-up · concept card</p><h2>${fm(title)}</h2><p class="q-body">${fm(body)}</p>
+  const [, title, body, flow, code, deep] = r;
+  st.innerHTML = `<div class="q-learn ${deep ? "has-deep" : ""}"><p class="q-kick">⚡ ${deep ? "Deep card" : "Power-up · concept card"}</p><h2>${fm(title)}</h2><p class="q-body">${fm(body)}</p>
     ${flow && flow.length ? `<ol class="q-flow">${flow.map((f, i) => `<li style="--i:${i}">${fm(f)}</li>`).join("")}</ol>` : ""}
     ${code ? `<pre class="q-code">${esc(code)}</pre>` : ""}
+    ${deep ? `<details class="q-deep" open><summary>Go deeper</summary><div class="q-deep-b">${md(deep)}</div></details>` : ""}
     <button class="btn big solid q-collect">Collect card →</button></div>`;
   st.querySelector(".q-collect").onclick = () => c.collect(r);
   c.setKey(e => { if (e.key === "Enter"){ e.preventDefault(); c.collect(r); } });
@@ -399,6 +421,22 @@ ROUND.tf = (r, st, c) => {
   st.querySelectorAll(".tfb").forEach(b => b.onclick = () => answer(b.dataset.v === "1"));
   c.setKey(e => { if (e.key === "ArrowLeft" || e.key === "t") answer(true); if (e.key === "ArrowRight" || e.key === "f") answer(false); });
   show();
+};
+ROUND.num = (r, st, c) => {
+  const [, q, ans, tol, unit, why, code] = r;
+  st.innerHTML = `<div class="q-r"><p class="q-kick">🧮 Work it out</p><h2>${fm(q)}</h2>${code ? `<pre class="q-code">${esc(code)}</pre>` : ""}
+    <form class="q-num"><input type="text" inputmode="decimal" autocomplete="off" placeholder="Your answer" aria-label="Your answer"><span>${esc(unit || "")}</span><button class="btn big solid">Check</button></form></div>`;
+  const f = st.querySelector("form"), inp = f.querySelector("input");
+  setTimeout(() => inp.focus({preventScroll:true}), 50);
+  f.onsubmit = e => {
+    e.preventDefault();
+    const v = parseFloat(inp.value.replace(/[, _]/g, ""));
+    if (isNaN(v)){ c.mistake(inp); return; }
+    inp.disabled = true; f.querySelector("button").disabled = true;
+    const ok = Math.abs(v - ans) <= (tol || 0);
+    inp.classList.add(ok ? "right" : "wrong");
+    c.done(ok, `Answer: **${ans.toLocaleString()}${unit ? " " + unit : ""}**. ${why || ""}`);
+  };
 };
 Q.ROUND = ROUND;
 

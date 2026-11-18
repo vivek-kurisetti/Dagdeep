@@ -74,7 +74,7 @@ a.q-dot:hover{transform:translateY(-3px)} a.q-dot:active{transform:translateY(4p
 .q-card b{font:800 .98rem var(--display)}
 .q-card-b{font-size:.86rem; line-height:1.45; display:-webkit-box; -webkit-line-clamp:3; -webkit-box-orient:vertical; overflow:hidden}
 .q-card.open .q-card-b{-webkit-line-clamp:unset; display:block}
-.q-card code, .q-why code, .q-body code, .q-r code, .q-flow code{font:500 .86em var(--mono); background:var(--code-bg); padding:1px 5px; border-radius:5px; overflow-wrap:anywhere}
+.q-card code, .q-why code, .q-body code, .q-r code, .q-flow code, .q-deep-b code, .q-card-d code{font:500 .86em var(--mono); background:var(--code-bg); padding:1px 5px; border-radius:5px; overflow-wrap:anywhere}
 /* play */
 .q-play{max-width:720px}
 .q-top{display:flex; align-items:center; gap:12px; margin:6px 0 4px}
@@ -180,3 +180,33 @@ a.q-dot:hover{transform:translateY(-3px)} a.q-dot:active{transform:translateY(4p
   .q-sheet{margin:16px -14px 0}
 }
 @media (prefers-reduced-motion: reduce){ .q-stage.in > *, .q-flow li, .q-sort-card.in, .q-tf.in, .q-stars.big span.on, .q-sheet{animation:none} .q-node{translate:none} }
+
+/* Deep content */
+.q-deep{margin:0 0 14px; border-radius:14px; background:var(--surface); border:1px solid var(--line)}
+.q-deep summary{cursor:pointer; padding:10px 14px; font:800 .78rem var(--body); letter-spacing:.1em; text-transform:uppercase; color:var(--hc); list-style:none}
+.q-deep summary::-webkit-details-marker{display:none}
+.q-deep summary::before{content:"▸ "} .q-deep[open] summary::before{content:"▾ "}
+.q-deep-b, .q-card-d{padding:0 14px 12px; font-size:.93rem; line-height:1.6}
+.q-deep-b p, .q-card-d p{margin:0 0 10px} .q-deep-b ul, .q-card-d ul{margin:0 0 10px; padding-left:20px} .q-deep-b li{margin:0 0 4px}
+.q-deep-b h4, .q-card-d h4{margin:12px 0 6px; font:800 .95rem var(--display)}
+.q-deep-b .q-code{font-size:.8rem}
+.q-tw{overflow-x:auto; margin:0 0 10px}
+.q-tw table{border-collapse:collapse; width:100%; font-size:.84rem}
+.q-tw th, .q-tw td{border:1px solid var(--line); padding:6px 8px; text-align:left; vertical-align:top}
+.q-tw th{background:var(--code-bg)}
+.q-card-d{display:none; padding:0} .q-card.open .q-card-d{display:block}
+.q-card.open{grid-column:1 / -1}
+.q-card-more{color:var(--hc); font-weight:700; font-size:.72rem} .q-card.open .q-card-more{display:none}
+.q-num{display:flex; gap:8px; align-items:center; flex-wrap:wrap}
+.q-num input{flex:1; min-width:140px; font:700 1.2rem var(--mono); padding:12px 14px; border-radius:14px; border:2px solid var(--line); background:var(--surface); color:var(--ink)}
+.q-num input:focus{outline:none; border-color:var(--hc)}
+.q-num input.right{border-color:#1a9d5c} .q-num input.wrong{border-color:#e5484d}
+.q-num span{font-weight:700; color:var(--muted)}
+.q-act{list-style:none; text-align:center; margin:14px 0 4px}
+.q-act span{display:inline-block; padding:6px 16px; border-radius:99px; font:900 .8rem var(--body); letter-spacing:.14em; text-transform:uppercase; color:#fff; background:linear-gradient(90deg, #7c3aed, #db2777)}
+.q-node.expert.q-lv .q-dot{background:linear-gradient(135deg, #1e293b, #475569); box-shadow:0 6px 0 #0f172a}
+.q-node.expert.done .q-dot{background:linear-gradient(135deg, #f5b301, #ff8a3d); box-shadow:0 6px 0 #b45309}
+.q-node.expert.locked .q-dot{background:var(--line); box-shadow:0 6px 0 color-mix(in srgb, var(--line) 70%, #000)}
+
+.q-deep-b code, .q-card-d code{white-space:normal; word-break:break-word}
+.q-learn{min-width:0; overflow-wrap:anywhere}
