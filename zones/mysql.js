@@ -41,3 +41,116 @@ levels:[
  ["pick","After a crash, a few committed payments were missing. Settings were flush_log_at_trx_commit=2. Fix?",["Set it to 1 and sync_binlog=1","Bigger buffer pool","More replicas","Semi-sync off"],0,"Full durability."]
 ]}
 ]});
+
+QUEST.more("mysql", [
+{act:"Expert", t:"InnoDB pages & B+trees", sub:"Pages, splits, ICP, AHI", rounds:[
+ ["learn","16 KB pages and tree height","InnoDB stores every index as a **B+tree of 16 KB pages**. Internal pages hold keys + child pointers; leaf pages of the clustered index hold **full rows**. High fan-out keeps trees shallow: billions of rows in 3–4 levels.",null,null,`### Fan-out maths
+An internal page holds (16 KB ÷ (key size + 6-byte pointer + overhead)) entries: with an 8-byte BIGINT key, roughly 1,000 children. A leaf holding ~100 rows of ~150 bytes:
+- 1 level: 100 rows
+- 2 levels: 100,000 rows
+- 3 levels: 100 million rows
+- 4 levels: 100 billion rows
+The top levels stay in the buffer pool, so a PK lookup is usually **one or two disk reads**.
+
+### Page splits and fill
+Inserting into a full page **splits** it into two half-full pages. Sequential PKs append to the right edge (pages filled ~15/16). Random keys (UUIDv4) split pages everywhere: more pages, more I/O, fragmented indexes. «MERGE_THRESHOLD» merges underfilled pages after deletes.
+
+### Secondary index lookups
+Secondary leaves store the index columns + **PK**. «SELECT * WHERE email = ?» does a secondary lookup, then a clustered index lookup by PK. **Wide PKs** bloat every secondary index.
+
+### Executor optimizations
+- **Index Condition Pushdown** (ICP): conditions on index columns not usable for seeking are checked in the storage engine before fetching rows («Using index condition»).
+- **Multi-Range Read** (MRR): sorts PKs from a secondary range scan before fetching rows, turning random I/O into sequential.
+- **Adaptive hash index**: InnoDB builds an in-memory hash for hot index pages automatically; can become a contention point in some workloads.
+- **Doublewrite buffer** protects against torn pages on crash.`],
+ ["num","Leaf pages hold 100 rows and internal pages fan out 1,000×. How many levels (including leaves) for 1 billion rows?",4,0,"levels","1e9 / 100 = 10M leaves → 10,000 → 10 → 1 root: leaf + 2 internal + root = 4 levels."],
+ ["match","EXPLAIN Extra",[["Using index","Covering index: no row lookups"],["Using index condition","Index Condition Pushdown filters in the engine"],["Using MRR","Primary keys sorted before fetching rows"],["Using filesort","Sort not provided by an index"],["Using temporary","Intermediate temp table (GROUP BY/DISTINCT)"]],"Extra tells you how the work is done."],
+ ["pick","A table has a 36-character VARCHAR UUID as PK and 6 secondary indexes. Biggest hidden cost?",["Every secondary index stores the 36-byte PK in every entry","The PK can't be indexed","Replication breaks","Binlog grows"],0,"Use a compact, ordered PK (BIGINT or BINARY(16) UUIDv7)."],
+ ["tf","Page truths",[["Sequential inserts fill pages much better than random inserts.",true,"Random keys split pages to half full."],["A PK lookup in a 100M-row table usually needs dozens of disk reads.",false,"3 levels, mostly cached."],["Secondary index entries contain the primary key.",true,"That's how they find the row."]]]
+]},
+{act:"Expert", t:"Redo, undo & purge", sub:"Checkpoints, history list", rounds:[
+ ["learn","Redo, checkpoints and LSN","Every change gets a **log sequence number** (LSN) and is written to the **redo log** before its page is flushed. A **checkpoint** advances as dirty pages are flushed; redo older than the checkpoint can be reused.",null,null,`### Redo capacity
+MySQL 8.0.30+ sizes redo with «innodb_redo_log_capacity». If writes outrun page flushing, the **checkpoint age** approaches capacity and InnoDB forces aggressive (sync) flushing — throughput collapses into stalls. Size redo to hold several minutes of peak writes; tune «innodb_io_capacity» / «innodb_io_capacity_max» to your storage.
+
+### Undo and MVCC
+Updates write the old version to **undo logs**; consistent reads walk undo chains to reconstruct the version visible to their **read view**. Undo is also used for rollback.
+
+### Purge and the history list
+**Purge threads** remove undo records (and delete-marked index entries) no read view needs anymore. «History list length» (in SHOW ENGINE INNODB STATUS) counts unpurged transactions. A **long-running transaction** (even an idle one) holding an old read view blocks purge: HLL grows into millions, undo tablespaces swell and every read walking long version chains slows down.
+
+### Crash recovery
+On restart, InnoDB replays redo from the last checkpoint (roll forward), then rolls back uncommitted transactions using undo. The binlog/redo two-phase commit decides which prepared transactions commit.`],
+ ["num","Redo capacity 8 GB; peak redo generation 40 MB/s with page flushing far behind. Seconds until redo is full (1 GB = 1,024 MB)?",205,2,"s","8,192 MB ÷ 40 MB/s ≈ 205 s. Then InnoDB stalls to flush. Size redo for minutes of peak."],
+ ["pick","History list length is 25 million and growing. Most likely cause?",["A long-open transaction blocking purge","Too many indexes","Binlog format","Small buffer pool"],0,"Find it in information_schema.innodb_trx and end it."],
+ ["order","InnoDB crash recovery",["Find the last checkpoint LSN","Replay redo forward from there","Check prepared transactions against the binlog","Commit those in the binlog, roll back the rest","Roll back uncommitted transactions using undo"],"Redo forward, undo backward."],
+ ["tf","Log truths",[["Undo logs serve both rollback and MVCC reads.",true,"Old versions live in undo."],["An idle open transaction is harmless.",false,"Its read view blocks purge."],["Too small redo causes write stalls under heavy load.",true,"Checkpoint pressure."]]]
+]},
+{act:"Expert", t:"Locking deep", sub:"Gap, insert intention, MDL", rounds:[
+ ["learn","Which locks a statement takes","Under REPEATABLE READ, locking reads and DML lock **index records** they scan: **record locks**, **gap locks** (the gap before a record), **next-key locks** (record + gap). **Insert intention** locks are gap locks taken by INSERTs that only conflict with existing gap locks.",null,null,`### Rules of thumb
+- **Unique index, equality, row exists**: only a record lock on that row.
+- **Unique index, row doesn't exist**: a gap lock — blocks inserts into that gap.
+- **Non-unique index or range**: next-key locks on every scanned record + the gap after the last.
+- **No usable index**: scans the clustered index, locking every row it examines.
+- READ COMMITTED mostly disables gap locking (except for FK and duplicate-key checks) and releases locks on non-matching rows early.
+
+### Queues without contention
+«SELECT … FROM jobs WHERE status = 'NEW' ORDER BY id LIMIT 10 FOR UPDATE SKIP LOCKED» lets many workers grab different rows without waiting. «NOWAIT» fails immediately instead of waiting.
+
+### Metadata locks
+Any query holds a **metadata lock** (MDL) on tables it touches until its **transaction** ends. «ALTER TABLE» needs an exclusive MDL: it waits behind a long transaction, and **every new query on that table queues behind the ALTER** — an outage. Set «lock_wait_timeout» low for DDL and check «performance_schema.metadata_locks».
+
+### Seeing locks
+«performance_schema.data_locks» and «data_lock_waits», «sys.innodb_lock_waits», and «SHOW ENGINE INNODB STATUS» (latest deadlock).`],
+ ["order","How an ALTER causes an outage",["An analyst's transaction reads payments and stays open","ALTER TABLE payments waits for an exclusive metadata lock","New SELECTs on payments queue behind the waiting ALTER","Connections pile up; app times out","Fix: kill the old transaction, use low lock_wait_timeout for DDL"],"MDL queues are FIFO."],
+ ["pick","Ten workers poll a jobs table and constantly wait on each other's locks. Fix?",["SELECT … FOR UPDATE SKIP LOCKED","SERIALIZABLE","LOCK TABLES","Bigger buffer pool"],0,"Each worker takes different rows."],
+ ["sort","Lock taken under REPEATABLE READ?",{"Record lock only":["UPDATE … WHERE id = 7 (PK, row exists)"],"Gap lock":["SELECT … WHERE id = 7 FOR UPDATE (PK, no such row)"],"Next-key locks on a range":["UPDATE … WHERE created_at > '2026-11-01' (non-unique index)"],"Locks every examined row":["UPDATE … WHERE note LIKE '%x%' (no index)"]},"Indexes decide lock footprint."],
+ ["tf","Locking truths",[["READ COMMITTED reduces gap locking.",true,"Fewer deadlocks for many OLTP apps."],["A plain SELECT inside an open transaction holds a metadata lock until commit.",true,"That's what blocks DDL."]]]
+]},
+{act:"Expert", t:"Optimizer deep", sub:"Stats, histograms, EXPLAIN ANALYZE", rounds:[
+ ["learn","How MySQL estimates","The optimizer estimates rows from **index statistics** (sampled pages: «innodb_stats_persistent_sample_pages», default 20), **index dives** for ranges, and optional **histograms** for non-indexed columns.",null,null,`### Tools
+- «EXPLAIN ANALYZE» (8.0.18+): runs the query and shows actual rows and time per iterator next to estimates.
+- «ANALYZE TABLE t» refreshes index stats; «ANALYZE TABLE t UPDATE HISTOGRAM ON status, country WITH 64 BUCKETS» adds histograms for skewed, non-indexed columns used in filters and joins.
+- «eq_range_index_dive_limit» (200): beyond this many IN-list values, the optimizer uses statistics instead of dives — big IN lists can get bad estimates.
+
+### Join algorithms
+Nested loop with index lookups (the classic), and **hash join** (8.0.18+) for joins without usable indexes — replacing block nested loop.
+
+### Steering
+- Optimizer hints: «/*+ INDEX(t idx) */», «JOIN_ORDER(a, b)», «NO_RANGE_OPTIMIZATION», «SET_VAR(...)» per query.
+- **Invisible indexes**: «ALTER TABLE t ALTER INDEX idx INVISIBLE» to test dropping an index safely.
+- **Functional indexes**: «INDEX ((DATE(created_at)))» or on JSON paths.
+- Derived condition pushdown (8.0.22+) pushes outer WHERE conditions into derived tables.`],
+ ["pick","You want to know if dropping idx_old is safe without risking a rebuild. Use…",["ALTER INDEX idx_old INVISIBLE and watch","DROP and recreate if needed","FORCE INDEX","ANALYZE TABLE"],0,"Invisible indexes are maintained but ignored by the optimizer."],
+ ["match","Tool → use",[["EXPLAIN ANALYZE","Actual vs estimated rows per step"],["Histogram","Selectivity of a skewed non-indexed column"],["Functional index","Index on DATE(created_at) or a JSON path"],["SET_VAR hint","Change a variable for one query"]],"Measure, then steer."],
+ ["fill","Add a histogram for a skewed status column",'ANALYZE TABLE payments ___ HISTOGRAM ON status WITH ___ BUCKETS;',["UPDATE","64"],["CREATE","ALL","DROP"],"Helps when 99% of rows are SUCCESS and 0.1% are FAILED."],
+ ["tf","Optimizer truths",[["MySQL 8 can hash join without indexes.",true,"Since 8.0.18."],["Huge IN lists always get accurate estimates.",false,"Past eq_range_index_dive_limit, stats are used."]]]
+]},
+{act:"Expert", t:"Replication & HA deep", sub:"Group commit, writesets, lossless", rounds:[
+ ["learn","Parallel replication with writesets","Replicas can apply transactions in parallel when they don't conflict. With **WRITESET** dependency tracking, the source records a hash of the rows each transaction touched; non-overlapping transactions run in parallel on the replica even if they committed sequentially on the source.",null,null,`### Settings
+- «replica_parallel_workers» (e.g. 8–16) and «replica_preserve_commit_order=ON» (commit in source order).
+- Writeset-based dependency tracking is the default behaviour in recent versions (8.4).
+- **Binlog group commit** batches many transactions' fsyncs into one, essential with «sync_binlog=1».
+
+### Semi-sync: lossless
+«rpl_semi_sync_source_wait_point = AFTER_SYNC» (lossless): the source writes and syncs the binlog, waits for a replica to acknowledge receipt, **then** commits in InnoDB and returns to the client. No client ever sees a commit that no replica has — failover won't lose acknowledged transactions. If no replica answers within the timeout, it falls back to async.
+
+### Crash-safe replicas
+Store replica positions in InnoDB tables (default), and «relay_log_recovery=ON» so a crashed replica re-fetches relay logs instead of trusting possibly corrupt ones.
+
+### HA stacks
+**InnoDB Cluster** (Group Replication + MySQL Router + Shell), **Orchestrator**-style topology managers, or managed services (RDS Multi-AZ, Aurora with shared storage replication). With GTIDs, re-pointing replicas after failover is «CHANGE REPLICATION SOURCE TO … SOURCE_AUTO_POSITION=1».`],
+ ["order","Lossless semi-sync commit (AFTER_SYNC)",["Transaction prepares in InnoDB","Binlog written and synced","Wait for at least one replica ACK","Commit in InnoDB","Return OK to the client"],"Clients never see commits unknown to replicas."],
+ ["pick","Replica lags with 1 applier thread while the source runs 2,000 small independent transactions/s. Fix?",["Parallel workers with writeset dependency tracking","STATEMENT binlog","Bigger relay log","Disable GTID"],0,"Apply non-conflicting transactions in parallel."],
+ ["match","Setting",[["replica_parallel_workers","Number of applier threads"],["replica_preserve_commit_order","Replica commits in source order"],["AFTER_SYNC","Lossless semi-sync"],["relay_log_recovery","Crash-safe relay logs"]],"Correct and fast replicas."],
+ ["tf","Replication truths",[["Semi-sync never falls back to async.",false,"It does after rpl_semi_sync_source_timeout."],["GTID auto-positioning simplifies re-pointing replicas.",true,"No file/pos maths."]]]
+]},
+{act:"Expert", t:"Expert boss: MySQL deep incident", boss:true, time:45, rounds:[
+ ["pick","ALTER TABLE hangs and all queries on the table pile up. Root cause?",["Metadata lock queued behind a long open transaction","Disk full","Binlog format","Gap locks"],0,"Kill the blocker; set lock_wait_timeout for DDL."],
+ ["pick","Write throughput collapses every few minutes with flush storms. Check…",["Redo capacity vs checkpoint age and io_capacity","Query cache","Histograms","Semi-sync"],0,"Checkpoint pressure."],
+ ["pick","Reads slow down over days; history list length 40M. Fix?",["End long-running transactions so purge can run","Add replicas","Drop indexes","Bigger redo"],0,"Unblock purge."],
+ ["pick","Job workers deadlock and wait on each other constantly. Fix?",["FOR UPDATE SKIP LOCKED with ordered picks","SERIALIZABLE","Table locks","No indexes"],0,"Queue pattern."],
+ ["pick","Failover lost the last few acknowledged payments. Prevent?",["Semi-sync AFTER_SYNC (lossless)","Async with more replicas","STATEMENT binlog","Bigger buffer pool"],0,"Lossless commits."],
+ ["pick","Optimizer picks a full scan for status = 'FAILED' (0.1% of rows, unindexed). Quick win?",["Histogram on status, or an index","FORCE INDEX on PK","Restart","Increase sample pages only"],0,"Give it selectivity info."],
+ ["pick","Inserts slow; table uses VARCHAR(36) UUID PK with many indexes. Fix?",["Compact ordered PK (BIGINT / BINARY(16) UUIDv7)","More indexes","Partitioning by UUID","Larger pages"],0,"Sequential, small keys."]
+]}
+]);

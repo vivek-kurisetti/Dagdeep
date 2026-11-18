@@ -40,3 +40,117 @@ levels:[
  ["pick","Session docs should vanish after 30 minutes. Use…",["TTL index","Cron delete every second","Capped collection with sharding","Transactions"],0,"Built-in expiry."]
 ]}
 ]});
+
+QUEST.more("mongodb", [
+{act:"Expert", t:"WiredTiger internals", sub:"Cache, checkpoints, journal", rounds:[
+ ["learn","How WiredTiger stores and caches","WiredTiger stores each collection and index as a **B-tree** file, with **document-level concurrency** (optimistic, MVCC snapshots). Its **cache** defaults to the larger of 50% of (RAM − 1 GB) or 256 MB; the rest of RAM serves as OS file cache.",null,null,`### Durability
+- **Journal** (write-ahead log): with «j: true» or majority write concern on a journaled replica set, a write is acknowledged after the journal is synced (journal commit interval ~100 ms otherwise).
+- **Checkpoints** every 60 seconds write a consistent snapshot of data files. Recovery = last checkpoint + journal replay.
+
+### Cache pressure and eviction
+Pages in cache are clean or **dirty**. Eviction threads write out and evict pages when cache use passes targets (e.g. 80% total, 5% dirty). When application threads have to help evict (cache > 95% or dirty > 20%), **latency spikes**. Watch «db.serverStatus().wiredTiger.cache»: bytes in cache, tracked dirty bytes, "application threads page read/evict".
+
+### Compression
+Collections use **snappy** by default (zstd and zlib available); indexes use **prefix compression**. On-disk size ≪ in-cache size: data is uncompressed in the WiredTiger cache, compressed in the OS cache and on disk.
+
+### Working set
+Performance depends on the **working set** (hot documents + indexes) fitting in cache. If the index alone doesn't fit, every lookup risks disk reads. «db.collection.totalIndexSize()» vs cache size is a first sanity check.`],
+ ["num","A server has 64 GB RAM. Default WiredTiger cache size (GB)?",31.5,0.1,"GB","50% of (64 − 1) GB = 31.5 GB."],
+ ["pick","p99 latency spikes and serverStatus shows application threads doing eviction. Cause?",["Cache under pressure (working set too big or dirty data too high)","Too few indexes","Sharding","Read preference"],0,"Grow RAM, shrink the working set, or speed up writes to disk."],
+ ["match","Mechanism",[["Journal","Write-ahead log for durability between checkpoints"],["Checkpoint","Consistent data file snapshot every ~60 s"],["Eviction","Removing pages from cache, writing dirty ones"],["Prefix compression","Shrinks index keys sharing prefixes"]],"Storage engine basics."],
+ ["tf","Engine truths",[["WiredTiger locks whole collections for writes.",false,"Document-level concurrency."],["Data is compressed inside the WiredTiger cache.",false,"Uncompressed in cache, compressed on disk."]]]
+]},
+{act:"Expert", t:"Query planner & indexes deep", sub:"Plan cache, ESR edge cases", rounds:[
+ ["learn","How MongoDB picks a plan","For a new query shape, the planner generates candidate plans (one per usable index or combination), **races** them for a trial period, and caches the winner in the **plan cache** keyed by the query shape.",null,null,`### Plan cache behaviour
+- Cached plans are reused for the same shape; if a cached plan performs much worse than expected (works 10× more than during the trial), it's re-planned.
+- Plans are evicted on index changes, collection drops or restarts. «planCacheClear» / «$planCacheStats» to inspect.
+- Data skew can make a cached plan great for one value and terrible for another.
+
+### ESR edge cases
+- **$in** with few values acts like equality for ESR and can produce merged sorts; with many values it behaves more like a range for sorting purposes.
+- A sort on «{created_at: -1}» can use an index on «{created_at: 1}» (traversed backwards). For compound sorts, directions must match the index or be all reversed.
+- Range before sort in the index means the sort can't use the index → in-memory SORT stage (100 MB limit, spills with allowDiskUse).
+
+### Covered queries
+If the filter and projection only use indexed fields (and exclude «_id» unless indexed), the query is **covered**: «totalDocsExamined: 0».
+
+### Monitoring
+Profiler («db.setProfilingLevel(1, {slowms: 100})»), slow query logs, and «explain('allPlansExecution')» to see the race.`],
+ ["sort","Can the index {merchant: 1, created_at: -1} support it without an in-memory sort?",{"Yes":["find({merchant: 7}).sort({created_at: -1})","find({merchant: 7}).sort({created_at: 1})","find({merchant: 7, created_at: {$gte: d}}).sort({created_at: -1})"],"No (in-memory SORT)":["find({created_at: {$gte: d}}).sort({merchant: 1, amount: 1})","find({merchant: {$gt: 5}}).sort({created_at: -1})"]},"Equality prefix + sort field order matters."],
+ ["pick","totalDocsExamined is 0 and nReturned is 500. What happened?",["Covered query answered from the index","Bug","Collection scan","Cache miss"],0,"Projection only used indexed fields."],
+ ["order","How a new query shape gets a plan",["Planner enumerates candidate plans","Candidates run a short trial in parallel","Winner by work done and results produced","Winner stored in the plan cache for this shape","Re-planned if it later performs far worse"],"The plan cache is per query shape."],
+ ["tf","Planner truths",[["An index on {a: 1} can serve sort({a: -1}).",true,"Traversed backward."],["In-memory sorts have no memory limit.",false,"100 MB per stage before spilling (or failing without disk use)."]]]
+]},
+{act:"Expert", t:"Replication deep", sub:"Oplog, elections, read/write concerns", rounds:[
+ ["learn","The oplog is idempotent","Each write becomes one or more **idempotent** oplog entries (e.g. «$inc» becomes «$set» of the resulting value). Secondaries pull and apply them in batches. The oplog is a capped collection; its size sets the **oplog window**.",null,null,`### Oplog window
+Window = how long a secondary can be offline (or lagging) and still catch up. If it falls off the end, it needs a full **initial sync**. Size the oplog for maintenance windows plus peak write bursts; «rs.printReplicationInfo()» shows the window.
+
+### Elections
+Raft-like protocol: a secondary calls an election after «electionTimeoutMillis» (10 s) without hearing from the primary. Priorities choose preferred primaries; hidden and delayed members have priority 0. Writes with w:1 not yet replicated at failover are **rolled back** into rollback files.
+
+### Concerns
+| Read concern | Returns |
+|---|---|
+| local | Latest data on that node (may roll back) |
+| majority | Data acknowledged by a majority (won't roll back) |
+| linearizable | Majority + reflects all prior majority writes (primary only, slow) |
+| snapshot | Point-in-time snapshot (transactions, reads at clusterTime) |
+
+Write concern «{w: 'majority', j: true}» = durable on a majority. **Causal consistency** sessions guarantee read-your-writes across secondaries using cluster times.`],
+ ["num","Oplog is 50 GB; peak oplog generation is 20 MB/s. Oplog window in minutes (1 GB = 1,024 MB)?",43,1,"min","50 × 1,024 ÷ 20 = 2,560 s ≈ 43 minutes. A secondary down longer needs an initial sync."],
+ ["match","Need → setting",[["Never lose acknowledged writes on failover","w: 'majority'"],["Read only data that can't be rolled back","readConcern 'majority'"],["Read-your-writes from secondaries","Causally consistent session"],["Reporting replica that never becomes primary","priority 0, hidden member"]],"Pick per operation."],
+ ["pick","After a failover, a 'rollback' directory appears with documents. Meaning?",["Writes acknowledged with w:1 that never replicated were undone","Normal backup","Index rebuild","Shard migration"],0,"Use majority write concern for important data."],
+ ["tf","Replication truths",[["An $inc is replicated as $inc.",false,"Converted to an idempotent $set."],["A small oplog window risks expensive initial syncs.",true,"Size it generously."]]]
+]},
+{act:"Expert", t:"Sharding deep", sub:"Ranges, balancer, zones, resharding", rounds:[
+ ["learn","Ranges, the balancer and targeting","A sharded collection's data is divided into **ranges** (formerly "chunks") by shard key. The **balancer** moves ranges between shards to even out **data size** (MongoDB 7.0+ balances by data size rather than chunk count; auto-splitting was removed). mongos routes using the cached routing table.",null,null,`### Operations and targeting
+- Queries with the **full shard key** (or a prefix for ranged keys) → targeted to one shard.
+- Without it → **scatter-gather** to all shards, merged on mongos.
+- Single-document updates/deletes by «_id» in a collection sharded on another key → broadcast or need the shard key (recent versions relax this but targeting is still faster).
+- **Unique indexes** must be prefixed by the shard key (except «_id» uniqueness, which is per shard unless the shard key includes it).
+
+### Choosing and changing keys
+- Hashed keys spread writes evenly but make range queries scatter.
+- Compound keys like «{merchant_id: 1, created_at: 1}» keep a merchant's data together while spreading merchants.
+- **refineCollectionShardKey** adds suffix fields; **reshardCollection** (5.0+) changes the key online by copying data.
+
+### Zones
+Assign shard key ranges to zones (e.g. «region: 'IN'» → shards in Mumbai) for data residency and locality.
+
+### Jumbo ranges
+A range that can't be split because one shard-key value has too many documents ("jumbo") can't move. Low-cardinality keys cause them — pick high-cardinality keys or add a suffix.`],
+ ["sort","Targeted or scatter-gather? (shard key {merchant_id: 1, created_at: 1})",{"Targeted":["find({merchant_id: 7})","find({merchant_id: 7, created_at: {$gte: d}})"],"Scatter-gather":["find({created_at: {$gte: d}})","find({status: 'FAILED'})"]},"Include the shard key prefix in hot queries."],
+ ["pick","Payments must stay in India-located shards for compliance. Use…",["Zone sharding on a region field in the shard key","Hashed sharding","More mongos","Read preference nearest"],0,"Zones pin ranges to shards."],
+ ["match","Command",[["reshardCollection","Change the shard key online"],["refineCollectionShardKey","Add suffix fields to the shard key"],["sh.addShardToZone / updateZoneKeyRange","Pin ranges to locations"],["sh.status()","See distribution and balancer state"]],"Sharding admin toolkit."],
+ ["tf","Sharding truths",[["Unique indexes in sharded collections must start with the shard key.",true,"Uniqueness is enforced per shard."],["Hashed shard keys make range queries on the key targeted.",false,"They scatter."]]]
+]},
+{act:"Expert", t:"Aggregation & transactions deep", sub:"Pipeline optimizer, $merge, limits", rounds:[
+ ["learn","Pipeline optimization and limits","The aggregation optimizer reorders and coalesces stages: moves «$match» before «$project»/«$addFields» when possible, merges «$sort» + «$limit» into a top-k sort, pushes «$match» into the index scan. Each blocking stage has a **100 MB memory limit**; with «allowDiskUse» (default true since 6.0 via «allowDiskUseByDefault») it spills.",null,null,`### Useful stages
+- «$lookup» with «let» + «pipeline» for correlated subqueries; index the foreign field.
+- «$group» with accumulators, «$setWindowFields» for running totals and ranks.
+- «$merge» into a collection (insert/replace/merge/keepExisting per match) → **on-demand materialized views** refreshed incrementally.
+- «$unionWith» to combine collections.
+
+### Change streams
+Built on the oplog: watch a collection/database/cluster with a pipeline filter. Each event has a **resume token**; store it to resume after restarts as long as the oplog still contains that point. «fullDocument: 'updateLookup'» fetches the current document for updates; pre- and post-images can be enabled per collection.
+
+### Transactions
+Multi-document ACID across collections, shards (distributed transactions with two-phase commit). Limits and costs:
+- Default max lifetime **60 seconds** («transactionLifetimeLimitSeconds»).
+- WriteConflict errors → retry (drivers' «withTransaction» does it).
+- Across shards, commits need coordination: slower; design documents so most writes are single-document atomic.`],
+ ["fill","Incremental materialized view of daily GMV",'db.payments.aggregate([\n  { $match: { dt: "2026-11-18" } },\n  { $group: { _id: { m: "$merchant_id", dt: "$dt" }, gmv: { $sum: "$amount" } } },\n  { ___: { into: "daily_gmv", on: "_id", whenMatched: "___", whenNotMatched: "insert" } }\n])',["$merge","replace"],["$out","append","$lookup"],"$merge updates only today's rows; $out would replace the collection."],
+ ["pick","A change stream consumer was down for 3 hours; resuming fails with 'resume point no longer in oplog'. Fix?",["Re-sync from a snapshot, then resume; enlarge the oplog window","Retry forever","Use $out","Lower write concern"],0,"Resume tokens need oplog history."],
+ ["order","Optimizer rewrites you can rely on",["$match moved as early as possible","Adjacent $match stages merged","$sort + $limit become a top-k sort","Leading $match/$sort use indexes"],"Still write pipelines in a sensible order."],
+ ["tf","Aggregation truths",[["$out can update just some documents of the target.",false,"$out replaces the collection; $merge updates."],["Transactions have a default 60-second lifetime.",true,"Keep them short."]]]
+]},
+{act:"Expert", t:"Expert boss: Mongo at scale", boss:true, time:45, rounds:[
+ ["pick","Latency spikes; application threads evicting pages; indexes 2× cache size. Fix?",["Reduce working set (drop unused indexes) or add RAM","More shards only","w:0","Read from secondaries"],0,"Fit hot data in cache."],
+ ["pick","A query is fast for small merchants, slow for the biggest after a restart. Likely?",["Plan cache picked a plan good for small values","Oplog too small","Journal off","Hashed key"],0,"Skew vs cached plan; add a better index or hint."],
+ ["pick","A secondary was offline 2 hours and needs initial sync. Prevent?",["Larger oplog window","More indexes","Priority 0","Smaller documents"],0,"Size the oplog."],
+ ["pick","Queries by created_at range hit all shards. Shard key is hashed _id. Options?",["Compound shard key starting with a commonly filtered field (via reshard)","More mongos","Zones by _id","Bigger chunks"],0,"Target hot queries."],
+ ["pick","Daily GMV collection must update incrementally. Use…",["$merge from an aggregation","$out every minute","Change stream only","Transactions"],0,"On-demand materialized view."],
+ ["pick","Rolled-back documents after failover worry finance. Fix?",["w: 'majority' for payments","w: 1","Hidden members","Bigger cache"],0,"Majority acks survive elections."],
+ ["pick","Data residency: Indian merchants' data must stay in India. Use…",["Zone sharding","Hashed sharding","Change streams","Capped collections"],0,"Pin ranges to regions."]
+]}
+]);
