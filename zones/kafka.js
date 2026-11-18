@@ -51,3 +51,127 @@ levels:[
  ["pick","A new schema version breaks old consumers. Prevent it how?",["Enforce BACKWARD compatibility in the registry","Use JSON without schemas","More partitions","Compaction"],0,"The registry rejects incompatible versions."]
 ]}
 ]});
+
+QUEST.more("kafka", [
+{act:"Expert", t:"Log storage internals", sub:"Segments, indexes, compaction", rounds:[
+ ["learn","A partition is a directory of segments","Each partition is a folder of **segments**. Each segment has a «.log» (records in batches), a sparse offset «.index», a «.timeindex», and more. Only the last, **active** segment is written to.",["Producer batch arrives","Appended to active segment .log","Index entry every ~4 KB","Segment rolls at segment.bytes or segment.ms","Old segments deleted or compacted"],null,`### Segment files
+- «00000000000004520000.log»: the file name is the **base offset** of the first record in the segment.
+- «.index»: sparse map from relative offset → byte position. One entry roughly every «index.interval.bytes» (4 KB). To find offset N, Kafka binary-searches the index, then scans forward a few KB.
+- «.timeindex»: timestamp → offset, used by «offsetsForTimes» and time-based retention.
+- Segments roll when they reach «segment.bytes» (1 GB default) or age «segment.ms» (7 days).
+
+### Retention works per segment
+Retention deletes **whole closed segments**. The active segment is never deleted, so a low-traffic topic with «retention.ms=1h» can keep data for up to «segment.ms» if the segment never rolls. Lower «segment.ms» on such topics.
+
+### Why Kafka is fast
+- **Sequential writes** to the end of a file.
+- The **OS page cache** holds hot data; Kafka relies on it rather than a JVM cache, so give brokers lots of free RAM, not a huge heap (6–8 GB heap is common).
+- **Zero-copy** («sendfile») sends bytes from page cache to the socket without copying through the JVM — unless TLS is on, which needs encryption in user space.
+- **Batching + compression**: producers compress whole batches; brokers store them compressed (if codecs match) and consumers decompress.`],
+ ["pick","A topic has retention.ms = 1 hour but data from 5 days ago is still readable. Most likely?",["Broker bug","Low traffic: the active segment never rolled (segment.ms 7 days)","Compaction","Replication lag"],1,"Retention only deletes closed segments. Lower segment.ms for low-volume topics."],
+ ["learn","How compaction actually runs","Log cleaner threads compact partitions whose **dirty ratio** (uncompacted bytes ÷ total) exceeds «min.cleanable.dirty.ratio» (0.5). They build a key → latest offset map over the dirty section and rewrite older segments keeping only the latest record per key.",null,null,`### Key settings
+- «min.cleanable.dirty.ratio» (0.5): how much dirty data before cleaning. Lower = more frequent cleaning, more I/O.
+- «min.compaction.lag.ms» (0): a record is guaranteed uncompacted for at least this long — consumers can see every update within the window.
+- «max.compaction.lag.ms»: force cleaning after this time even if the ratio is low (important for GDPR-style deletes).
+- «delete.retention.ms» (24 h): how long **tombstones** stay after compaction, so slow consumers still see the delete.
+
+### Guarantees
+- Order of records is preserved; offsets never change (compacted logs have gaps).
+- A consumer reading from the start eventually sees the **latest value for every key**.
+- The head of the log (active segment) is never compacted.
+
+### Common use
+Changelog topics for Kafka Streams state, Debezium CDC topics, «__consumer_offsets», config/state topics in Kafka Connect («cleanup.policy=compact»). «cleanup.policy=compact,delete» combines both: compaction plus time-based deletion.`],
+ ["match","Compaction setting",[["min.cleanable.dirty.ratio","When a partition becomes eligible for cleaning"],["min.compaction.lag.ms","Minimum time a record stays uncompacted"],["max.compaction.lag.ms","Maximum time before cleaning is forced"],["delete.retention.ms","How long tombstones survive after compaction"]],"Tune together for CDC and GDPR deletes."],
+ ["num","50 MB/s into a topic, 7-day retention, replication factor 3. Disk needed across the cluster (TB, ignore compression)?",91,1,"TB","50 MB/s × 86,400 s × 7 ≈ 30.2 TB per copy × 3 replicas ≈ 90.7 TB. Plan headroom on top."],
+ ["tf","Storage facts",[["Compaction changes the offsets of kept records.",false,"Offsets never change; gaps appear."],["TLS disables zero-copy transfer.",true,"Data must be encrypted in user space."],["Kafka brokers should have a very large JVM heap for caching.",false,"The OS page cache does the caching."]]]
+]},
+{act:"Expert", t:"Replication protocol", sub:"HW, LEO, leader epochs, KRaft", rounds:[
+ ["learn","LEO and the high watermark","Every replica has a **log end offset** (LEO): the next offset it would write. The leader's **high watermark** (HW) is the highest offset replicated to all ISR members. Consumers only read up to the HW.",["Leader appends at LEO","Followers fetch and append","Followers report their LEO in the next fetch","Leader advances HW = min(ISR LEOs)","Consumers can read up to HW"],null,`### The fetch loop
+Followers are just consumers of the leader: they send Fetch requests with their current offset. The leader learns each follower's LEO from those requests and advances the HW to the minimum LEO across the ISR. The HW piggybacks back to followers on the next fetch response.
+
+### ISR membership
+A follower is removed from the ISR if it hasn't caught up to the leader's LEO within «replica.lag.time.max.ms» (30 s). It rejoins once it catches up. With «acks=all», the leader waits until all **current ISR** members have the batch — and refuses writes if the ISR is smaller than «min.insync.replicas».
+
+### Leader epochs (why HW-based truncation was replaced)
+After a leader change, followers must truncate any records the new leader doesn't have. Early Kafka truncated to the HW, which could lose acknowledged data or create divergent logs in double-failure scenarios. **Leader epochs** (KIP-101) record which epoch started at which offset; a follower asks the new leader for the end offset of its last epoch and truncates exactly there.
+
+### KRaft
+Since Kafka 4.0, metadata lives in a Raft-replicated **__cluster_metadata** log managed by a controller quorum (usually 3 or 5 controllers). Brokers follow the metadata log, which makes failover and partition counts in the millions much faster than ZooKeeper.`],
+ ["pick","ISR = {1, 2, 3}. LEOs: leader 1 = 500, broker 2 = 480, broker 3 = 492. High watermark?",["500","492","480","1,472"],2,"HW = min LEO across the ISR = 480. Consumers can read offsets < 480."],
+ ["order","Follower recovery after a leader change (with leader epochs)",["New leader elected with epoch 7","Old follower restarts with records from epoch 6","Follower sends OffsetsForLeaderEpoch(epoch 6)","Leader replies with the end offset of epoch 6","Follower truncates to that offset and resumes fetching"],"Exact truncation, no data divergence."],
+ ["match","Term",[["LEO","Next offset a replica will write"],["High watermark","Offsets fully replicated to the ISR; visible to consumers"],["replica.lag.time.max.ms","How long a follower may lag before leaving the ISR"],["Preferred leader","First replica in the assignment; rebalanced back automatically"],["Controller quorum","Raft group that owns cluster metadata in KRaft"]],"These terms explain every durability incident."],
+ ["num","RF = 5, min.insync.replicas = 3, acks = all. How many brokers holding this partition can fail while producers still succeed?",2,0,"brokers","Writes need ≥ 3 in-sync replicas; 5 − 3 = 2 failures tolerated."],
+ ["tf","Replication truths",[["Consumers can read records above the high watermark.",false,"Only below it, to avoid reading data that might be truncated."],["A slow follower is dropped from the ISR rather than blocking acks=all writes forever.",true,"After replica.lag.time.max.ms."],["Kafka 4.0 can run with ZooKeeper.",false,"ZooKeeper mode was removed."]]]
+]},
+{act:"Expert", t:"Producer internals", sub:"Accumulator, timeouts, ordering", rounds:[
+ ["learn","Inside the producer","«send()» serializes, picks a partition, and appends to a per-partition batch in the **RecordAccumulator**. A background **sender thread** drains ready batches into requests per broker.",["Serialize key/value","Partitioner chooses partition","Append to batch in RecordAccumulator","Sender thread builds produce requests","Broker acks; callback fires"],null,`### Memory and blocking
+- «buffer.memory» (32 MB): total bytes for unsent batches. When full, «send()» **blocks** up to «max.block.ms» (60 s), then throws.
+- «batch.size» (16 KB): max bytes per partition batch. «linger.ms» (5 ms default since Kafka 4.0, 0 before): how long to wait to fill a batch.
+
+### Timeouts that decide "failed"
+- «request.timeout.ms» (30 s): one request's wait for a broker response.
+- «delivery.timeout.ms» (120 s): total time from «send()» to success or failure, **including retries**. Must be ≥ linger.ms + request.timeout.ms.
+- «retries» defaults to effectively infinite; the delivery timeout is what actually bounds it.
+
+### Ordering with retries
+With idempotence on, up to «max.in.flight.requests.per.connection» = 5 requests can be in flight and ordering is still guaranteed, because the broker checks per-partition **sequence numbers** and rejects out-of-order batches. Without idempotence, in-flight > 1 + retries can reorder.
+
+### Partitioner
+Records **with keys** use murmur2(key) % partitions. Records **without keys** use the **sticky partitioner**: fill a batch for one partition, then switch — far better batching than round-robin. Since 3.3 it's also adaptive to slow brokers.`],
+ ["order","Lifecycle of producer.send()",["Serializer turns key and value into bytes","Partitioner picks the partition","Record appended to that partition's batch","Sender thread ships the batch when full or linger expires","Broker writes and acks; callback/future completes"],"send() is asynchronous; the callback reports success or failure."],
+ ["pick","send() calls start blocking for 60 s and then throw TimeoutException. Brokers are slow. What filled up?",["buffer.memory","batch.size","__consumer_offsets","The page cache"],0,"Unsent batches exhausted buffer.memory; send blocks for max.block.ms."],
+ ["bug","Which producer config breaks with an error at startup?",["enable.idempotence=true","acks=all","linger.ms=20","delivery.timeout.ms=10000 with request.timeout.ms=30000"],3,"delivery.timeout.ms must be ≥ linger.ms + request.timeout.ms; the client rejects this config."],
+ ["num","linger.ms=20, a producer sends 1 KB records at 5,000 records/s to one partition, batch.size=64 KB. Records per batch (approx)?",64,6,"records","In 20 ms you get ~100 records (100 KB), but the batch closes at 64 KB ≈ 64 records first."],
+ ["tf","Producer truths",[["Keyless records are spread record-by-record round-robin in modern clients.",false,"The sticky partitioner fills a batch per partition."],["With idempotence, max.in.flight up to 5 keeps ordering.",true,"Sequence numbers enforce it."],["delivery.timeout.ms bounds total retry time.",true,"Retries alone are effectively unlimited."]]]
+]},
+{act:"Expert", t:"Transactions & EOS", sub:"Coordinator, markers, LSO", rounds:[
+ ["learn","How transactions work inside","A **transaction coordinator** (a broker owning a partition of «__transaction_state») tracks each «transactional.id». Writes go to partitions normally; on commit, the coordinator writes **control markers** (COMMIT or ABORT) into every partition touched.",["initTransactions: get producer id + bump epoch (fences zombies)","beginTransaction (local)","AddPartitionsToTxn as new partitions are written","sendOffsetsToTransaction for consumed offsets","EndTxn: coordinator writes PREPARE, then markers, then COMPLETE"],null,`### Zombie fencing
+«initTransactions()» increments the **producer epoch** for that «transactional.id». If an old instance of the same app (a "zombie" after a network partition) tries to write, brokers reject it with ProducerFencedException. That's why each logical producer needs a **stable, unique transactional.id**.
+
+### What consumers see
+- «isolation.level=read_uncommitted»: reads up to the high watermark, including records of open and aborted transactions.
+- «read_committed»: reads only up to the **last stable offset (LSO)** — the first offset of the oldest still-open transaction — and filters out aborted records using the aborted-transaction index.
+
+So **one long-running open transaction blocks read_committed consumers** on that partition, even for other producers' committed data after it. «transaction.timeout.ms» (60 s default) aborts transactions that hang.
+
+### Exactly-once in practice
+Kafka Streams with «processing.guarantee=exactly_once_v2» wraps consume → process → produce + offset commit in transactions. Exactly-once covers **Kafka-to-Kafka**; writing to an external DB needs idempotent upserts or a DB transaction that stores the offsets.`],
+ ["pick","read_committed consumers on partition 3 stopped advancing, but producers keep writing committed data. Cause?",["An old transaction is still open, pinning the LSO","Consumer lag","Compaction","acks=1"],0,"The LSO can't move past the oldest open transaction. Check transaction.timeout.ms and stuck producers."],
+ ["sort","Exactly-once or not?",{"Exactly-once (with the right setup)":["Kafka Streams with exactly_once_v2","Transactional producer + sendOffsetsToTransaction + read_committed downstream"],"At-least-once":["Consumer writes to Postgres then commits offsets","Idempotent producer alone across app restarts","Kafka sink connector with plain inserts"]},"EOS needs atomic output + offsets; external systems need idempotency."],
+ ["match","Piece",[["__transaction_state","Coordinator's log of transaction status"],["Control marker","COMMIT/ABORT record written into each partition"],["Last stable offset","Highest offset read_committed consumers may read"],["Producer epoch","Fences zombie instances of a transactional.id"]],"Each part solves one failure mode."],
+ ["tf","EOS truths",[["Exactly-once covers writes to an external MySQL automatically.",false,"Only Kafka-to-Kafka; external sinks need idempotency."],["Two app instances sharing one transactional.id fence each other.",true,"Only the newest epoch can write."],["Control markers take offsets in the partition.",true,"That's why transactional topics show offset gaps."]]]
+]},
+{act:"Expert", t:"Consumer group protocol", sub:"Rebalances, static members, KIP-848", rounds:[
+ ["learn","Classic rebalance protocol","Members send **JoinGroup** to the group coordinator; one member (the leader) computes the assignment; everyone gets it via **SyncGroup**. With the **eager** protocol, all members revoke all partitions first: a stop-the-world pause.",null,null,`### Timers
+- «heartbeat.interval.ms» (3 s): background heartbeats.
+- «session.timeout.ms» (45 s since Kafka 3.0): no heartbeat for this long → member considered dead → rebalance.
+- «max.poll.interval.ms» (5 min): time allowed between «poll()» calls. Processing too long → the client leaves the group itself → rebalance.
+
+### Cooperative (incremental) rebalancing
+With «CooperativeStickyAssignor», a rebalance only revokes partitions that actually need to move, in two rounds. Members keep processing everything else. Kafka Streams uses cooperative rebalancing by default.
+
+### Static membership
+Set «group.instance.id» per instance (e.g. pod name). A restarting member with the same id gets its old partitions back **without a rebalance**, as long as it returns within session.timeout.ms. Great for rolling deploys.
+
+### The new protocol (KIP-848)
+The next-generation consumer protocol (GA in Kafka 4.0, «group.protocol=consumer») moves assignment logic to the **broker**, makes rebalances incremental by design, and removes the global synchronization barrier. Members heartbeat and receive their target assignment directly.
+
+### Fetch tuning
+«fetch.min.bytes» and «fetch.max.wait.ms» (500 ms) trade latency for bigger fetches; «max.partition.fetch.bytes» (1 MB) and «fetch.max.bytes» (50 MB) cap response sizes; «max.poll.records» (500) caps records per poll.`],
+ ["sort","Triggers a rebalance or not? (classic protocol)",{"Triggers a rebalance":["A consumer takes 7 minutes between polls","A new consumer joins the group","Partitions are added to a subscribed topic"],"No rebalance":["Static member restarts within session.timeout.ms","A consumer commits offsets","A broker that isn't the coordinator restarts"]},"Know what wakes the coordinator."],
+ ["pick","Rolling deploy of 30 pods causes 30 rebalances and big lag spikes. Best fix?",["Static membership (group.instance.id) + cooperative-sticky assignor","Lower session.timeout.ms","More partitions","acks=all"],0,"Restarted members keep their partitions; moves are incremental."],
+ ["num","max.poll.records=500, each record takes 800 ms to process. Default max.poll.interval.ms is 5 minutes. How many seconds does one poll's batch take?",400,0,"s","500 × 0.8 s = 400 s > 300 s: the consumer gets kicked out. Lower max.poll.records or speed up processing."],
+ ["match","Setting → symptom it fixes",[["max.poll.records lower","Kicked out for slow processing"],["fetch.min.bytes higher","Too many tiny fetch requests"],["group.instance.id","Rebalance storms on deploys"],["group.protocol=consumer","Global stop-the-world rebalances"]],"Each knob maps to a real incident."],
+ ["tf","Group truths",[["Committing offsets causes a rebalance.",false,"Commits are just writes to __consumer_offsets."],["Eager rebalancing revokes every partition from every member.",true,"Hence the pause."],["With KIP-848, the broker computes assignments.",true,"Server-side assignment."]]]
+]},
+{act:"Expert", t:"Expert boss: Kafka on fire", boss:true, time:45, rounds:[
+ ["pick","read_committed consumers frozen; one producer crashed mid-transaction an hour ago with transaction.timeout.ms=3600000. Fix?",["Abort it (restart producer with same transactional.id to fence) and lower transaction.timeout.ms","Add partitions","Switch to acks=1","Compact the topic"],0,"The open transaction pins the LSO."],
+ ["pick","Low-traffic audit topic keeps data far beyond retention.ms. Fix?",["Lower segment.ms so segments roll","Raise retention.ms","More replicas","Compaction"],0,"Retention deletes closed segments only."],
+ ["pick","After a double broker failure, followers had divergent logs on old Kafka. Which feature prevents this?",["Leader epochs","Sticky partitioner","Static membership","Compression"],0,"Exact truncation via epoch end offsets."],
+ ["pick","Producers throw TimeoutException after blocking 60 s during a broker slowdown. First knob to understand?",["buffer.memory / max.block.ms","fetch.min.bytes","session.timeout.ms","segment.bytes"],0,"The accumulator is full."],
+ ["pick","Consumers keep rebalancing; logs show 'poll timeout exceeded'. Each batch takes 6 min. Fix?",["Fewer records per poll or faster processing; tune max.poll.interval.ms","Lower heartbeat.interval.ms","More brokers","acks=all"],0,"The consumer leaves the group itself."],
+ ["pick","GDPR deletes on a compacted topic must disappear within 7 days even at low write rates. Setting?",["max.compaction.lag.ms","min.cleanable.dirty.ratio=0.9","delete.retention.ms=0 only","segment.bytes larger"],0,"Forces compaction on time."],
+ ["pick","ISR shrinks repeatedly on one broker during peak. Most useful first check?",["That broker's disk/network saturation and replica fetcher lag","Consumer group lag","Schema registry","Producer linger.ms"],0,"Followers fall out of sync when they can't keep up."]
+]}
+]);
