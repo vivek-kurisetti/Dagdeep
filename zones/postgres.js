@@ -160,3 +160,117 @@ Patroni (with etcd/Consul) or managed services promote a standby; **pg_rewind** 
  ["pick","Must never lose a committed payment even if the primary's disk dies. Use…",["Sync standby with synchronous_commit = on","synchronous_commit = local","Async replica","Logical replication only"],0,"Two durable copies at commit."]
 ]}
 ]);
+
+/* ===== On-call desk: PostgreSQL incident ===== */
+QUEST.cases("postgres", [
+{
+ title:"Primary DB disk at 92% and climbing", icon:"💽", sev:1, clock:"16:20", channel:"inc-2320-orders-db-disk", svc:"orders-db · PostgreSQL 15 primary", need:4,
+ pager:`[r]FIRING[/r]  orders-db-primary  disk /var/lib/postgresql  [r]92% used[/r]
+growth    ~38 GB/hour over the last 6h
+forecast  [r]FULL in ~1h 40m[/r]  → primary will stop accepting writes
+host      pg-orders-1 (r6i.4xlarge, 2 TB gp3)`,
+ brief:"If this disk fills, Postgres stops writing and checkout goes down for everyone. Table sizes look normal according to the morning report. Last night there was a maintenance window: Kafka Connect workers were patched.",
+ slack:[
+  {at:0, who:"ravi", t:"Disk alert on orders-db. I can extend the EBS volume but it takes a while to optimise and it's a one-way door. Let's find what's eating it first."},
+  {at:5, who:"priya", t:"Split the problem: is it **table data** or **something else** in the data directory?", cmd:"du -sh /var/lib/postgresql/15/main/*"},
+  {at:45, who:"dev", t:"Is it a big table? I can kick off a VACUUM FULL on orders if you want."},
+  {on:"walsize", who:"priya", t:"pg_wal at 410 GB? WAL should be recycled after checkpoints. Something must be **holding** it. Replication slots are the usual suspect.", cmd:"psql -c \"select slot_name, plugin, active, restart_lsn, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) as retained from pg_replication_slots;\""},
+  {on:"slot", who:"ravi", t:"«debezium_orders»: that's the CDC connector feeding the lakehouse. Was it touched in last night's maintenance?", cmd:"curl -s connect:8083/connectors/orders-cdc/status"},
+  {on:"paused", who:"dev", t:"Oh no. I paused it before patching the Connect workers and… forgot to resume. Sorry 🙈"}
+ ],
+ hints:["Table sizes are normal, so look at the *other* things in the data directory: «du -sh» on it.","WAL that keeps growing means something hasn't consumed it yet. Check «pg_replication_slots» for an inactive slot.","Find who owns the inactive slot and why it stopped. Check the Kafka Connect connector's status."],
+ term:{host:"pg-orders-1", user:"postgres", suggest:["df -h /var/lib/postgresql","du -sh /var/lib/postgresql/15/main/*","psql -c \"select relname, n_dead_tup from pg_stat_user_tables order by 2 desc limit 5;\""],
+  cmds:[
+  {m:["df -h"], out:`Filesystem      Size  Used Avail Use% Mounted on
+/dev/nvme1n1    2.0T  [r]1.9T[/r]  158G  [r]92%[/r] /var/lib/postgresql`, note:"That's the alert itself. Now find *what* is using the space."},
+  {m:["du -sh /var/lib/postgresql/15/main","du -sh"], out:`1.4T    /var/lib/postgresql/15/main/base
+[r]410G[/r]    /var/lib/postgresql/15/main/[b]pg_wal[/b]
+1.2G    /var/lib/postgresql/15/main/pg_xact
+212M    /var/lib/postgresql/15/main/pg_stat_tmp
+[d]base/ was 1.4T at yesterday's capacity review too[/d]`, clue:"walsize", unlock:["psql -c \"select slot_name, plugin, active, restart_lsn, pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) as retained from pg_replication_slots;\""]},
+  {m:["psql -c \"select slot_name","psql -c \"select * from pg_replication_slots","psql -c 'select * from pg_replication_slots"], out:`   slot_name     |  plugin  | active | restart_lsn  | retained
+-----------------+----------+--------+--------------+----------
+ standby_1       |          | [g]t[/g]      | 3F1/A2000000 | 16 MB
+ [y]debezium_orders[/y] | pgoutput | [r]f[/r]      | 3A7/1B00A8C0 | [r]409 GB[/r]
+(2 rows)`, clue:"slot", unlock:["curl -s connect:8083/connectors/orders-cdc/status"]},
+  {m:["psql -c \"select relname, n_dead_tup","psql -c \"select relname"], out:`    relname     | n_dead_tup
+----------------+------------
+ orders         |    [y]4120331[/y]
+ order_items    |    1803112
+ payments       |     611208
+ [d]autovacuum last ran on orders 14 minutes ago[/d]`, note:"Some dead tuples, but autovacuum ran 14 minutes ago and table sizes match yesterday. This doesn't explain 38 GB/hour."},
+  {m:["psql -c \"show max_slot_wal_keep_size","psql -c 'show max_slot_wal_keep_size"], out:` max_slot_wal_keep_size
+------------------------
+ [r]-1[/r]
+[d](-1 = unlimited: slots may retain WAL forever)[/d]`, clue:"nolimit"},
+  {m:["psql -c \"select pg_size_pretty(pg_database_size","psql -c \"select pg_size_pretty"], out:` pg_size_pretty
+----------------
+ 1398 GB`, note:"Database size is the same as yesterday. Tables aren't what's growing."},
+  {m:["curl -s connect:8083/connectors/orders-cdc/status","curl connect:8083/connectors/orders-cdc/status","curl -s connect:8083/connectors"], out:`{"name":"orders-cdc",
+ "connector":{"state":"[r]PAUSED[/r]","worker_id":"connect-2:8083"},
+ "tasks":[{"id":0,"state":"[r]PAUSED[/r]","worker_id":"connect-2:8083"}],
+ "type":"source"}`, clue:"paused"},
+  {m:["tail /var/log/postgresql","tail -n 30 /var/log/postgresql"], out:`16:02:11 LOG:  checkpoint complete: wrote 18211 buffers (2.2%); 0 WAL file(s) added, [y]0 removed[/y], 31 recycled
+16:07:40 LOG:  checkpoint starting: time`, clue:"noremove"},
+  {m:["ls /var/lib/postgresql/15/main/pg_wal","ls pg_wal"], out:`0000000100003A70000001B
+0000000100003A70000001C
+[d]… 26,214 files (16 MB each)[/d]`, note:"Lots of WAL segments, as expected given pg_wal's size. Don't touch these files by hand."}
+ ]},
+ dash:[
+  {title:"Disk used % · pg-orders-1", unit:"%", x:["Tue 22:00","00:00","02:00","04:00","06:00","08:00","10:00","12:00","14:00","16:00"], series:[{name:"used %", v:[71,71,72,74,76,79,82,85,89,92]}], marks:[{i:1, label:"maint. window"}], note:"The symptom: it started climbing right after last night's maintenance window. Useful for *when*, not *what*."},
+  {title:"WAL retained by replication slots (GB)", unit:"G", x:["Tue 22:00","00:00","02:00","04:00","06:00","08:00","10:00","12:00","14:00","16:00"], series:[{name:"debezium_orders", v:[0.1,4,30,62,110,170,232,298,360,409]}, {name:"standby_1", v:[0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02,0.02]}], marks:[{i:1, label:"maint."}], clue:"slotgrowth"},
+  {title:"Table + index size (GB)", unit:"G", x:["Tue 22:00","00:00","02:00","04:00","06:00","08:00","10:00","12:00","14:00","16:00"], series:[{name:"all tables", v:[1396,1396,1396,1397,1397,1397,1397,1398,1398,1398]}], note:"Tables are flat. Bloat isn't eating the disk."},
+  {title:"Transactions/s", x:["Tue 22:00","00:00","02:00","04:00","06:00","08:00","10:00","12:00","14:00","16:00"], series:[{name:"TPS", v:[2100,900,600,700,2400,5200,6100,5900,6300,6000]}], note:"A normal daily traffic curve. Busy hours produce more WAL, but on a healthy box that WAL gets recycled."}
+ ],
+ uiName:"Connect UI",
+ ui:[
+  {title:"Kafka Connect · connectors", md:`| Connector | Type | State | Tasks | Last state change |
+|---|---|---|---|---|
+| orders-cdc | Debezium Postgres source | **PAUSED** | 0/1 running | Tue 23:41 (by dev) |
+| payments-cdc | Debezium MySQL source | RUNNING | 1/1 | Tue 23:58 (by dev) |
+| lake-s3-sink | S3 sink | RUNNING | 4/4 | Mon 10:12 |`, clue:"paused"},
+  {title:"Maintenance log · Tue night", md:`- 23:38 dev: patch Connect workers 1-3 (CVE fix)
+- 23:41 dev: pause orders-cdc, payments-cdc
+- 23:56 dev: rolling restart done
+- 23:58 dev: resume payments-cdc
+- 00:02 dev: maintenance closed ✅`, clue:"forgot"}
+ ],
+ clues:{
+  walsize:"pg_wal is 410 GB, while table data (base/) hasn't grown",
+  slot:"Replication slot debezium_orders is inactive and retains 409 GB of WAL",
+  slotgrowth:"WAL retained by debezium_orders started growing at the maintenance window",
+  paused:"Debezium connector orders-cdc is PAUSED (since Tue 23:41)",
+  forgot:"Maintenance log: orders-cdc was paused but never resumed (only payments-cdc was)",
+  nolimit:"max_slot_wal_keep_size = -1: an abandoned slot can retain WAL without limit",
+  noremove:"Checkpoints remove 0 WAL files: something still needs the old WAL"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"The Debezium connector was paused in last night's maintenance and never resumed. Its replication slot stays inactive and pins every WAL segment since then, with no cap (max_slot_wal_keep_size = -1)", ok:true},
+  {t:"Table bloat from dead tuples on «orders»", ok:false, why:"Table size is flat at ~1.4 TB and autovacuum is running. The growth is all in pg_wal.", say:[["priya","Tables are flat at 1,398 GB. All the growth is in pg_wal. Bloat doesn't live there."]]},
+  {t:"Higher traffic today is producing more WAL", ok:false, why:"Traffic is a normal curve, and on a healthy primary WAL is recycled after checkpoints. Here it isn't removed at all.", say:[["ravi","TPS looks like every other Wednesday. And checkpoints are removing *zero* WAL files. Something is holding on to it."]]},
+  {t:"The physical standby is lagging", ok:false, why:"standby_1 is active and retains only 16 MB.", say:[["ravi","standby_1 is active and only 16 MB behind. It's not that slot."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take now.", o:[
+  {t:"Resume «orders-cdc» and watch the slot's retained WAL drain as Debezium catches up", kind:"must", why:"Once the slot advances, Postgres can recycle the WAL, and the lakehouse gets its missing 16 hours of changes with nothing lost.", miss:[["ravi","Set the WAL cap, but «orders-cdc» is still PAUSED. The slot will hit the cap, get invalidated, and the lakehouse will need a full resnapshot. Why not just resume it?"]]},
+  {t:"Set «max_slot_wal_keep_size» (e.g. 200 GB) so one abandoned slot can never fill the disk again", kind:"must", why:"Postgres gives up on the slot (invalidates it) instead of taking the primary down. A CDC resnapshot is far cheaper than a checkout outage.", miss:[["priya","Disk's draining, great. But nothing stops this happening at the next maintenance. One forgotten pause and we're back here. What's the guardrail?"]]},
+  {t:"Alert on retained WAL per slot and on inactive slots older than 30 minutes", kind:"good", why:"You'd have been paged at 00:15, not 16:20."},
+  {t:"Add \"resume connectors + check slot lag\" to the maintenance runbook's exit checklist", kind:"good", why:"Makes the human step hard to forget."},
+  {t:"Extend the EBS volume by 500 GB as a buffer", kind:"meh", why:"Buys time. Fine as a safety net, but the slot would fill that too, and EBS volumes can't be shrunk."},
+  {t:"Delete old files from pg_wal to free space fast", kind:"bad", why:"Postgres needs those segments for crash recovery and replication. Deleting them by hand can corrupt the cluster.", say:[["ravi","STOP — Postgres just PANICked: «could not open file pg_wal/0000000100003A70000001B». The primary is down. Failing over to standby_1… 😱"],["priya","Never delete WAL by hand. That's a two-hour outage instead of a ten-minute fix."]]},
+  {t:"Run VACUUM FULL on «orders» to reclaim space", kind:"bad", why:"VACUUM FULL takes an ACCESS EXCLUSIVE lock and needs ~2× the table's space temporarily. On a nearly full disk at peak hours, that's two outages.", say:[["dev","VACUUM FULL took an exclusive lock on orders… checkout is timing out! And it's writing a full copy of the table to a disk with 150 GB free. Cancelling!"]]},
+  {t:"Drop the «debezium_orders» slot right away", kind:"bad", why:"It frees space instantly, but the connector loses its position. The lakehouse misses changes and needs a full resnapshot of a 1.4 TB database. Do it only if the connector is truly dead.", say:[["meera","The lakehouse orders table stopped updating, and Debezium says it needs a full snapshot of 1.4 TB. Analytics will be stale for a day. Was that necessary when we could just resume it?"]]}
+ ]},
+ post:{
+  summary:"orders-db primary disk went from 71% to 92% in 16 hours and was ~1h40m from a write outage. **409 GB of WAL** was pinned by an inactive logical replication slot.",
+  cause:"During Tuesday night's Connect patching, «orders-cdc» (Debezium) was **paused and never resumed**. A logical replication slot guarantees the consumer every change since its «restart_lsn», so Postgres **cannot recycle WAL** past that point. With «max_slot_wal_keep_size = -1» there was no cap, and every checkpoint since 23:41 removed 0 WAL files. At ~6k TPS that came to ~38 GB/hour.",
+  prevent:["«max_slot_wal_keep_size» set on every primary with logical slots","Alerts: retained WAL per slot and slots inactive for more than 30 minutes","Maintenance runbook exit checklist: connectors RUNNING, slot lag near zero","Weekly report of all replication slots and their owners"]
+ },
+ learned:["Disk filling on Postgres? Split it: **base/** (tables, bloat) vs **pg_wal** (WAL retention).","An **inactive replication slot** pins WAL forever unless «max_slot_wal_keep_size» caps it.","Never delete WAL files by hand, and never VACUUM FULL on a nearly full disk at peak.","Prefer the fix that loses **nothing** (resume the consumer) over the one that frees space fastest (drop the slot)."],
+ cards:[{k:"slots", t:"Replication slots and WAL retention", one:"A replication slot is a bookmark that tells Postgres \"don't throw away WAL until I've read it\", even if the reader never comes back.",
+  life:"A newspaper office keeps back issues until every subscriber has picked up their copy. One subscriber goes on holiday without telling anyone, and the back issues pile up until the storeroom is full and the presses stop.",
+  how:["Postgres writes every change to **WAL** (write-ahead log) in 16 MB segment files under «pg_wal».","After a checkpoint, old segments are normally **recycled or removed**.","A **replication slot** (physical for standbys, logical for CDC like Debezium) records the oldest LSN its consumer still needs: «restart_lsn».","Postgres keeps all WAL from the oldest slot's «restart_lsn» onward. An **inactive** slot stops advancing, so WAL grows without bound.","«max_slot_wal_keep_size» caps this. Past the cap, the slot is **invalidated** (the consumer must resnapshot) but the primary survives.","Monitor: «pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)» per slot and «active = false»."],
+  ex:"~~~\nselect slot_name, active,\n  pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) retained\nfrom pg_replication_slots;\n\n-- guardrail\nalter system set max_slot_wal_keep_size = '200GB';\nselect pg_reload_conf();\n~~~",
+  traps:["Pausing a Debezium connector doesn't release its slot. WAL keeps piling up.","Deleting WAL files by hand can corrupt the database. Let Postgres remove them.","Dropping a CDC slot frees space but forces a full resnapshot downstream.","Low-traffic databases can hit this too: WAL from checkpoints and other databases still accumulates."],
+  say:"Logical replication slots make Postgres retain WAL from the consumer's restart_lsn onward, so if a CDC connector like Debezium stops (paused, crashed, or abandoned), WAL accumulates until the disk fills. I diagnose by comparing pg_wal size to table size and querying pg_replication_slots for inactive slots with large retained WAL. The fix is to resume the consumer; the guardrails are max_slot_wal_keep_size and alerts on per-slot retained WAL and inactive slots."}]
+}
+]);

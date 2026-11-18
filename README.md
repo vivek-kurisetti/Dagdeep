@@ -72,6 +72,19 @@ window.DAGDEEP_FIREBASE = {
 
 7. Commit and push. The web config isn't a secret; the rules above ensure each signed-in user can only read and write their own document (`users/{uid}`). Guest progress is moved into the account on first sign-in.
 
+## On-call desk (workplace debugging)
+
+A simulated workstation: you get paged, acknowledge, and investigate a real-looking production incident.
+
+- **Slack** channel with teammates who react to what you find (timed messages, clue-triggered messages, hints on request)
+- **Terminal** that accepts typed commands (`kubectl logs --previous`, `kafka-consumer-groups --describe`, `psql`, `aws s3 ls`, `yarn logs`…) with history, Tab completion and suggestion chips
+- **Dashboards** (SVG charts with deploy markers), a **console** (Spark UI, Connect UI, LangSmith traces) and **code** you can flag line by line
+- Every output and panel has a 🚩 flag. Real evidence goes to your notes; red herrings explain why they're noise
+- **Notes**: once you have enough clues, pick the root cause and the fixes to ship. Wrong causes and harmful fixes visibly backfire in Slack
+- Resolving produces a blameless **postmortem** with a timeline built from your own actions
+
+Cases live in zone files via `QUEST.cases(zoneId, [...])` (see the schema comment in `quest-engine.js`) and are listed in the `CASES` registry. Current cases: Spark small files, Spark executor memoryOverhead kills, Kafka poison message, Postgres WAL pinned by a paused Debezium slot, RAG embedding-model mismatch.
+
 ## Story missions
 
 Append to a zone file after `QUEST.zone(...)`:

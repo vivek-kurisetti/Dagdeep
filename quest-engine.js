@@ -50,7 +50,7 @@ const CAST = {priya:["Priya","Tech lead",205], arjun:["Arjun","Finance",28], rav
 const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }, more(id, levels){ const Z = this.data[id]; if (Z) Z.levels.push(...levels); }};
 const ld = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k)) || {}); } catch(e){ return d; } };
 const raw = k => { try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } };
-const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, ach:{}, chest:{}});
+const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, ach:{}, chest:{}});
 const DEF_PR = () => ({xp:0, streak:0, last:null});
 let NS = "";
 const KQ = () => "dagdeep-quest-v1" + NS, KP = () => "dagdeep-profile-v1" + NS;
@@ -158,7 +158,9 @@ const ACH = [
   ["hired","🤝","Hired!","Get a Strong hire in a mock interview"],
   ["lucky","🌟","Lucky chest","Find a rare drop in a mystery chest"],
   ["streak3","📅","On a roll","Play 3 days in a row"],
-  ["fresh","🔄","Clean slate","Start fresh from scratch"]
+  ["fresh","🔄","Clean slate","Start fresh from scratch"],
+  ["pager","📟","Pager hero","Resolve your first on-call incident"],
+  ["sherlock","🔎","Sherlock","Resolve an incident with no hints and no wrong calls"]
 ];
 function unlock(k){
   if (!P.ach || P.ach[k]) return;
@@ -236,6 +238,10 @@ function mapView(){
       <div class="q-bar" title="${r.next ? (r.next[0] - PR.xp) + " XP to " + r.next[1] : ""}"><span style="width:${pct}%"></span></div>
     </section>
     ${nx ? `<a class="q-next" id="qNext" href="#mis-${nx.z}-${nx.i}"><span class="q-next-ic">${nx.M ? nx.M.icon : "🎬"}</span><div><small>${nx.i ? "Continue" : "Start here"} · ${esc(ZMAP[nx.z].title)} · mission ${nx.i + 1}</small><b>${nx.M ? esc(nx.M.title) : "Story mission"}</b>${nx.M ? `<p>${fm(nx.M.setup)}</p>` : ""}</div><span class="q-next-go">▶</span></a>` : ""}
+    <section class="q-desk-home"><div class="q-sec-row"><h2 class="q-sec-h">📟 On-call desk</h2><small>${CASES.filter(c => csStars(c.z, c.i)).length}/${CASES.length} resolved</small></div>
+      <p class="muted">You're on call. Get paged, dig through Slack, the terminal, dashboards and code, then find the root cause and ship the fix.</p>
+      ${caseList(CASES)}</section>
+    <h2 class="q-sec-h">🗺️ Zones</h2>
     <div class="q-tabs" role="tablist">${WORLDS.map(w => `<button role="tab" data-w="${w.id}" aria-selected="${worldTab === w.id}">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</button>`).join("")}</div>
     <div class="q-zones">${ZONES.filter(z => z.world === worldTab).map(tile).join("")}</div>
     <details class="q-trophies"><summary>🏆 Trophies <small>${achN}/${ACH.length}</small></summary>
@@ -253,6 +259,7 @@ function zoneView(id, tab){
     document.title = `${z.title} · Dagdeep`;
     const tabs = [];
     if (Z.missions) tabs.push(["missions", "🎬 Missions"]);
+    if (Z.cases) tabs.push(["debug", "📟 Debug"]);
     if (Z.interviews) tabs.push(["interview", "🎤 Interview"]);
     tabs.push(["drills", "🏋️ Drills"], ["cards", "🃏 Cards"]);
     if (!tabs.some(t => t[0] === tab)) tab = tabs[0][0];
@@ -273,6 +280,7 @@ function epList(id, list, kind){
       <span class="q-ep-go">${open ? (s ? "Replay" : "Play") : ""}</span></${open ? "a" : "div"}>`; }).join("")}</div>`;
 }
 function zonePanel(id, Z, tab, got){
+  if (tab === "debug") return `<p class="q-lead">Real incidents on a simulated workstation. Investigate with Slack, a terminal, dashboards and code, then ship the fix.</p>${caseList(CASES.filter(c => c.z === id))}`;
   if (tab === "missions") return `<p class="q-lead">Real situations from a working day. Make the calls, watch the meters, collect detailed cards.</p>${epList(id, Z.missions, "ms")}`;
   if (tab === "interview"){
     const qa = [];
@@ -294,7 +302,7 @@ function zonePanel(id, Z, tab, got){
   if (Z.cardBook){
     const where = cardMissionIndex(Z), keys = Object.keys(Z.cardBook), have = keys.filter(k => got.has("c:" + k));
     h += `<h2 class="q-sec-h">Story cards <small>${have.length}/${keys.length}</small></h2><p class="muted">Analogy, how it works, worked example, gotchas and an interview answer.</p>
-      <div class="q-xcards">${keys.map(k => { const C = Z.cardBook[k]; return got.has("c:" + k) ? `<details class="q-xcd"><summary><b>${fm(C.t)}</b><small>${fm(C.one || "")}</small></summary>${cardHTML(C, "deck")}</details>` : `<div class="q-xcd lock"><b>?</b><small>Unlock in mission ${(where[k] ?? 0) + 1}</small></div>`; }).join("")}</div>`;
+      <div class="q-xcards">${keys.map(k => { const C = Z.cardBook[k]; return got.has("c:" + k) ? `<details class="q-xcd"><summary><b>${fm(C.t)}</b><small>${fm(C.one || "")}</small></summary>${cardHTML(C, "deck")}</details>` : `<div class="q-xcd lock"><b>?</b><small>${where[k] != null ? `Unlock in mission ${where[k] + 1}` : "Unlock on the on-call desk"}</small></div>`; }).join("")}</div>`;
   }
   h += `<h2 class="q-sec-h">Drill cards <small>${deck.filter(c => got.has(c.id)).length}/${deck.length}</small></h2>
     <div class="q-cards">${deck.map(c => got.has(c.id) ? `<button class="q-card got" type="button"><span class="q-card-k">${esc(c.L.t)}</span><b>${esc(c.t)}</b><span class="q-card-b">${fm(c.b)}</span>${c.d ? `<span class="q-card-d">${md(c.d)}</span><small class="q-card-more">Deep card · tap to read</small>` : ""}</button>` : `<div class="q-card lock"><span class="q-card-k">${esc(c.L.t)}</span><b>?</b><small>Play drill ${c.li + 1}</small></div>`).join("")}</div>`;
@@ -799,6 +807,302 @@ function missionView(id, mi, kind){
   });
 }
 
+/* ================= On-call desk (workplace debugging) ================= */
+// QUEST.cases(id, [...]) from a zone file. Case:
+// {title, icon, sev, svc, clock:"03:12", pager, brief, channel, need,
+//  slack:[{at:secs|on:clueId, who, t, cmd?}], hints:[...],
+//  term:{host, user, motd, suggest:[...], cmds:[{m:[prefix...], out, clue?, note?, unlock?:[...]}]},
+//  dash:[{title, unit, x:[...], series:[{name, v:[...]}], marks:[{i, label}], clue?, note?}],
+//  ui:[{title, img?, cap?, md?, clue?, note?}], files:[{path, text, clues:{line:clueId}}],
+//  clues:{id:text}, cause:{q, o:[{t, ok, say:[[who,t]], why}]},
+//  fix:{q, o:[{t, kind:"must"|"good"|"meh"|"bad", why, say:[[who,t]]}], miss:[[who,t]]},
+//  post:{summary, cause, fix, prevent:[...]}, learned:[...], cards:[key | card]}
+Q.cases = function(id, list){
+  const Z = this.data[id]; if (!Z) return;
+  list.forEach(c => { c.cards = (c.cards || []).map(k => { if (typeof k === "string") return k; Z.cardBook = Z.cardBook || {}; Z.cardBook[k.k] = k; return k.k; }); });
+  Z.cases = list;
+};
+const CASES = [
+  {z:"spark", i:0, icon:"🐢", sev:2, title:"The nightly job got 4× slower", svc:"settlements-daily · Spark on EMR"},
+  {z:"kafka", i:0, icon:"☠️", sev:1, title:"One partition is 3 million behind", svc:"payments-ledger consumer"},
+  {z:"postgres", i:0, icon:"💽", sev:1, title:"Primary DB disk at 92% and climbing", svc:"orders-db · PostgreSQL 15"},
+  {z:"spark", i:1, icon:"💥", sev:2, title:"Executors keep getting killed", svc:"risk-features · Spark on EMR"},
+  {z:"rag", i:0, icon:"🤖", sev:2, title:"The bot can't find the new policy", svc:"support-assistant · RAG"}
+];
+const csStars = (z, i) => ((P.cs || {})[z] || {})[i] || 0;
+const caseList = list => `<div class="q-cases">${list.map(c => { const s = csStars(c.z, c.i); return `<a class="q-case" href="#case-${c.z}-${c.i}" style="--h:${ZMAP[c.z].hue}">
+  <span class="q-case-ic">${c.icon}</span><div><span class="q-sev s${c.sev}">SEV-${c.sev}</span><b>${esc(c.title)}</b><small>${esc(c.svc)}</small>${s ? stars(s, "sm") : ""}</div><span class="q-ep-go">${s ? "Replay" : "Take the page"}</span></a>`; }).join("")}</div>`;
+const termFmt = t => esc(t).replace(/\[(r|y|g|b|d|c)\]([\s\S]*?)\[\/\1\]/g, '<span class="t-$1">$2</span>');
+const nfmt = v => v >= 1e9 ? +(v / 1e9).toFixed(1) + "B" : v >= 1e6 ? +(v / 1e6).toFixed(1) + "M" : v >= 1e3 ? +(v / 1e3).toFixed(1) + "k" : +(+v).toFixed(2) + "";
+function chartSVG(D){
+  const W = 560, H = 180, pl = 44, pr = 12, pt = 18, pb = 24, n = D.x.length;
+  const top = Math.max(...D.series.flatMap(s => s.v)) || 1, mag = Math.pow(10, Math.floor(Math.log10(top))), max = D.max || Math.ceil(top / mag * 1.1) * mag;
+  const X = i => pl + i * (W - pl - pr) / Math.max(1, n - 1), Y = v => pt + (H - pt - pb) * (1 - v / max);
+  const cols = ["var(--hc)", "#8b95a5", "#d97706", "#0ea5e9"];
+  const grid = [0, .5, 1].map(f => `<line x1="${pl}" x2="${W - pr}" y1="${Y(max * f)}" y2="${Y(max * f)}" class="g"/><text x="${pl - 6}" y="${Y(max * f) + 4}" text-anchor="end">${nfmt(max * f)}${f ? esc(D.unit || "") : ""}</text>`).join("");
+  const step = Math.ceil(n / 6), xl = D.x.map((l, i) => i % step === 0 || i === n - 1 ? `<text x="${X(i)}" y="${H - 6}" text-anchor="middle">${esc(l)}</text>` : "").join("");
+  const marks = (D.marks || []).map(m => `<line x1="${X(m.i)}" x2="${X(m.i)}" y1="${pt - 4}" y2="${H - pb}" class="mk"/><text x="${X(m.i) + 4}" y="${pt + 4}" class="mkt">${esc(m.label)}</text>`).join("");
+  const lines = D.series.map((s, k) => `<polyline fill="none" stroke="${cols[k % 4]}" stroke-width="2.4" stroke-linejoin="round" points="${s.v.map((v, i) => X(i) + "," + Y(v)).join(" ")}"/>`).join("");
+  const leg = D.series.length > 1 ? `<div class="q-leg">${D.series.map((s, k) => `<span><i style="background:${cols[k % 4]}"></i>${esc(s.name)}</span>`).join("")}</div>` : "";
+  return `<svg viewBox="0 0 ${W} ${H}" class="q-chart" role="img" aria-label="${esc(D.title)}">${grid}${marks}${lines}${xl}</svg>${leg}`;
+}
+function caseView(id, ci){
+  const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
+  needZone(id, () => {
+    const Z = Q.data[id], C = (Z.cases || [])[ci];
+    if (!C){ location.hash = "#zone-" + id; return; }
+    P.last = id; save(); setKeys(null);
+    document.title = `${C.title} · On-call · Dagdeep`;
+    const sev = C.sev || 2;
+    root().innerHTML = `<div class="q-wrap q-pagerv" style="--h:${z.hue}">
+      <div class="q-pager"><div class="q-pager-ring">📟</div>
+        <p class="q-eyebrow">Incoming page · ${esc(C.clock || "03:12")}</p>
+        <span class="q-sev s${sev}">SEV-${sev}</span>
+        <h1>${esc(C.title)}</h1>
+        <pre class="q-pager-alert">${termFmt(C.pager)}</pre>
+        <p class="q-pager-brief">${fm(C.brief || "")}</p>
+        <div class="q-pager-how"><b>How this works</b><ul><li>💬 Read Slack, 🖥 run commands in the terminal, 📈 study dashboards and 🧾 read the code.</li><li>🚩 Flag anything that looks like evidence. Some of it is noise.</li><li>📝 When you've got enough clues, write up the root cause and ship a fix.</li><li>Wrong fixes hit prod. Hints cost stars.</li></ul></div>
+        <button class="btn big solid q-ack">Acknowledge &amp; join the bridge</button>
+        <a class="q-back" href="#zone-${id}/debug">Not now</a></div></div>`;
+    const ackB = root().querySelector(".q-ack");
+    ackB.onclick = () => desk(id, ci, z, Z, C);
+    setKeys(e => { if (!document.body.contains(ackB)){ setKeys(null); return; } if (e.key === "Enter"){ e.preventDefault(); desk(id, ci, z, Z, C); } });
+  });
+}
+function desk(id, ci, z, Z, C){
+  setKeys(null);
+  const sev = C.sev || 2, T = C.term || {}, clueIds = Object.keys(C.clues), need = C.need || Math.max(1, clueIds.length - 1);
+  const st = {t0:Date.now(), found:{}, order:[], log:[], hints:0, wrong:0, noise:0, cmds:0, unread:0, app:"slack", fired:new Set(), chips:(T.suggest || []).slice(), hist:[], hp:0, cause:null, fix:new Set(), done:false};
+  const base = (C.clock || "03:12").split(":").map(Number);
+  const wall = s => { const m = base[0] * 60 + base[1] + Math.floor(s / 60); return `${String(Math.floor(m / 60) % 24).padStart(2, "0")}:${String(m % 60).padStart(2, "0")}`; };
+  const el = () => Math.floor((Date.now() - st.t0) / 1000);
+  const mmss = s => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
+  const log = (ic, t) => st.log.push({s:el(), ic, t});
+  const apps = [["slack", "💬", "Slack"], ["term", "⌨️", "Terminal"]];
+  if (C.dash) apps.push(["dash", "📈", "Dashboards"]);
+  if (C.ui) apps.push(["ui", "🖥", C.uiName || "Console"]);
+  if (C.files) apps.push(["code", "🧾", "Code"]);
+  apps.push(["notes", "📝", "Notes"]);
+  const host = T.host || "prod-bastion", user = T.user || "you";
+  root().innerHTML = `<div class="q-wrap q-desk" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
+    <div class="q-incbar"><a class="q-x" href="#zone-${id}/debug" aria-label="Leave">✕</a>
+      <span class="q-sev s${sev}">SEV-${sev}</span>
+      <div class="q-inc-t"><b>${esc(C.title)}</b><small>#${esc(C.channel || "inc")} · ${esc(C.svc || z.title)}</small></div>
+      <span class="q-inc-st"><span class="q-inc-clock" title="Time since you acknowledged">⏱ 00:00</span><span class="q-inc-clues" title="Clues found · ${need} needed to write up">🔎 0/${clueIds.length}</span></span></div>
+    <nav class="q-dock" role="tablist">${apps.map(([k, ic, l]) => `<button role="tab" data-app="${k}" aria-selected="${k === "slack"}"><span>${ic}</span><small>${l}</small><i class="q-badge-n" hidden></i></button>`).join("")}</nav>
+    <div class="q-apps">
+      <section class="q-app" data-app="slack"><div class="q-slack-h"># ${esc(C.channel || "inc")}<small>${esc(C.svc || "")}</small></div><div class="q-slack"></div>
+        <div class="q-slack-f"><button class="btn q-hint">💡 Ask for a hint <small>(${(C.hints || []).length} left)</small></button></div></section>
+      <section class="q-app" data-app="term" hidden><div class="q-term"><div class="q-term-out"><p class="t-d">${termFmt(T.motd || `Connected to ${host}. Type «help» for ideas.`).replace(/«(.+?)»/g, "<b>$1</b>")}</p></div>
+        <form class="q-term-in" autocomplete="off"><span class="q-ps">${esc(user)}@${esc(host)}:~$</span><input aria-label="Terminal command" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go"></form></div>
+        <div class="q-chips" aria-label="Suggested commands"></div></section>
+      ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">Compare the panels. Flag the ones that explain the alert, not the ones that just look busy.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
+      ${C.ui ? `<section class="q-app" data-app="ui" hidden><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
+      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">Tap a suspicious line to flag it.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
+      <section class="q-app" data-app="notes" hidden><div class="q-notes"></div></section>
+    </div></div>`;
+  const $ = s => root().querySelector(s), $$ = s => root().querySelectorAll(s);
+  const slackEl = $(".q-slack"), out = $(".q-term-out"), inp = $(".q-term-in input");
+  const alive = () => document.body.contains(slackEl) && !st.done;
+  const show = k => {
+    st.app = k;
+    $$(".q-dock button").forEach(b => b.setAttribute("aria-selected", b.dataset.app === k));
+    $$(".q-app").forEach(a => a.hidden = a.dataset.app !== k);
+    if (k === "slack"){ st.unread = 0; badge(); slackEl.lastElementChild && slackEl.lastElementChild.scrollIntoView({block:"nearest"}); }
+    if (k === "notes") notes();
+    if (k === "term" && matchMedia("(hover: hover)").matches) inp.focus();
+  };
+  const badge = () => { const b = $('.q-dock [data-app="slack"] .q-badge-n'); if (b){ b.hidden = !st.unread; b.textContent = st.unread; } };
+  $$(".q-dock button").forEach(b => b.onclick = () => show(b.dataset.app));
+  // Slack
+  const post = async (list, gap = 700) => {
+    for (const m of list){
+      if (!alive()) return;
+      const [who, t, cmd] = Array.isArray(m) ? m : [m.who, m.t, m.cmd];
+      const c = CAST[who] || [who, "", 200];
+      slackEl.insertAdjacentHTML("beforeend", `<div class="q-msg q-smsg" style="--ch:${c[2]}"><span class="q-av">${esc(c[0][0])}</span><div class="q-bub"><b>${esc(c[0])} <small>${esc(c[1])} · ${wall(el())}</small></b><p>${fm(t)}</p>${cmd ? `<button class="q-runchip" data-cmd="${esc(cmd)}">⌨️ ${esc(cmd)}</button>` : ""}</div></div>`);
+      if (cmd && !st.chips.includes(cmd)){ st.chips.push(cmd); chips(); }
+      if (st.app === "slack") slackEl.lastElementChild.scrollIntoView({block:"nearest", behavior:reduce() ? "auto" : "smooth"});
+      else { st.unread++; badge(); toast(`💬 <b>${esc(c[0])}</b>: ${esc(String(t).replace(/[*«»]/g, "").slice(0, 70))}${String(t).length > 70 ? "…" : ""}`); }
+      await sleep(gap);
+    }
+  };
+  slackEl.addEventListener("click", e => { const b = e.target.closest(".q-runchip"); if (b){ show("term"); run(b.dataset.cmd); } });
+  const hintB = $(".q-hint");
+  hintB.onclick = () => {
+    const H = C.hints || []; if (st.hints >= H.length) return;
+    const h = H[st.hints++]; log("💡", "Asked for a hint");
+    hintB.innerHTML = `💡 Ask for a hint <small>(${H.length - st.hints} left)</small>`; hintB.disabled = st.hints >= H.length;
+    post([Array.isArray(h) ? h : ["priya", "💡 " + h]]);
+  };
+  hintB.disabled = !(C.hints || []).length;
+  // Clock + timed messages
+  const tick = setInterval(() => {
+    if (!alive()){ clearInterval(tick); return; }
+    const s = el(); const ce = $(".q-inc-clock"); if (ce) ce.textContent = "⏱ " + mmss(s);
+    (C.slack || []).forEach((m, k) => { if (m.at != null && !st.fired.has(k) && s >= m.at){ st.fired.add(k); post([m]); } });
+  }, 1000);
+  (C.slack || []).forEach((m, k) => { if (m.at === 0){ st.fired.add(k); } });
+  post((C.slack || []).filter(m => m.at === 0), 900);
+  // Evidence
+  const clueCount = () => { const n = Object.keys(st.found).length, e = $(".q-inc-clues"); if (e){ e.textContent = `🔎 ${n}/${clueIds.length}`; e.title = `${n} clues found · ${need} needed to write up`; e.classList.toggle("ok", n >= need); } return n; };
+  const flagNote = (anchor, html, cls) => {
+    const isLine = anchor.classList.contains("q-cl");
+    const old = isLine ? (anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("q-flagnote") ? anchor.nextElementSibling : null) : anchor.querySelector(":scope > .q-flagnote");
+    if (old) old.remove();
+    anchor.insertAdjacentHTML(isLine ? "afterend" : "beforeend", `<div class="q-flagnote ${cls}">${html}</div>`);
+  };
+  const flag = (cid, src, anchor, note) => {
+    if (cid){
+      if (st.found[cid]){ toast("Already in your notes"); return; }
+      st.found[cid] = src; st.order.push(cid); log("🔎", `Evidence from ${src}: ${C.clues[cid]}`);
+      anchor.classList.add("flagged"); flagNote(anchor, `🔎 <b>Clue added to notes:</b> ${fm(C.clues[cid])}`, "yes");
+      const n = clueCount();
+      if (n === need) setTimeout(() => toast("📝 Enough evidence — open <b>Notes</b> to write up the root cause"), 900);
+      const trig = (C.slack || []).map((m, k) => [m, k]).filter(([m, k]) => m.on === cid && !st.fired.has(k));
+      trig.forEach(([, k]) => st.fired.add(k));
+      if (trig.length) setTimeout(() => post(trig.map(([m]) => m)), 1200);
+    } else {
+      st.noise++; log("🙅", `Flagged noise in ${src}`);
+      anchor.classList.add("noise"); flagNote(anchor, `🙅 <b>Not evidence.</b> ${fm(note || "This looks normal — it doesn't explain the alert.")}`, "no");
+    }
+  };
+  $$(".q-flag").forEach(b => b.onclick = () => {
+    const k = +b.dataset.k, src = b.dataset.src, D = (src === "dash" ? C.dash : C.ui)[k];
+    flag(D.clue, src === "dash" ? `dashboard “${D.title}”` : `${C.uiName || "console"} “${D.title}”`, b.closest(".q-dpanel"), D.note);
+  });
+  // Code viewer
+  if (C.files){
+    const cv = $(".q-codev");
+    const file = k => {
+      const F = C.files[k];
+      $$(".q-ftabs button").forEach(b => b.setAttribute("aria-selected", +b.dataset.f === k));
+      cv.innerHTML = `<div class="q-fpath">${esc(F.path)}${F.meta ? ` <small>${esc(F.meta)}</small>` : ""}</div><div class="q-clines">${F.text.split("\n").map((l, i) => `<button class="q-cl" data-f="${k}" data-n="${i + 1}"><span>${i + 1}</span><code>${esc(l) || " "}</code></button>`).join("")}</div>`;
+      cv.querySelectorAll(".q-cl").forEach(b => b.onclick = () => {
+        const n = +b.dataset.n, cid = (F.clues || {})[n];
+        if (!cid && !l2(F, n)) { b.classList.add("q-meh"); setTimeout(() => b.classList.remove("q-meh"), 600); st.noise++; toast("🙅 That line is fine"); log("🙅", `Flagged a harmless line in ${F.path}`); return; }
+        if (!cid){ flag(null, F.path, b, l2(F, n)); return; }
+        flag(cid, `${F.path}:${n}`, b, null);
+      });
+    };
+    const l2 = (F, n) => (F.notes || {})[n];
+    $$(".q-ftabs button").forEach(b => b.onclick = () => file(+b.dataset.f));
+    file(0);
+  }
+  // Terminal
+  const norm = s => s.trim().replace(/\s+/g, " ").toLowerCase();
+  const chips = () => { const c = $(".q-chips"); if (c) c.innerHTML = `<small>Try:</small>` + st.chips.map(x => `<button class="q-chip" data-cmd="${esc(x)}">${esc(x)}</button>`).join(""); c && c.querySelectorAll(".q-chip").forEach(b => b.onclick = () => run(b.dataset.cmd)); };
+  chips();
+  const known = new Set((T.cmds || []).flatMap(c => c.m.map(p => norm(p).split(" ")[0])));
+  const run = raw => {
+    const cmd = String(raw).trim(); if (!cmd) return;
+    st.hist.push(cmd); st.hp = st.hist.length; st.cmds++;
+    const n = norm(cmd), ps = `<p class="q-tcmd"><span class="q-ps">${esc(user)}@${esc(host)}:~$</span> ${esc(cmd)}</p>`;
+    let body = "", hit = null;
+    if (n === "clear"){ out.innerHTML = ""; inp.value = ""; return; }
+    if (n === "help") body = `<pre>${termFmt(`Commands worth trying here:\n${st.chips.map(x => "  " + x).join("\n")}\n\nTeammates in Slack will suggest more as you dig.\nTap 🚩 on any output that explains the alert.\nOther: history, clear, whoami, date`)}</pre>`;
+    else if (n === "history") body = `<pre>${esc(st.hist.map((h, i) => `${String(i + 1).padStart(4)}  ${h}`).join("\n"))}</pre>`;
+    else if (n === "whoami") body = `<pre>${esc(user)}  (on-call, ${esc(C.svc || z.title)})</pre>`;
+    else if (n === "date") body = `<pre>${esc(new Date().toDateString())} ${wall(el())}:00 IST</pre>`;
+    else {
+      let best = -1;
+      (T.cmds || []).forEach(c => c.m.forEach(p => { const q = norm(p); if ((n === q || n.startsWith(q + " ") || n.startsWith(q)) && q.length > best){ best = q.length; hit = c; } }));
+      if (hit){
+        log("⌨️", `Ran «${cmd.length > 60 ? cmd.slice(0, 57) + "…" : cmd}»`);
+        body = `<div class="q-tblock"><pre>${termFmt(hit.out)}</pre><button class="q-flag q-tflag">🚩 Flag this output</button></div>`;
+        (hit.unlock || []).forEach(u => { if (!st.chips.includes(u)) st.chips.push(u); }); chips();
+      } else if (known.has(n.split(" ")[0])) body = `<pre class="t-y">${esc("Nothing useful came back. Check the arguments, or type help for commands that work on this box.")}</pre>`;
+      else body = `<pre class="t-r">${esc(`bash: ${cmd.split(" ")[0]}: command not found`)}</pre>`;
+    }
+    out.insertAdjacentHTML("beforeend", ps + body);
+    const blk = out.lastElementChild;
+    if (hit){ const b = blk.querySelector(".q-tflag"); b.onclick = () => flag(hit.clue, `terminal «${cmd.length > 40 ? cmd.slice(0, 37) + "…" : cmd}»`, blk, hit.note); }
+    inp.value = ""; out.scrollTop = out.scrollHeight;
+    if (st.app !== "term") show("term");
+  };
+  $(".q-term-in").onsubmit = e => { e.preventDefault(); run(inp.value); };
+  inp.onkeydown = e => {
+    if (e.key === "ArrowUp"){ e.preventDefault(); if (st.hp > 0) inp.value = st.hist[--st.hp]; }
+    if (e.key === "ArrowDown"){ e.preventDefault(); if (st.hp < st.hist.length - 1) inp.value = st.hist[++st.hp]; else { st.hp = st.hist.length; inp.value = ""; } }
+    if (e.key === "Tab"){ e.preventDefault(); const v = norm(inp.value); const m = st.chips.find(x => norm(x).startsWith(v) && v); if (m) inp.value = m; }
+  };
+  // Notes + write-up
+  const notesEl = $(".q-notes");
+  function notes(){
+    const n = Object.keys(st.found).length;
+    notesEl.innerHTML = `<h3>🔎 Evidence <small>${n} found · need ${need}</small></h3>
+      ${n ? `<ol class="q-evid">${st.order.map(k => `<li><b>${fm(C.clues[k])}</b><small>${esc(st.found[k])}</small></li>`).join("")}</ol>` : `<p class="muted">Nothing yet. Run commands, read dashboards and code, and 🚩 flag what explains the alert.</p>`}
+      <h3>📝 Incident write-up</h3>
+      ${n < need ? `<div class="q-locked">🔒 Find at least <b>${need}</b> clues before you call the root cause. Guessing in an incident costs trust.</div>` : `
+      <fieldset class="q-wf"><legend>${fm(C.cause.q || "What's the root cause?")}</legend>${C.cause.o.map((o, i) => `<label class="q-wopt"><input type="radio" name="cause" value="${i}" ${st.cause === i ? "checked" : ""}><span>${fm(o.t)}</span></label>`).join("")}</fieldset>
+      <fieldset class="q-wf"><legend>${fm(C.fix.q || "What do you ship? Pick every action you'd take.")}</legend>${C.fix.o.map((o, i) => `<label class="q-wopt"><input type="checkbox" value="${i}" ${st.fix.has(i) ? "checked" : ""}><span>${fm(o.t)}</span></label>`).join("")}</fieldset>
+      <button class="btn big solid q-ship">🚀 Ship the fix</button>`}`;
+    notesEl.querySelectorAll('input[name="cause"]').forEach(r => r.onchange = () => st.cause = +r.value);
+    notesEl.querySelectorAll('input[type="checkbox"]').forEach(r => r.onchange = () => r.checked ? st.fix.add(+r.value) : st.fix.delete(+r.value));
+    const sb = notesEl.querySelector(".q-ship"); if (sb) sb.onclick = ship;
+  }
+  async function ship(){
+    if (st.cause == null || !st.fix.size){ toast("Pick a root cause and at least one action"); return; }
+    const co = C.cause.o[st.cause];
+    if (!co.ok){
+      st.wrong++; log("❌", `Called the wrong root cause: ${co.t}`);
+      show("slack"); toast("❌ The team isn't convinced — check Slack");
+      await post(co.say && co.say.length ? co.say : [["priya", "That doesn't explain everything we're seeing. What does the evidence actually say?"]]);
+      return;
+    }
+    const sel = [...st.fix].sort((a, b) => a - b).map(i => C.fix.o[i]);
+    const bad = sel.filter(o => o.kind === "bad"), miss = C.fix.o.filter(o => o.kind === "must" && !sel.includes(o));
+    if (bad.length){
+      st.wrong++; log("💥", `Shipped a harmful change: ${bad.map(o => o.t).join("; ")}`);
+      show("slack"); toast("💥 That change made things worse — check Slack");
+      await post(bad.flatMap(o => o.say && o.say.length ? o.say : [["ravi", `Rolled back «${o.t}» — it made things worse.`]]));
+      return;
+    }
+    if (miss.length){
+      st.wrong++; log("⚠️", "Shipped a partial fix — alert still firing");
+      show("slack"); toast("⚠️ Alert still firing — check Slack");
+      await post(miss.flatMap(o => o.miss || []).concat(miss.some(o => o.miss) ? [] : (C.fix.miss || [["ravi", "Deployed, but the alert is still firing. We've treated a symptom, not the cause."]])));
+      return;
+    }
+    log("🚀", "Shipped the fix"); log("✅", "Alert resolved — incident closed");
+    resolve(sel);
+  }
+  function resolve(sel){
+    st.done = true; clearInterval(tick);
+    const secs = el(), s = st.wrong === 0 && st.hints <= 1 && st.noise <= 3 ? 3 : st.wrong <= 1 && st.hints <= 2 ? 2 : 1;
+    P.cs = P.cs || {}; P.cs[id] = P.cs[id] || {}; const prev = P.cs[id][ci] || 0;
+    const cards = (C.cards || []).map(k => [k, (Z.cardBook || {})[k]]).filter(([, c]) => c);
+    let newC = 0; P.cards[id] = P.cards[id] || [];
+    cards.forEach(([k]) => { const cid = "c:" + k; if (!P.cards[id].includes(cid)){ P.cards[id].push(cid); newC++; } });
+    const gain = 60 + Math.max(0, s - prev) * 30 + newC * 5;
+    if (s > prev) P.cs[id][ci] = s;
+    save(); addXP(gain); unlock("pager"); if (st.wrong === 0 && st.hints === 0) unlock("sherlock");
+    if (s === 3) confetti(); if (totalCards() >= 10) unlock("collector");
+    const hr = new Date().getHours(); if (hr >= 23 || hr < 4) unlock("owl");
+    const nxI = CASES.findIndex(c => c.z === id && c.i === ci), nx = CASES[nxI + 1];
+    const good = sel.filter(o => o.kind === "must" || o.kind === "good"), meh = sel.filter(o => o.kind === "meh");
+    root().innerHTML = `<div class="q-wrap q-postm" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
+      <div class="q-res won"><p class="q-eyebrow">Incident resolved · ${wall(secs)}</p><h2>✅ ${esc(C.title)}</h2>${stars(s, "big")}
+        <div class="q-res-stats"><span><small>Time to resolve</small><b>${mmss(secs)}</b></span><span><small>Commands</small><b>${st.cmds}</b></span><span><small>Hints</small><b>${st.hints}</b></span><span><small>Wrong calls</small><b>${st.wrong}</b></span><span><small>XP</small><b>+${gain}</b></span></div>
+        ${s < 3 ? `<p class="muted">3 stars: no wrong calls, at most 1 hint, and only flag real evidence.</p>` : ""}</div>
+      <article class="q-pm"><header><small>POSTMORTEM · blameless</small><h2>${esc(C.title)}</h2><p>${esc(C.svc || "")} · SEV-${sev} · duration ${mmss(secs)}</p></header>
+        ${C.post && C.post.summary ? `<section><h3>Summary</h3>${md(C.post.summary)}</section>` : ""}
+        <section><h3>Timeline <small>(IST)</small></h3><ol class="q-tl"><li><time>${wall(0)}</time><span>📟 Paged: ${esc(C.title)}</span></li>${st.log.map(e => `<li class="${e.ic === "❌" || e.ic === "💥" || e.ic === "⚠️" ? "bad" : ""}"><time>${wall(e.s)}</time><span>${e.ic} ${fm(e.t)}</span></li>`).join("")}</ol></section>
+        <section><h3>Root cause</h3>${md(C.post ? C.post.cause : "")}</section>
+        <section><h3>What fixed it</h3><ul>${good.map(o => `<li><b>${fm(o.t)}</b>${o.why ? ` — ${fm(o.why)}` : ""}</li>`).join("")}${meh.map(o => `<li class="muted">${fm(o.t)} — <i>didn't hurt, didn't help.</i> ${fm(o.why || "")}</li>`).join("")}</ul>
+          ${(() => { const skipped = C.fix.o.filter(o => o.kind === "good" && !sel.includes(o)); return skipped.length ? `<p class="muted">Also worth doing: ${skipped.map(o => fm(o.t)).join(" · ")}</p>` : ""; })()}</section>
+        ${C.post && C.post.prevent ? `<section><h3>Action items · so it never happens again</h3><ul class="q-acts">${C.post.prevent.map(x => `<li>☐ ${fm(x)}</li>`).join("")}</ul></section>` : ""}
+        <section><h3>Traps you avoided (or didn't)</h3><ul>${C.fix.o.filter(o => o.kind === "bad").map(o => `<li>❌ <b>${fm(o.t)}</b> — ${fm(o.why || "")}</li>`).join("")}${C.cause.o.filter(o => !o.ok && o.why).map(o => `<li>🪤 <b>${fm(o.t)}</b> — ${fm(o.why)}</li>`).join("")}</ul></section>
+        ${C.learned ? `<section class="q-learned"><h3>🎤 Say this in an interview</h3><ul>${C.learned.map(x => `<li>${fm(x)}</li>`).join("")}</ul></section>` : ""}
+      </article>
+      ${cards.length ? `<h2 class="q-sec-h">🃏 Cards from this incident</h2><div class="q-xcards">${cards.map(([, c]) => `<details class="q-xcd"><summary><b>${fm(c.t)}</b><small>${fm(c.one || "")}</small></summary>${cardHTML(c, "deck")}</details>`).join("")}</div>` : ""}
+      <div class="q-res-b">${nx ? `<a class="btn big solid" href="#case-${nx.z}-${nx.i}">Next page: ${esc(nx.title)} →</a>` : `<a class="btn big solid" href="#play">Back to the desk</a>`}<button class="btn big q-again">Replay</button><a class="btn big" href="#zone-${id}/debug">All ${esc(z.title)} incidents</a></div></div>`;
+    root().querySelector(".q-again").onclick = () => caseView(id, ci);
+    window.scrollTo(0, 0);
+  }
+  show("slack");
+}
+
 window.loadQuest = function(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null); drawAcct();
@@ -807,6 +1111,7 @@ window.loadQuest = function(h){
   if ((m = h.match(/^lvl-([a-z]+)-(\d+)$/))) levelView(m[1], +m[2]);
   else if ((m = h.match(/^mis-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "ms");
   else if ((m = h.match(/^iv-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "iv");
+  else if ((m = h.match(/^case-([a-z]+)-(\d+)$/))) caseView(m[1], +m[2]);
   else if ((m = h.match(/^zone-([a-z]+)(?:\/([a-z]+))?/))) zoneView(m[1], m[2]);
   else mapView();
   window.scrollTo(0, 0);

@@ -460,3 +460,141 @@ QUEST.interviews("rag", [
  ],
  learned:["Design answers = ingestion + retrieval + generation + security + evals + operations.","Separate retrieval failures from generation failures when debugging.","Permissions in code, never in prompts.","Evidence decides RAG vs fine-tuning."]}
 ]);
+
+/* ===== On-call desk: RAG incident ===== */
+QUEST.cases("rag", [
+{
+ title:"The bot can't find the new policy", icon:"🤖", sev:2, clock:"11:30", channel:"inc-2324-assistant-retrieval", svc:"support-assistant · RAG (pgvector)", need:4,
+ pager:`[y]WARN[/y]  support-assistant  eval: retrieval recall@5 dropped [r]0.91 → 0.58[/r]
+online   "I couldn't find that in our policies" answers up [r]4.1×[/r] since Monday
+escal.   human handoffs +62% (support lead raised this)
+example  Q: "What is the new refund window for UPI?" → bot: "I don't have that information."`,
+ brief:"The new refund policy (UPI refunds within **5 days**, was 7) was published Monday and ingested the same day. The bot can't find it, and is getting worse on *older* questions too. Kai's team also changed the answer prompt on Monday, and the LLM provider had a latency blip on Tuesday.",
+ slack:[
+  {at:0, who:"kai", t:"Two changes went out Monday: a new system prompt (more cautious wording) and an ingestion pipeline upgrade. LLM latency also spiked Tuesday. Could be any of them 🤷"},
+  {at:5, who:"priya", t:"\"I don't know\" answers usually mean the model didn't get the right context. Before blaming the LLM, check what **retrieval** actually returned for a failing question.", cmd:"rag trace --query \"What is the new refund window for UPI?\""},
+  {at:50, who:"meera", t:"Support team says even \"how do I raise a chargeback?\" fails now, and that doc hasn't changed in a year."},
+  {on:"wrongchunks", who:"priya", t:"The new policy doc *exists* in the index but scores near zero. Similarity that low for an exact match means the vectors aren't comparable. What embedded these chunks?", cmd:"psql -c \"select embed_model, count(*), min(ingested_at)::date from chunks group by 1;\""},
+  {on:"mixed", who:"kai", t:"Ugh. The ingestion upgrade bumped the embedding model in the *ingest* config. The query service still pins the old one. Check the diff.", cmd:"git -C ~/repos/rag-platform show 4e1d2aa --stat"},
+  {on:"diff", who:"sana", t:"While you're in there: make sure any re-embed keeps the ACL metadata on chunks. Last time we lost it and internal docs leaked into answers."}
+ ],
+ hints:["Separate retrieval from generation: look at the retrieval trace. Did the right chunk come back, and with what score?","A brand-new, exactly matching doc scoring ~0.1 cosine similarity means query and document vectors aren't in the same space.","Group chunks by the embedding model that produced them, and compare with the model the query service uses."],
+ term:{host:"rag-ops", user:"oncall", suggest:["rag trace --query \"What is the new refund window for UPI?\"","rag eval --suite policies --last 7d"],
+  cmds:[
+  {m:["rag trace"], out:`query: "What is the new refund window for UPI?"
+query_embedder: [c]text-embed-v2 (1024-d)[/c]
+top-5 retrieved (cosine):
+  0.71  faq/upi-limits.md#3           "UPI per-transaction limits for merchants…"
+  0.69  policy/refunds-2024.md#2      "Refunds for card payments are processed within 7…"
+  0.66  faq/settlement-times.md#1     "Settlements are credited T+1…"
+  0.64  policy/refunds-2024.md#5      "UPI refunds are processed within 7 working days…"
+  0.63  faq/chargebacks.md#4          "…"
+[r]expected: policy/refunds-2025-11.md#1  rank 1,842  score 0.09[/r]
+generator: received 5 chunks, none mention "5 days" → answered "I don't have that information."`, clue:"wrongchunks", unlock:["psql -c \"select embed_model, count(*), min(ingested_at)::date from chunks group by 1;\""]},
+  {m:["rag eval"], out:`suite: policies (120 questions with gold chunks)
+date        recall@5   faithfulness   answer_rate
+11-13 Fri   0.92       0.95           0.97
+11-14 Sat   0.91       0.96           0.97
+11-16 Mon   [y]0.74[/y]       0.95           0.88
+11-17 Tue   [r]0.63[/r]       0.96           0.79
+11-18 Wed   [r]0.58[/r]       0.95           0.74
+[d]faithfulness stays high: the model is faithful to whatever it's given[/d]`, clue:"recall", unlock:["rag trace --query \"What is the new refund window for UPI?\""]},
+  {m:["psql -c \"select embed_model","psql -c \"select embed"], out:`   embed_model     |  count  |  min
+-------------------+---------+------------
+ text-embed-v2     | 1912044 | 2025-03-02
+ [r]text-embed-v3[/r]     |  [r]611508[/r] | [r]2026-11-16[/r]
+(2 rows)
+[d]-- both stored in the same vector(1024) column and the same HNSW index[/d]`, clue:"mixed", unlock:["git -C ~/repos/rag-platform show 4e1d2aa --stat"]},
+  {m:["git -C ~/repos/rag-platform show 4e1d2aa","git show 4e1d2aa"], out:`commit [y]4e1d2aa[/y]  (Mon 16 Nov 10:02, nikhil)
+    Upgrade ingestion pipeline: new chunker + text-embed-v3
+
+ ingest/config.yaml        | 4 ++--
+ ingest/chunker.py         | 61 +++++++++++------
+[d] query/config.yaml        | (unchanged)[/d]`, clue:"diff"},
+  {m:["git -C ~/repos/rag-platform log","git log"], out:`[y]4e1d2aa[/y] (Mon 10:02, nikhil) Upgrade ingestion pipeline: new chunker + text-embed-v3
+[y]a0c3317[/y] (Mon 09:40, kai)    System prompt: cite sources, say "I don't know" when unsure
+[y]77b1e02[/y] (Thu, sana)        Enforce ACL filter on retrieval`, note:"Two Monday commits. The log alone doesn't say which one matters. Look at what each changed.", unlock:["git -C ~/repos/rag-platform show 4e1d2aa --stat","git -C ~/repos/rag-platform show a0c3317"]},
+  {m:["git -C ~/repos/rag-platform show a0c3317","git show a0c3317"], out:`commit a0c3317 (Mon 09:40, kai)
+- Answer the customer's question helpfully.
++ Answer only from the provided context. Cite the source.
++ If the context doesn't contain the answer, say "I don't have that information."`, note:"A good prompt change. It makes the bot honest about *missing context* instead of guessing. It exposed the retrieval problem; it didn't cause it."},
+  {m:["curl -s llm-gateway/metrics","curl llm-gateway"], out:`p50_latency_ms 812   p95_latency_ms 2240   error_rate 0.2%
+[d]Tue 14:00-14:40: p95 spiked to 9.8s (provider incident, resolved)[/d]`, note:"A 40-minute latency blip on Tuesday. Already resolved, and latency doesn't change *what* gets retrieved."}
+ ]},
+ dash:[
+  {title:"Retrieval recall@5 (eval suite)", x:["Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"recall@5", v:[0.92,0.92,0.91,0.91,0.74,0.63,0.58]}], marks:[{i:4, label:"Mon"}], clue:"recall"},
+  {title:"Share of chunks embedded with v3", unit:"%", x:["Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"% v3", v:[0,0,0,0,9,18,24]}], marks:[{i:4, label:"Mon"}], clue:"share"},
+  {title:"LLM p95 latency (s)", unit:"s", x:["Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"p95", v:[2.1,2.2,2.0,2.1,2.3,9.8,2.2]}], marks:[{i:5, label:"provider blip"}], note:"One spike on Tuesday that recovered. Recall fell on Monday and kept falling, so the timelines don't match."},
+  {title:"Faithfulness (answers grounded in context)", x:["Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"faithfulness", v:[0.95,0.95,0.96,0.95,0.95,0.96,0.95]}], note:"Flat. The model still sticks to what it's given; it's being *given* the wrong things. Generation isn't the problem."}
+ ],
+ uiName:"LangSmith",
+ ui:[
+  {title:"Trace · failing question", md:`| Step | Detail |
+|---|---|
+| embed_query | model **text-embed-v2** · 1024-d · 38 ms |
+| vector_search | pgvector HNSW · k=5 · filter acl ⊂ {public, merchant} |
+| top score | 0.71 (faq/upi-limits.md) |
+| gold chunk | policy/refunds-2025-11.md#1 · embedded with **text-embed-v3** · score **0.09** |
+| generate | 5 chunks in → "I don't have that information." |`, clue:"wrongchunks"},
+  {title:"Trace · older question that also fails", md:`| Step | Detail |
+|---|---|
+| query | "How do I raise a chargeback?" |
+| gold chunk | faq/chargebacks.md#2 · **re-chunked and re-embedded Monday with v3** (doc unchanged) |
+| top score | 0.64 (a stale v2 duplicate of a different section) |`, clue:"oldfail"}
+ ],
+ files:[
+  {path:"rag-platform/ingest/config.yaml", meta:"changed in 4e1d2aa (Mon)", text:`chunker:
+  strategy: heading_aware
+  max_tokens: 400
+  overlap: 60
+embedding:
+  model: text-embed-v3        # was text-embed-v2
+  dims: 1024
+store:
+  table: chunks
+  index: hnsw_cosine`, clues:{6:"ingestv3"}, notes:{3:"Chunk size and overlap are reasonable. The new chunker isn't the problem."}},
+  {path:"rag-platform/query/config.yaml", meta:"unchanged since March", text:`retrieval:
+  embedding:
+    model: text-embed-v2
+    dims: 1024
+  top_k: 5
+  filter: acl
+generation:
+  model: claude-sonnet
+  temperature: 0.2`, clues:{3:"queryv2"}, notes:{9:"Temperature 0.2 is fine for grounded answers. Sampling isn't why retrieval misses."}}
+ ],
+ clues:{
+  recall:"Retrieval recall@5 fell from 0.91 to 0.58 starting Monday, while faithfulness stayed flat",
+  wrongchunks:"For the failing question, the gold chunk exists but scores 0.09 (rank 1,842)",
+  mixed:"The index mixes two embedding models: 1.9M v2 chunks plus 611k v3 chunks since Monday",
+  share:"Share of v3-embedded chunks grows daily as docs get re-ingested",
+  diff:"Commit 4e1d2aa switched ingestion to text-embed-v3; the query config wasn't touched",
+  ingestv3:"ingest/config.yaml: «model: text-embed-v3»",
+  queryv2:"query/config.yaml: queries still embedded with «text-embed-v2»",
+  oldfail:"Old, unchanged docs fail too once they're re-chunked and re-embedded with v3"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"Ingestion switched to a new embedding model (v3) but queries still use v2. Both land in the same 1024-d index, but the vector spaces aren't comparable, so every re-ingested chunk becomes unfindable", ok:true},
+  {t:"Monday's cautious system prompt makes the bot refuse too often", ok:false, why:"The prompt only made the bot *honest* about missing context. Retrieval recall itself dropped, and faithfulness is unchanged.", say:[["kai","The prompt says \"don't guess\". But recall@5 dropped, which is measured *before* the prompt ever runs. The prompt only stopped the bot hiding it."]]},
+  {t:"The LLM provider's latency incident degraded answers", ok:false, why:"The latency spike was 40 minutes on Tuesday. Recall fell on Monday and keeps falling.", say:[["priya","The latency blip was 40 minutes on Tuesday. Recall started falling Monday and is still falling today. Timelines don't match."]]},
+  {t:"The new chunker splits policies badly", ok:false, why:"The gold chunk contains the exact answer and still scores 0.09. That's a vector-space problem, not a chunking one.", say:[["priya","The gold chunk literally says \"UPI refunds within 5 days\" and scores 0.09. Bad chunking gives you *partial* matches, not near-zero ones."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Re-embed the whole corpus with v3 into a **new** index (blue/green), run the eval suite, then switch query and ingest to v3 together", kind:"must", why:"Queries and documents must share one embedding model. Blue/green means no mixed state and an instant rollback.", miss:[["meera","Recall's back for old docs, but the new UPI refund policy still isn't found. Pinning ingest to v2 didn't re-embed the 611k v3 chunks already in the index."]]},
+  {t:"Right now: point ingestion back to v2 and re-ingest Monday's documents with v2", kind:"must", why:"Fastest way to make the index consistent today while the v3 blue/green build runs.", miss:[["kai","The v3 rebuild will take ~2 days for 2.5M chunks. Meanwhile ingestion is *still* writing v3 into the live index, and recall dropped to 0.55. Stop the bleeding first."]]},
+  {t:"Store «embed_model» on every chunk and have retrieval refuse to compare across models (fail loudly)", kind:"good", why:"Turns silent garbage into an error you'd catch the same day."},
+  {t:"Add a recall@k eval gate to the ingestion pipeline's CI/CD", kind:"good", why:"A config change that tanks recall can't ship."},
+  {t:"Keep ACL metadata on every re-embedded chunk and re-run the access-control eval", kind:"good", why:"A re-embed is a full rewrite of the index. Don't let a fix become a data leak."},
+  {t:"Lower the generator temperature to 0", kind:"meh", why:"Sampling isn't the problem. The model never sees the right chunk."},
+  {t:"Raise top_k from 5 to 100 so the right chunk gets in somewhere", kind:"bad", why:"The gold chunk is at rank 1,842. top_k=100 floods the context with noise, costs ~20× more tokens and still misses.", say:[["kai","top_k=100: token cost per answer went up 18×, latency doubled, and the refund policy is *still* not in the top 100. Rank was 1,842."]]},
+  {t:"Revert Monday's system prompt so the bot answers more confidently", kind:"bad", why:"With the honesty instruction gone, the bot *invents* refund rules from the wrong chunks: confident and wrong.", say:[["sana","The bot just told a merchant that UPI refunds take \"7 working days\". That's the *old* policy, stated confidently. Support has two complaints already. Please put the guardrail back."]]}
+ ]},
+ post:{
+  summary:"Support-assistant retrieval recall@5 fell from **0.91 to 0.58** over three days. \"I don't have that information\" answers rose 4.1× and human handoffs rose 62%. The newest policy docs were the hardest hit.",
+  cause:"Commit «4e1d2aa» changed the **ingestion** embedding model to «text-embed-v3» but left the **query** service on «text-embed-v2». Both produce 1024-d vectors, so they fit the same column and HNSW index with no error, but they live in **different vector spaces**. Cosine similarity between a v2 query and a v3 chunk is essentially noise (~0.1). Every document ingested or re-ingested since Monday became unfindable, and that share grew daily. Monday's honest-answer prompt surfaced the problem instead of hiding it.",
+  prevent:["Embedding model is versioned with the index: query and ingest read it from one place","Model changes go through blue/green re-indexing plus a recall eval gate","Each chunk stores «embed_model»; retrieval asserts it matches","Dashboards: recall@k and the \"no answer\" rate side by side, with deploy markers"]
+ },
+ learned:["Debug RAG in two halves: **retrieval** (did the right chunk come back?) then **generation** (did the model use it?).","Same dimensions ≠ same space. Query and document embeddings **must** come from the same model.","Flat **faithfulness** + falling **recall** = the model is fine; it's being fed the wrong context.","Embedding upgrades are **migrations**: re-embed everything, blue/green, eval gate, switch together."],
+ cards:["embeddings","evals"]
+}
+]);

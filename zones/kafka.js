@@ -478,3 +478,135 @@ Reduce impact: keep poll loops short (tune «max.poll.records», move slow work 
  ],
  learned:["State the **scope** of every guarantee (ordering per partition, exactly-once inside Kafka).","Durability = acks=all + min.insync.replicas + RF + no unclean election + testing.","Diagnose lag per partition before scaling.","Know rebalance triggers and the modern mitigations."]}
 ]);
+
+/* ===== On-call desk: Kafka incident ===== */
+QUEST.cases("kafka", [
+{
+ title:"One partition is 3 million behind", icon:"☠️", sev:1, clock:"10:47", channel:"inc-2315-ledger-lag", svc:"payments-ledger consumer · Kafka", need:4,
+ pager:`[r]FIRING[/r]  consumer lag > 500k  group=ledger-writer  topic=payments.v2
+partition 7   lag [r]3,042,118[/r]  (growing ~1.1k/s)
+partitions 0-6, 8-11   lag < 200
+impact   merchant balances for ~1/12 of merchants are [b]stale[/b]`,
+ brief:"Merchants on one partition see balances frozen since ~09:15, and support tickets are piling up. The ledger-writer consumer runs on Kubernetes (6 pods, 12 partitions). The payments producer team did a release this morning.",
+ slack:[
+  {at:0, who:"ravi", t:"Only partition 7 is behind, everything else is near zero. Weird. Brokers look fine to me."},
+  {at:5, who:"priya", t:"One partition stuck while the rest are fine is a very specific shape. Get the per-partition view first.", cmd:"kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group ledger-writer"},
+  {at:50, who:"meera", t:"Support says ~4,000 merchants can't see today's settlements in the dashboard. Is this related?"},
+  {on:"stuckoffset", who:"priya", t:"Committed offset isn't moving at all, and one consumer owns p7. Is that pod healthy?", cmd:"kubectl get pods -l app=ledger-writer"},
+  {on:"restarts", who:"ravi", t:"CrashLoopBackOff with 41 restarts. The logs of the *previous* container will tell you why it died.", cmd:"kubectl logs ledger-writer-6d9f7-x2k4p --previous --tail=30"},
+  {on:"jsonerr", who:"priya", t:"It dies on the **same offset** every time. Let's see what's actually in that message.", cmd:"kafka-console-consumer --bootstrap-server kafka:9092 --topic payments.v2 --partition 7 --offset 1882301 --max-messages 1"},
+  {on:"badmsg", who:"dev", t:"Producer team here. We shipped a locale formatting change at 09:10… checking our repo.", cmd:"git -C ~/repos/payments-producer log --oneline -3"}
+ ],
+ hints:["When one partition is stuck and the rest are fine, the problem is usually the *data* in that partition or the consumer that owns it, not the brokers.","Check the consumer pod's restarts and its «--previous» logs. Does it crash on the same offset every time?","Read the message at that offset. The consumer crashes, restarts from the last commit, reads the same record and crashes again. That's a poison message."],
+ term:{host:"ops-bastion", user:"oncall", suggest:["kafka-consumer-groups --bootstrap-server kafka:9092 --describe --group ledger-writer","kafka-topics --bootstrap-server kafka:9092 --describe --topic payments.v2"],
+  cmds:[
+  {m:["kafka-consumer-groups"], out:`GROUP          TOPIC        PARTITION  CURRENT-OFFSET  LOG-END-OFFSET  LAG       CONSUMER-ID                              HOST
+ledger-writer  payments.v2  6          9120332         9120380         48        consumer-ledger-writer-3-9a1f...         /10.8.2.14
+ledger-writer  payments.v2  7          [r]1882301[/r]         4924419         [r]3042118[/r]   consumer-ledger-writer-4-[y]c0de...[/y]         /10.8.2.31
+ledger-writer  payments.v2  8          8873112         8873140         28        consumer-ledger-writer-4-c0de...         /10.8.2.31
+[d]… partitions 0-5, 9-11 lag < 200[/d]`, clue:"stuckoffset", unlock:["kubectl get pods -l app=ledger-writer"]},
+  {m:["kafka-topics"], out:`Topic: payments.v2  PartitionCount: 12  ReplicationFactor: 3  Configs: min.insync.replicas=2,retention.ms=604800000
+  Partition: 7  Leader: 3  Replicas: 3,1,2  [g]Isr: 3,1,2[/g]
+  [d]… all 12 partitions have full ISR[/d]`, note:"Replicas are fully in sync and the leader is healthy. The broker side of p7 is fine."},
+  {m:["kubectl top pods","kubectl top"], out:`NAME                          CPU(cores)   MEMORY(bytes)
+ledger-writer-6d9f7-a81kd     310m         612Mi
+ledger-writer-6d9f7-x2k4p     [d]0m[/d]           [d]0Mi[/d]      [d](not running)[/d]
+ledger-writer-6d9f7-q7w2m     298m         598Mi`, note:"Resource usage is normal for the healthy pods. One pod isn't even running long enough to use anything."},
+  {m:["kubectl get pods"], out:`NAME                          READY   STATUS             RESTARTS        AGE
+ledger-writer-6d9f7-a81kd     1/1     Running            0               3d
+ledger-writer-6d9f7-x2k4p     0/1     [r]CrashLoopBackOff[/r]   [r]41 (2m ago)[/r]    3d
+ledger-writer-6d9f7-q7w2m     1/1     Running            0               3d
+[d]… 3 more Running, 0 restarts[/d]`, clue:"restarts", unlock:["kubectl logs ledger-writer-6d9f7-x2k4p --previous --tail=30"]},
+  {m:["kubectl logs ledger-writer-6d9f7-x2k4p --previous","kubectl logs ledger-writer-6d9f7-x2k4p -p","kubectl logs --previous"], out:`09:58:12 INFO  Assigned partitions: [payments.v2-7, payments.v2-8]
+09:58:12 INFO  Seeking payments.v2-7 to committed offset 1882301
+09:58:13 [r]ERROR Failed to process record payments.v2-7@1882301[/r]
+Traceback (most recent call last):
+  File "/app/ledger/consumer.py", line 58, in handle
+    amount = Decimal(evt["amount"])
+decimal.InvalidOperation: [r][<class 'decimal.ConversionSyntax'>][/r]
+09:58:13 ERROR Unhandled exception in poll loop, exiting (offset not committed)
+[d]… same trace on all 41 previous restarts, always offset 1882301[/d]`, clue:"jsonerr", unlock:["kafka-console-consumer --bootstrap-server kafka:9092 --topic payments.v2 --partition 7 --offset 1882301 --max-messages 1"]},
+  {m:["kubectl logs ledger-writer-6d9f7-x2k4p"], out:`09:58:12 INFO  Assigned partitions: [payments.v2-7, payments.v2-8]
+09:58:12 INFO  Seeking payments.v2-7 to committed offset 1882301
+[d](container restarting — use --previous to see the crashed container's logs)[/d]`, note:"The live container has only just started. Use «--previous» to see why the last one died."},
+  {m:["kafka-console-consumer"], out:`{"txn_id":"T-88412093","merchant_id":"M-20391","currency":"INR",
+ "amount":[r]"1,24,500.00"[/r],"status":"CAPTURED","ts":"2026-11-18T09:14:58+05:30"}
+[d]Processed a total of 1 messages[/d]`, clue:"badmsg", unlock:["git -C ~/repos/payments-producer log --oneline -3"]},
+  {m:["git -C ~/repos/payments-producer log","git log"], out:`[y]b71c0de[/y] (Wed 18 Nov 09:10, aarav) Format amounts with en_IN locale for the receipts service
+[y]2290a1f[/y] (Mon 16 Nov, dev)          Retry on NOT_ENOUGH_REPLICAS`, clue:"producer"},
+  {m:["kafka-log-dirs","kafka-broker-api-versions"], out:`[d]broker 1: ok   broker 2: ok   broker 3: ok   (no offline log dirs)[/d]`, note:"All brokers are healthy."}
+ ]},
+ dash:[
+  {title:"Consumer lag by partition (records)", x:["09:00","09:15","09:30","09:45","10:00","10:15","10:30","10:45"], series:[{name:"p7", v:[40,120,620000,1150000,1650000,2150000,2600000,3042118]}, {name:"other partitions (max)", v:[60,80,110,90,140,100,120,180]}], marks:[{i:1, label:"09:15"}], clue:"onlyp7"},
+  {title:"Broker CPU %", unit:"%", x:["09:00","09:15","09:30","09:45","10:00","10:15","10:30","10:45"], series:[{name:"broker 1", v:[34,36,35,33,35,34,36,35]}, {name:"broker 3 (p7 leader)", v:[35,37,34,35,36,35,34,35]}], note:"Brokers are at a calm ~35% CPU, including p7's leader. The cluster isn't the bottleneck."},
+  {title:"Produce rate payments.v2 (msg/s)", x:["09:00","09:15","09:30","09:45","10:00","10:15","10:30","10:45"], series:[{name:"msg/s", v:[12800,13100,13300,12900,13400,13200,13000,13300]}], note:"Inbound traffic is normal. Nobody flooded the topic."},
+  {title:"ledger-writer pod restarts", x:["09:00","09:15","09:30","09:45","10:00","10:15","10:30","10:45"], series:[{name:"restarts", v:[0,1,6,12,19,26,33,41]}], marks:[{i:1, label:"09:15"}], clue:"restarts"}
+ ],
+ files:[
+  {path:"ledger-writer/ledger/consumer.py", text:`from decimal import Decimal
+
+def handle(record):
+    evt = json.loads(record.value)
+    if evt["status"] != "CAPTURED":
+        return
+    amount = Decimal(evt["amount"])          # line 58 in prod build
+    ledger.credit(evt["merchant_id"], amount, txn_id=evt["txn_id"])
+
+def run():
+    consumer.subscribe(["payments.v2"])
+    while True:
+        for record in consumer.poll(timeout=1.0):
+            handle(record)                   # any exception kills the loop
+        consumer.commit()`, clues:{7:"nohandling", 14:"nohandling"}, notes:{8:"The ledger credit call is idempotent on txn_id. That's fine."}},
+  {path:"payments-producer/src/serialize.py", meta:"changed in b71c0de (09:10)", text:`import locale
+locale.setlocale(locale.LC_ALL, "en_IN.UTF-8")
+
+def to_event(txn):
+    return {
+        "txn_id": txn.id,
+        "merchant_id": txn.merchant_id,
+        "currency": txn.currency,
+        "amount": locale.format_string("%.2f", txn.amount, grouping=True),
+        "status": txn.status,
+        "ts": txn.ts.isoformat(),
+    }`, clues:{9:"producer"}}
+ ],
+ clues:{
+  stuckoffset:"p7's committed offset is frozen at 1,882,301 while its log end keeps growing",
+  onlyp7:"Only partition 7 lags; every other partition is near zero",
+  restarts:"The pod that owns p7 is in CrashLoopBackOff (41 restarts since 09:15)",
+  jsonerr:"It crashes on the same record every time: Decimal(\"amount\") fails at offset 1882301",
+  badmsg:"The message at offset 1882301 has amount \"1,24,500.00\" (Indian digit grouping)",
+  producer:"Producer release b71c0de at 09:10 formats amounts with the en_IN locale",
+  nohandling:"consumer.py: one bad record raises, kills the poll loop and never commits, so it retries forever"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"A poison message: the 09:10 producer release writes locale-formatted amounts (\"1,24,500.00\"). The consumer can't parse it, crashes before committing, restarts on the same offset and loops forever on p7", ok:true},
+  {t:"Partition 7's broker is overloaded", ok:false, why:"p7's leader is at 35% CPU with full ISR. Lag is on the consumer side.", say:[["ravi","Broker 3 is at 35% CPU with a healthy ISR. And if the broker were slow, the *log end* wouldn't keep growing."]]},
+  {t:"Not enough consumers: the group needs more pods", ok:false, why:"The other 11 partitions keep up fine. p7's consumer isn't slow, it's crashing.", say:[["priya","The other 11 partitions are at near-zero lag with the same pods. p7's consumer isn't slow, it's dead."]]},
+  {t:"A hot key: one huge merchant floods p7", ok:false, why:"Produce rate is flat and p7's consumer processes nothing. It's not overloaded.", say:[["priya","If it were a hot key, the consumer would be busy and *slowly* catching up. Its offset hasn't moved by a single record in 90 minutes."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take now.", o:[
+  {t:"Make the consumer send unparseable records to a dead-letter topic (with the error and offset), commit, and keep going", kind:"must", why:"One bad record can no longer block a whole partition. The DLQ keeps it so nothing is lost.", miss:[["ravi","Producer's rolled back, nice. But p7 is still crash-looping on offset 1882301. That record is already in the log, and every bad record since 09:10 is still there."]]},
+  {t:"Roll back the producer release (b71c0de) and emit amounts as plain decimal strings or integer paise", kind:"must", why:"Stops new poison at the source. Amounts in events should be machine formats; formatting for humans belongs in the receipt UI.", miss:[["meera","p7 is draining, but the DLQ topic is growing ~200 msg/s. The producer is still sending formatted amounts, so those merchants' balances are wrong."]]},
+  {t:"Replay the DLQ through a fixed parser once the consumer is healthy, then reconcile balances", kind:"good", why:"Nothing is dropped. Every DLQ'd payment still reaches the ledger, idempotently on txn_id."},
+  {t:"Add a schema registry contract (amount as decimal/bytes) with compatibility checks in the producer's CI", kind:"good", why:"The next format change fails a build instead of paging you."},
+  {t:"Alert on consumer restarts and a committed offset that hasn't moved, not just on lag size", kind:"good", why:"Catches a stuck partition in minutes, even while traffic is low."},
+  {t:"Restart all consumer pods", kind:"meh", why:"The crashing pod restarts on the same offset and crashes again."},
+  {t:"Reset partition 7's offset to latest so lag goes to zero", kind:"bad", why:"Skipping 3M records means skipping 3M real payments. Lag is a symptom; data loss is a much bigger incident.", say:[["meera","Lag is zero but 4,000 merchants just lost every payment since 09:15 from their balance?! Finance is on the phone. 😱"],["priya","We skipped 3M real payments. Reprocessing from the offset we noted… please don't reset offsets to hide lag."]]},
+  {t:"Add partitions to payments.v2 to spread the load", kind:"bad", why:"New partitions don't move existing data, and they change key → partition mapping, which breaks per-merchant ordering.", say:[["dev","Partition count went 12 → 24… and now merchants' events are landing on different partitions than before. Per-merchant ordering just broke for new events. And p7 is *still* stuck."]]}
+ ]},
+ post:{
+  summary:"Partition 7 of «payments.v2» stopped being consumed at 09:15 and reached **3.04M records of lag**. Balances for ~4,000 merchants were stale for ~2 hours. No data was lost.",
+  cause:"Producer release «b71c0de» (09:10) formatted «amount» with the **en_IN locale**, giving «\"1,24,500.00\"». The first such record on p7 (offset 1882301) made «Decimal()» raise. The consumer had **no per-record error handling**: the exception killed the poll loop *before commit*. Kubernetes restarted the pod, it re-read the same offset and crashed again: **41 times**. Other partitions kept moving only because their bad records hadn't come up yet, or their consumers hadn't yet been rebalanced onto one.",
+  prevent:["Every consumer: per-record try/except → DLQ with error metadata, then commit and continue","Schema registry contracts for money fields (decimal or integer minor units), with compatibility checks in CI","Alert on \"committed offset unchanged for N minutes\" and on pod restart loops","Producer changes to shared topics need a consumer owner's review"]
+ },
+ learned:["**One** stuck partition = look at that partition's **data** and **consumer**, not the cluster.","A crash before commit = the **same record forever**. That's a poison message.","Never reset offsets to \"fix\" lag in a money pipeline. Lag is a symptom; skipping is **data loss**.","Fix it twice: **DLQ** in the consumer (resilience) **and** a schema contract at the producer (prevention)."],
+ cards:["offsets","groups",{k:"dlq", t:"Poison messages and dead-letter queues", one:"One record your consumer can't process can block a whole partition forever, unless you park it and move on.",
+  life:"A cashier hits a crumpled ₹500 note the machine won't accept. A bad cashier stops the whole queue arguing with the machine. A good one puts it aside in an envelope with a note (\"check later\"), serves the next customer, and sorts the envelope out at the end of the shift.",
+  how:["Kafka consumers read a partition **in order** and track progress with a **committed offset**.","If processing a record throws and you don't commit, the consumer restarts **at the same offset**, reads the same record, throws again: a crash loop.","A **dead-letter queue (DLQ)** is another topic where you send records you can't process, with error, source topic, partition and offset in headers.","After sending to the DLQ, you **commit and continue**, so the partition moves again.","Fix the bug, then **replay** the DLQ through the fixed code. Make processing **idempotent** (e.g. on txn_id) so replays are safe.","Separate **retryable** errors (DB timeout: retry with backoff) from **non-retryable** ones (bad format: DLQ straight away)."],
+  ex:"~~~\nfor rec in consumer.poll(1.0):\n    try:\n        handle(rec)\n    except (ValueError, InvalidOperation) as e:      # bad data: don't retry\n        dlq.send(\"payments.v2.dlq\", rec.value, headers={\n            \"err\": str(e), \"src\": f\"{rec.topic}-{rec.partition}@{rec.offset}\"})\n    except DBTimeout:\n        raise                                       # retryable: let it retry\nconsumer.commit()\n~~~",
+  traps:["Catching *every* exception and DLQ'ing it hides real outages (a DB down for 5 minutes ends up in the DLQ instead of being retried).","A DLQ nobody watches is a black hole. Alert on its size and assign an owner.","Resetting offsets to latest \"fixes\" lag by **dropping data**.","Kafka Connect has this built in: «errors.tolerance=all» plus «errors.deadletterqueue.topic.name»."],
+  say:"A poison message is a record the consumer can't process; without per-record handling it crashes before committing and loops on the same offset forever, blocking that partition. I handle it by classifying errors: retryable ones get backoff, non-retryable ones go to a dead-letter topic with metadata, then I commit and continue. Processing is idempotent so I can replay the DLQ once the bug is fixed, and I alert on the DLQ size and on offsets that stop moving."}]
+}
+]);

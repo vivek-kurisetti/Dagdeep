@@ -685,3 +685,248 @@ Fix: raise «spark.executor.memoryOverhead» (15–25% for PySpark), set «spark
  ],
  learned:["Start every debugging answer with **measurement** (Spark UI, compare runs).","Explain **mechanisms** (lazy plans, stages at shuffles, map/reduce files), then **levers**.","Name the **trade-offs and limits** (join-type rules, memory, when a fix doesn't apply).","Avoid red flags: 'add more nodes', 'cache everything', 'speculation fixes slowness'."]}
 ]);
+
+/* ===== On-call desk: Spark incidents ===== */
+QUEST.cases("spark", [
+{
+ title:"The nightly job got 4× slower", icon:"🐢", sev:2, clock:"06:12", channel:"inc-2291-settlements-slow", svc:"settlements-daily · Spark on EMR", need:4,
+ pager:`[r]FIRING[/r]  settlements_daily runtime > SLA
+cluster   emr-prod-etl (j-2QX8KD41)   10 × r5.2xlarge
+started   05:00 IST     status RUNNING (stage 2/7)
+runtime   [y]1h 12m[/y] so far    p50 last 30 days: 24m
+SLA       settlement file to Finance by [b]07:00 IST[/b]`,
+ brief:"The settlement file goes to the bank at 9:30. Nobody has touched this job's code since last Wednesday, yet it's been slow **every night since Monday**. You have Slack, a terminal on the EMR master, dashboards and the Spark UI.",
+ slack:[
+  {at:0, who:"ravi", t:"Morning. Paged you since it's your pipeline. I glanced at EMR: all 10 nodes healthy, no spot losses."},
+  {at:4, who:"priya", t:"First question in any \"it got slow\" incident: **what changed?** The job's code didn't. So check its *inputs*. Start with the driver log.", cmd:"tail -n 40 /var/log/spark/settlements_daily/driver.log"},
+  {at:40, who:"arjun", t:"Hi! Any ETA? I need the file by 7 for the bank cutoff 🙏"},
+  {at:110, who:"ravi", t:"FYI the Spark UI for the live run is in the 🖥 Spark UI tab, and the lake dashboards are up."},
+  {on:"listing", who:"priya", t:"22 minutes just *listing* files is a smell. How many files are in today's input? Compare with a normal day.", cmd:"aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-17/ --recursive --summarize"},
+  {on:"smallfiles", who:"priya", t:"Same bytes, 400× the files. Who writes «raw/txn_events»? The streaming job does. Did *it* change on Monday?", cmd:"git -C ~/repos/txn-streaming log --oneline --since=2026-11-14"},
+  {on:"commit", who:"ravi", t:"Kiran's change was for the live dashboard team. They wanted fresher numbers. Check the 🧾 Code tab for the actual diff."}
+ ],
+ hints:["The cluster is healthy and the data volume is the same. Something about *how* the data is laid out changed.","Run «aws s3 ls … --summarize» for today's partition and for last Friday's (dt=2026-11-14). Compare object counts.","Look at what writes into raw/txn_events: the streaming job. Check its git log and its trigger interval in the Code tab."],
+ term:{host:"emr-prod-etl-master", user:"oncall", suggest:["yarn application -list","tail -n 40 /var/log/spark/settlements_daily/driver.log","aws emr list-instances --cluster-id j-2QX8KD41"],
+  cmds:[
+  {m:["yarn application -list","yarn app -list"], out:`Total number of applications (application-types: [] and states: [RUNNING]):1
+                Application-Id      Application-Name   State       Progress   Tracking-URL
+application_1731800400_0412   settlements_daily     [g]RUNNING[/g]     31%        http://ip-10-2-4-11:20888/proxy/application_1731800400_0412/`, note:"It's running, just slowly. Confirms the symptom, not the cause."},
+  {m:["aws emr list-instances","aws emr describe-cluster"], out:`InstanceGroup   Type          Market     State     Count
+MASTER          m5.xlarge     ON_DEMAND  RUNNING   1
+CORE            r5.2xlarge    ON_DEMAND  RUNNING   10
+[d]No instances terminated in the last 7 days.[/d]`, note:"All nodes are healthy. Hardware isn't the problem."},
+  {m:["tail -n 40 /var/log/spark/settlements_daily/driver.log","tail /var/log/spark/settlements_daily/driver.log","cat /var/log/spark/settlements_daily/driver.log","tail -f /var/log/spark","tail /var/log/spark"], out:`05:00:04 INFO  SparkContext: Running Spark version 3.5.1
+05:00:05 [y]WARN[/y]  SparkConf: The configuration key 'spark.yarn.executor.memoryOverhead' has been deprecated as of Spark 2.3 and may be removed in the future. Please use the new key 'spark.executor.memoryOverhead' instead.
+05:00:11 INFO  InMemoryFileIndex: [b]Listing leaf files and directories in parallel under 1 paths.[/b] The first several paths are: s3://payu-lake/raw/txn_events/dt=2026-11-17
+05:22:47 INFO  InMemoryFileIndex: [r]It took 1356432 ms to list leaf files for 1 paths.[/r]
+05:22:52 INFO  FileSourceStrategy: Pushed Filters: IsNotNull(merchant_id)
+05:22:58 INFO  DAGScheduler: Submitting [b]1281904 missing tasks[/b] from ShuffleMapStage 1 (scan txn_events)
+05:41:10 INFO  TaskSetManager: Finished task 418220.0 in stage 1.0 (TID 418401) in [c]41 ms[/c] on ip-10-2-4-19 (418221/1281904)
+06:11:58 INFO  TaskSetManager: Finished task 902114.0 in stage 1.0 (TID 902301) in [c]38 ms[/c] on ip-10-2-4-23 (902115/1281904)`, clue:"listing", unlock:["aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-17/ --recursive --summarize"]},
+  {m:["grep -i warn /var/log/spark","grep warn"], out:`05:00:05 WARN SparkConf: The configuration key 'spark.yarn.executor.memoryOverhead' has been deprecated as of Spark 2.3 ...
+[d](1 match)[/d]`, note:"A deprecation warning. It's been in this log for a year and is harmless."},
+  {m:["aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-17","aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-16","aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-18"], out:`2026-11-17 00:00:12      31877 raw/txn_events/dt=2026-11-17/part-00000-7c1e...-c000.snappy.parquet
+2026-11-17 00:00:12      34102 raw/txn_events/dt=2026-11-17/part-00001-7c1e...-c000.snappy.parquet
+2026-11-17 00:00:22      29944 raw/txn_events/dt=2026-11-17/part-00000-91ab...-c000.snappy.parquet
+[d]... 1281898 more lines ...[/d]
+
+Total Objects: [r]1281904[/r]
+   Total Size: [b]41.2 GiB[/b]     [d](average object ≈ 33 KB)[/d]`, clue:"smallfiles", unlock:["aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-14/ --recursive --summarize"]},
+  {m:["aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-14","aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-13","aws s3 ls s3://payu-lake/raw/txn_events/dt=2026-11-12"], out:`2026-11-14 00:05:01   148221930 raw/txn_events/dt=2026-11-14/part-00000-3d0f...-c000.snappy.parquet
+2026-11-14 00:05:01   151004113 raw/txn_events/dt=2026-11-14/part-00001-3d0f...-c000.snappy.parquet
+[d]... 2878 more lines ...[/d]
+
+Total Objects: [g]2880[/g]
+   Total Size: [b]39.8 GiB[/b]     [d](average object ≈ 14 MB)[/d]`, clue:"normalday"},
+  {m:["git -C ~/repos/txn-streaming log","git log"], out:`[y]a91f3c2[/y] (Mon 16 Nov, kiran) Lower trigger to 10s so live dashboards are fresher
+[y]5be0e71[/y] (Thu 12 Nov, kiran) Add merchant_category to event schema
+[y]c4d22a9[/y] (Tue 10 Nov, dev)   Bump delta-spark to 3.2.1`, clue:"commit"},
+  {m:["git -C ~/repos/settlements log"], out:`[y]e019bb4[/y] (Wed 11 Nov, you) Round settlement amounts to 2 dp before aggregation
+[d]No commits since Wed 11 Nov.[/d]`, note:"Right — the job's own code hasn't changed since before the slowdown."},
+  {m:["top","free -h","htop"], out:`top - 06:14:02 up 6 days, load average: 0.84, 0.91, 0.88
+MiB Mem :  15827.4 total,   9120.6 free,   5012.2 used
+PID   USER   %CPU  %MEM  COMMAND
+8812  hadoop  38.1  21.4  java (spark driver)`, note:"The driver is mostly idle and has plenty of memory. Nothing is starved here."}
+ ]},
+ dash:[
+  {title:"settlements_daily runtime (min)", unit:"m", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue","Today"], series:[{name:"runtime", v:[24,25,23,26,24,97,101,72]}], marks:[{i:5, label:"Mon"}], note:"That's the symptom you were paged for. It tells you *when* things changed (Monday), not *why*."},
+  {title:"Objects written per day · raw/txn_events", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue"], series:[{name:"objects", v:[2880,2876,2880,2880,2880,1281904,1281904]}], marks:[{i:5, label:"Mon"}], clue:"filerate"},
+  {title:"Bytes landed per day (GiB)", unit:"G", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue"], series:[{name:"GiB", v:[39.6,40.1,39.8,38.9,37.2,40.4,41.2]}], clue:"volume"},
+  {title:"Executor CPU % · JVM GC %", unit:"%", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue"], series:[{name:"CPU %", v:[71,69,72,70,68,19,17]}, {name:"GC %", v:[3,3,2,3,3,3,2]}], note:"GC is flat, so memory is fine. CPU dropped because executors are *waiting* on S3 opens and task scheduling, not computing. Adding CPU won't help."}
+ ],
+ uiName:"Spark UI",
+ ui:[
+  {title:"Stages · live run", md:`| Stage | Description | Tasks | Median task | Duration |
+|---|---|---|---|---|
+| 0 | Listing leaf files (1 path) | 1 | — | **22.6 min** |
+| 1 | scan txn_events · Exchange | 902,115 / **1,281,904** | **38 ms** | 49 min (running) |
+| 2–6 | aggregate · join merchants · write | pending | — | — |`, clue:"tasks"},
+  {title:"Executors · live run", md:`| | Active | Dead | Failed tasks | GC time | Shuffle spill |
+|---|---|---|---|---|---|
+| Executors | 10 | 0 | 0 | 2.9% | 0 B |`, note:"All executors healthy: no deaths, failures, GC or spill. The engine is fine; it's being fed badly."},
+  {title:"Staging repro · one hour of Monday's data", img:"img/spark-stage-smallfiles.png", cap:"Real Spark UI: 94 tasks read only 61.7 MiB in total (~0.66 MiB each); median task 0.4 s. Each task is mostly overhead.", clue:"tasks"}
+ ],
+ files:[
+  {path:"txn-streaming/src/ingest_txn_events.py", meta:"changed in a91f3c2 (Mon)", text:`from pyspark.sql import functions as F
+
+events = (spark.readStream.format("kafka")
+    .option("subscribe", "txn-events")
+    .option("maxOffsetsPerTrigger", 2_000_000)
+    .load())
+
+parsed = events.select(F.from_json(F.col("value").cast("string"), SCHEMA).alias("e")).select("e.*")
+
+(parsed.withColumn("dt", F.to_date("event_ts"))
+    .repartition(48)
+    .writeStream
+    .format("parquet")
+    .option("checkpointLocation", "s3://payu-lake/_chk/txn_events")
+    .partitionBy("dt")
+    .trigger(processingTime="10 seconds")   # was "5 minutes"
+    .start("s3://payu-lake/raw/txn_events"))`, clues:{17:"trigger", 12:"repartition"}, notes:{5:"maxOffsetsPerTrigger only caps how much each micro-batch reads. It's not why files are tiny."}}
+ ],
+ clues:{
+  listing:"Driver spent 22.6 min just listing files for one partition",
+  smallfiles:"Today's partition has 1,281,904 objects averaging ~33 KB",
+  normalday:"Last Friday: same ~40 GiB in only 2,880 files (~14 MB each)",
+  filerate:"Objects written per day jumped from ~2.9k to ~1.28M on Monday",
+  volume:"Bytes per day are flat at ~40 GiB, so the data didn't grow",
+  tasks:"Scan stage has ~1.28M tasks at ~38 ms each: scheduling overhead dominates",
+  commit:"Monday's commit a91f3c2 lowered the streaming trigger to 10 s",
+  trigger:"ingest_txn_events.py: «trigger(processingTime=\"10 seconds\")» (was 5 minutes)",
+  repartition:"Each micro-batch is repartitioned to 48 files: 48 files × 8,640 batches/day"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"Monday's streaming change (10 s trigger × 48 partitions) floods the raw table with ~1.3M tiny files. Listing and per-file task overhead now dominate the nightly job.", ok:true},
+  {t:"Monday's Diwali traffic increased data volume ~4×", ok:false, why:"Bytes per day stayed flat at ~40 GiB. Only the file count changed.", say:[["meera","Volume's flat though: 40 GiB a day all week. I check that for the finance dashboards."]]},
+  {t:"The cluster is undersized — we need more executors", ok:false, why:"CPU at 17% and zero GC/spill say executors are idle, waiting on overhead.", say:[["ravi","Executors are at 17% CPU. They're bored, not overloaded. Why would more of them help?"]]},
+  {t:"Driver memory pressure from the deprecated memoryOverhead config", ok:false, why:"The WARN is a year old, and the driver has 9 GB free.", say:[["priya","That WARN has been there since 2025, and the driver has 9 GB free. Follow the timeline: what changed on *Monday*?"]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take now.", o:[
+  {t:"Compact today's partition into ~128 MB files, then re-run the job on the compacted copy", kind:"must", why:"Gets today's settlement file out. 1.28M files become ~330, so listing and scan go back to minutes.", miss:[["arjun","It's 06:58 and the job is still on stage 2. I'm telling the bank we'll be late 😞"]]},
+  {t:"Set the streaming trigger back to 5 minutes (or add an hourly compaction step), and agree a freshness target with the dashboard team", kind:"must", why:"Stops new small files at the source. Without this, tomorrow night is slow again.", miss:[["priya","Today's file is out, nice. But the streaming job is still writing ~53k files an hour, so we'll be back here tomorrow night. What stops the bleeding?"]]},
+  {t:"Move raw/txn_events to Iceberg and schedule «rewrite_data_files» with a 128 MB target", kind:"good", why:"Makes compaction routine, so freshness and file size stop fighting each other."},
+  {t:"Alert when files-per-partition or average file size crosses a threshold", kind:"good", why:"Catches this the morning it starts, not after three slow nights."},
+  {t:"Raise «spark.sql.files.maxPartitionBytes» and «openCostInBytes»", kind:"meh", why:"Packs more small files into each task, so fewer tasks. Driver listing and per-file S3 opens stay just as slow."},
+  {t:"Double the cluster to 20 nodes for tonight", kind:"bad", why:"Listing runs on the driver and per-file overhead doesn't parallelise away. You pay double and gain almost nothing.", say:[["ravi","Scaled to 20 nodes. Runtime estimate went from 98 → 91 min. The listing phase didn't move at all."],["arjun","Also… why did the EMR cost alert just fire? 💸"]]},
+  {t:"Delete the tiny files under 10 KB to speed things up", kind:"bad", why:"Those files are real transactions. Deleting data to make a job faster is never the fix.", say:[["meera","Hold on!! Settlement totals for the 17th just dropped by ₹3.2 cr. Did someone delete raw files?"],["priya","Restoring from S3 versioning now. Please never delete raw data to make a job faster."]]},
+  {t:"Kill the job and restart it with 64 GB of driver memory", kind:"bad", why:"Memory wasn't the bottleneck, and restarting throws away 70 minutes of progress.", say:[["ravi","Restarted with 64g. We lost 70 minutes of progress and it's back to listing files. 😬"]]}
+ ]},
+ post:{
+  summary:"settlements_daily breached its 07:00 SLA three nights in a row. Its input partition held **1.28M objects (~33 KB each)** instead of ~2,900 (~14 MB each) after an upstream streaming job lowered its trigger interval. Data volume was unchanged.",
+  cause:"Commit «a91f3c2» set the streaming writer's trigger from 5 minutes to **10 seconds**, and each micro-batch wrote **48 files** («repartition(48)»). That's 8,640 batches × 48 ≈ **415k files a day**, which retries and late batches pushed past 1.28M. The nightly batch paid twice:\n- **Driver listing**: 22.6 min to list one partition.\n- **Per-file task overhead**: 1.28M scan tasks at ~38 ms each, mostly open, schedule and footer reads.",
+  prevent:["Compaction is part of every streaming sink: an hourly rewrite or Iceberg «rewrite_data_files»","Changes to a shared table's file layout need a heads-up to downstream owners","Alert on objects per partition and average file size","Add a «why fresh?» field to trigger changes and agree freshness SLOs per consumer"]
+ },
+ learned:["\"It got slow and nothing changed\" → diff the **inputs**: file count, bytes, schema, skew.","Small files hurt twice: **driver listing** plus **per-task overhead**. Bigger clusters don't fix either.","Streaming freshness and file size trade off. **Compaction** reconciles them.","Fix today, then fix the source, then add the **alert** that would have caught it."],
+ cards:["smallfiles","partitions"]
+},
+{
+ title:"Executors keep getting killed", icon:"💥", sev:2, clock:"14:05", channel:"inc-2307-risk-features-oom", svc:"risk-features · Spark on EMR", need:4,
+ pager:`[r]FIRING[/r]  risk_features_hourly FAILED (attempt 4/4)
+error     Job aborted due to stage failure: Task 37 in stage 4.0 failed 4 times
+          ExecutorLostFailure (executor 12 exited caused by one of the running tasks)
+          Reason: [y]Container from a bad node … Exit status: 137[/y]
+impact    fraud model is scoring with features [b]2 hours stale[/b]`,
+ brief:"The hourly feature job for the fraud model has failed twice in a row. Risk is nervous: stale features mean fraud slips through. Yesterday's 6 PM deploy shipped a new feature column.",
+ slack:[
+  {at:0, who:"ravi", t:"Exit 137 = something got SIGKILLed. Could be spot reclaim, could be memory. Your call."},
+  {at:5, who:"priya", t:"Don't guess from the exit code. Get the actual container logs for the failed app.", cmd:"yarn logs -applicationId application_1731900011_0088 | grep -i killed"},
+  {at:45, who:"sana", t:"Risk team here (wearing my fraud hat today) — how long until features are fresh? Chargebacks are spiking."},
+  {on:"killed", who:"priya", t:"So it's not spot. YARN killed it for exceeding the container limit. Is the overflow on the **heap** or **outside** it? Check the executor config.", cmd:"cat /etc/spark/conf/spark-defaults.conf"},
+  {on:"conf", who:"ravi", t:"Overhead's at the default (10% of 30g = 3g). Did anything new start using off-heap memory yesterday? Check the deploy.", cmd:"git -C ~/repos/risk-features log --oneline -5"},
+  {on:"commit", who:"priya", t:"A «pandas_udf»: the Python workers and Arrow buffers all live **outside** the JVM heap. Look at the code."}
+ ],
+ hints:["Exit 137 with \"Container killed by YARN for exceeding physical memory limits\" means the *whole container* overflowed, not the Java heap.","A Java OutOfMemoryError would show up as a heap error. Here the heap looks fine; the extra memory is outside it.","Yesterday's deploy added a pandas UDF. Python workers and Arrow batches count against memoryOverhead, which is still at the default 3 GB."],
+ term:{host:"emr-risk-master", user:"oncall", suggest:["yarn application -list -appStates FAILED","aws ec2 describe-spot-instance-requests --filters Name=state,Values=closed"],
+  cmds:[
+  {m:["yarn application -list"], out:`Application-Id                   Name                    State    Final-State
+application_1731900011_0088      risk_features_hourly    FINISHED [r]FAILED[/r]
+application_1731900011_0071      risk_features_hourly    FINISHED [r]FAILED[/r]
+application_1731900011_0059      risk_features_hourly    FINISHED [g]SUCCEEDED[/g]`, note:"Confirms the failures started after a run that succeeded. Now find out why.", unlock:["yarn logs -applicationId application_1731900011_0088 | grep -i killed"]},
+  {m:["yarn logs -applicationid application_1731900011_0088","yarn logs"], out:`Container: container_1731900011_0088_01_000013 on ip-10-4-1-77
+LogType:stderr
+2026-11-18 13:41:09 INFO PythonRunner: Times: total = 41210, boot = 3, init = 412, finish = 40795
+2026-11-18 13:41:52 [r]ERROR YarnScheduler: Lost executor 12 on ip-10-4-1-77: Container killed by YARN for exceeding physical memory limits. 33.1 GB of 33 GB physical memory used.[/r] Consider boosting spark.executor.memoryOverhead.
+2026-11-18 13:41:52 WARN TaskSetManager: Lost task 37.0 in stage 4.0 (TID 1191): ExecutorLostFailure (executor 12 exited caused by one of the running tasks) Reason: Container killed … Exit status: 137
+[d]-- jvm heap at time of kill (from GC log): used 18.2 GB / 30 GB --[/d]`, clue:"killed", unlock:["cat /etc/spark/conf/spark-defaults.conf"]},
+  {m:["aws ec2 describe-spot-instance-requests"], out:`{
+    "SpotInstanceRequests": []
+}
+[d]No spot requests closed in the last 24h (cluster is ON_DEMAND).[/d]`, note:"No spot reclaims. The cluster is on-demand, so that theory is out."},
+  {m:["cat /etc/spark/conf/spark-defaults.conf","cat spark-defaults.conf"], out:`spark.executor.memory              30g
+spark.executor.cores               5
+[d]# spark.executor.memoryOverhead    (unset → max(384m, 10% of 30g) = 3g)[/d]
+spark.sql.execution.arrow.pyspark.enabled  true
+spark.sql.execution.arrow.maxRecordsPerBatch  [y]100000[/y]
+spark.dynamicAllocation.enabled    true`, clue:"conf", unlock:["git -C ~/repos/risk-features log --oneline -5"]},
+  {m:["git -C ~/repos/risk-features log","git log"], out:`[y]7f2a9e0[/y] (Tue 17 Nov 18:02, nisha) Add device_risk_embedding feature via pandas_udf (sentence-transformers)
+[y]33ce1d4[/y] (Fri 13 Nov, you)          Backfill velocity features for Diwali week
+[y]9a01b77[/y] (Wed 11 Nov, dev)          Upgrade EMR to 7.3`, clue:"commit"},
+  {m:["dmesg","dmesg | grep -i oom"], out:`[d][6 days] no kernel OOM-killer events on this host[/d]`, note:"No kernel OOM kills on the master. YARN's monitor did the killing on the core node."},
+  {m:["df -h"], out:`Filesystem   Size  Used Avail Use% Mounted on
+/dev/nvme0n1  100G   41G   59G  41% /
+/dev/nvme1n1  1.7T  390G  1.3T  23% /mnt`, note:"Disks are fine. Nothing to do with this incident."}
+ ]},
+ dash:[
+  {title:"Container physical memory · executor 12 (GB)", unit:"G", x:["13:30","13:33","13:36","13:39","13:41"], series:[{name:"RSS", v:[19,24,29,32.4,33.1]}, {name:"YARN limit", v:[33,33,33,33,33]}], clue:"rss"},
+  {title:"JVM heap used · executor 12 (GB)", unit:"G", x:["13:30","13:33","13:36","13:39","13:41"], series:[{name:"heap", v:[16.1,17.4,18.0,18.2,18.2]}, {name:"heap max", v:[30,30,30,30,30]}], clue:"heap"},
+  {title:"Input rows per hour (M)", unit:"M", x:["Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"rows", v:[41,39,38,42,43,42]}], note:"Input volume is steady. More data didn't cause this."},
+  {title:"Cluster nodes", x:["12:00","12:30","13:00","13:30","14:00"], series:[{name:"core nodes", v:[12,12,12,12,12]}], note:"No nodes lost. It's containers, not machines, dying."}
+ ],
+ uiName:"Spark UI",
+ ui:[
+  {title:"Executors · failed run", md:`| Executor | Status | Heap used / max | Failed tasks | Reason |
+|---|---|---|---|---|
+| 12 | **Dead** | 18.2 / 30 GB | 4 | Container killed (33.1/33 GB) |
+| 7 | **Dead** | 17.9 / 30 GB | 3 | Container killed (33.0/33 GB) |
+| 3 | Active | 15.4 / 30 GB | 0 | — |`, clue:"heap"},
+  {title:"Stage 4 · tasks", md:`| Stage | Description | Tasks | Median | Max | Shuffle read max |
+|---|---|---|---|---|---|
+| 4 | «ArrowEvalPython» device_risk_embedding | 200 | 38 s | 41 s | 212 MB |`, note:"Task times and shuffle reads are even, so this isn't skew. Every task in the UDF stage is heavy."}
+ ],
+ files:[
+  {path:"risk-features/features/device_risk.py", meta:"added in 7f2a9e0 (Tue 18:02)", text:`import pandas as pd
+from pyspark.sql.functions import pandas_udf
+from sentence_transformers import SentenceTransformer
+
+@pandas_udf("array<float>")
+def device_risk_embedding(fingerprints: pd.Series) -> pd.Series:
+    model = SentenceTransformer("all-MiniLM-L6-v2")   # loaded per batch, ~90 MB
+    vecs = model.encode(fingerprints.tolist(), batch_size=512)
+    return pd.Series(list(vecs))
+
+features = features.withColumn("device_emb", device_risk_embedding("device_fingerprint"))`, clues:{5:"udf", 7:"modelload"}, notes:{11:"Adding the column is fine. What matters is where the UDF runs."}}
+ ],
+ clues:{
+  killed:"YARN killed executors: 33.1 GB of 33 GB *physical* memory (exit 137)",
+  heap:"JVM heap was only ~18 GB of 30 GB when the container died",
+  rss:"Container RSS climbed to the 33 GB limit during the UDF stage",
+  conf:"memoryOverhead unset → default 3 GB; Arrow batches of 100k rows",
+  commit:"Tuesday's deploy 7f2a9e0 added a pandas_udf with a sentence-transformers model",
+  udf:"device_risk.py: a pandas_udf runs in Python workers, outside the JVM heap",
+  modelload:"The model (~90 MB plus tensors) is loaded inside every Arrow batch, in every Python worker"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"The new pandas UDF's Python workers (model + Arrow batches) use off-heap memory, overflowing the default 3 GB memoryOverhead, so YARN kills the container", ok:true},
+  {t:"Java heap OutOfMemoryError: 30 GB isn't enough", ok:false, why:"The heap peaked at ~18 GB of 30. The overflow happened outside the heap.", say:[["priya","Heap peaked at 18 of 30 GB. If it were a heap OOM we'd see «java.lang.OutOfMemoryError», not a YARN kill."]]},
+  {t:"Spot instances are being reclaimed", ok:false, why:"The cluster is on-demand, and no nodes were lost.", say:[["ravi","We're fully on-demand, and node count is flat at 12. It's not spot."]]},
+  {t:"Data skew: one huge key in stage 4", ok:false, why:"Median and max task times are ~equal; shuffle reads are even.", say:[["priya","Median 38 s, max 41 s. That's not skew. Every task is heavy."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Set «spark.executor.memoryOverhead=8g» and drop heap to «24g» so the container still fits the node", kind:"must", why:"Moves memory to where the Python workers actually use it, without asking YARN for more than the node has.", miss:[["ravi","Re-ran with smaller Arrow batches. Got further, but executor 9 just died with 33.4/33 GB. Overhead is still 3 GB."]]},
+  {t:"Lower «arrow.maxRecordsPerBatch» to 10k and load the model once per worker (cache it at module level or use «mapInPandas» with an iterator)", kind:"must", why:"Cuts peak Python memory per batch and stops reloading a model in every batch.", miss:[["priya","It's green now, but each Python worker still loads the model in every batch, and with 100k-row batches memory is right at the edge. Next week's bigger traffic will kill it again."]]},
+  {t:"Precompute embeddings in a separate GPU/inference job and join them in", kind:"good", why:"Keeps heavy ML inference out of the ETL critical path. Longer term, the cleaner design."},
+  {t:"Alert on container RSS vs limit, not just the job's success or failure", kind:"good", why:"You'd see the squeeze at 90% before the kills start."},
+  {t:"Enable speculative execution", kind:"meh", why:"Duplicates slow tasks; every copy still overflows the same way."},
+  {t:"Raise «spark.executor.memory» to 60g", kind:"bad", why:"r5.2xlarge has 64 GB; 60g heap + overhead won't fit, and the heap wasn't the problem anyway.", say:[["ravi","Submitted with 60g executors… now YARN can't place a single container: «Required executor memory (61440+6144 MB) is above the max threshold of this cluster». Job's stuck at 0 executors."]]},
+  {t:"Disable the new feature column without telling the risk team", kind:"bad", why:"Silently changing a fraud model's inputs is a model-risk incident of its own.", say:[["sana","Wait — the fraud model just started scoring with a null device_emb? Who changed the features without telling us? That's a model-risk incident now."]]}
+ ]},
+ post:{
+  summary:"risk_features_hourly failed 2 runs in a row with exit 137, so fraud features went **2+ hours stale**. Tuesday's deploy added a pandas UDF that loads a sentence-transformers model.",
+  cause:"An executor container = **heap (30 GB) + memoryOverhead (3 GB default)**. A pandas UDF runs in **Python worker processes** fed by **Arrow batches**, and all of that memory is *outside* the JVM heap, inside the overhead budget. Each worker loaded a ~90 MB model *per batch* and held 100k-row Arrow batches. With 5 cores, that's 5 workers per executor. RSS climbed to 33.1 GB and YARN's memory monitor killed the container. The heap sat at 18 GB the whole time.",
+  prevent:["Any PR adding a Python/pandas UDF must set and justify memoryOverhead","Load models once per worker (iterator-style «mapInPandas» or a module-level cache)","Move ML inference to a dedicated inference job; ETL joins the results","Dashboard: container RSS vs YARN limit per executor"]
+ },
+ learned:["Exit 137 + \"exceeding physical memory limits\" = **container** overflow. Look **off-heap**, not at the heap.","Python UDFs, Arrow, PySpark workers and native libraries all live in **memoryOverhead**.","Bigger heap can make it **worse**: it steals room the off-heap side needs.","Prove the theory with two numbers: **heap used** vs **container RSS** at the moment of death."],
+ cards:["memory"]
+}
+]);
