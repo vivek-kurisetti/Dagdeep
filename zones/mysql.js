@@ -154,3 +154,94 @@ Store replica positions in InnoDB tables (default), and «relay_log_recovery=ON�
  ["pick","Inserts slow; table uses VARCHAR(36) UUID PK with many indexes. Fix?",["Compact ordered PK (BIGINT / BINARY(16) UUIDv7)","More indexes","Partitioning by UUID","Larger pages"],0,"Sequential, small keys."]
 ]}
 ]);
+
+/* ===== On-call desk: MySQL incident ===== */
+QUEST.cases("mysql", [
+{
+ title:"Read replica is 40 minutes behind", icon:"🐌", sev:2, clock:"02:05", channel:"inc-2331-replica-lag", svc:"payments-mysql · reporting replica", need:4,
+ terms:[["Primary / replica","The primary takes writes. Replicas copy its changes and serve reads like reports."],["Binlog","The primary's log of changes. Replicas download it (I/O thread) and apply it (SQL/applier threads)."],["Row-based replication (RBR)","The binlog stores the before/after image of every changed row, not the SQL statement."],["Seconds_Behind_Source","How far, in seconds, the replica's applied changes lag behind the primary."],["Primary key","A unique, indexed row identifier. In RBR the replica uses it to find each row to change."],["Full table scan","Reading every row of a table. Doing it once per changed row means millions of scans."],["Purge job","A scheduled cleanup that deletes old rows, here from audit_log."]],
+ pager:`[y]WARN[/y]  mysql-replica-reporting  Seconds_Behind_Source = [r]2,412[/r]
+trend     +60s every minute (falling further behind)
+impact    merchant settlement reports show [b]stale balances[/b]
+primary   mysql-payments-1   load: normal`,
+ brief:"Reports read from the replica, and merchants are seeing balances from 40 minutes ago. The primary is healthy. A new nightly **purge job** (deleting audit rows older than 90 days) went live tonight at 01:00, the kind of cleanup you write yourself.",
+ slack:[
+  {at:0, who:"ravi", t:"Replica lag alert. Primary is calm, so it's the replica struggling to *apply* something. Your DB, your call 🙂"},
+  {at:5, who:"priya", t:"Start with the replica's own view: is it the I/O thread (downloading binlog) or the SQL thread (applying it) that's behind?", cmd:"mysql -h replica -e \"SHOW REPLICA STATUS\\G\""},
+  {at:45, who:"meera", t:"Merchants are calling about balances not updating in the settlement report. Any ETA?"},
+  {on:"sqlbehind", who:"priya", t:"I/O is caught up, SQL thread is stuck applying. What exactly is it chewing on?", cmd:"mysql -h replica -e \"SHOW PROCESSLIST\""},
+  {on:"applying", who:"ravi", t:"Deleting rows from «audit_log»… that's tonight's purge job. Why would a delete that took 3 minutes on the primary take an hour here? Look at the table.", cmd:"mysql -h replica -e \"SHOW CREATE TABLE payments.audit_log\""},
+  {on:"nopk", who:"priya", t:"No primary key! With row-based replication the replica has to *find* every deleted row. With no key, every row means a scan. Check how the job deletes.", cmd:"cat /opt/jobs/purge_audit_log.sql"}
+ ],
+ hints:["Check SHOW REPLICA STATUS: is it receiving the binlog slowly, or applying it slowly?","See what the replica's applier thread is doing in SHOW PROCESSLIST, then look at that table's definition.","In row-based replication the replica locates each changed row by primary key. Without one, each row event can mean a full table scan."],
+ term:{host:"db-bastion", user:"dba", suggest:["mysql -h replica -e \"SHOW REPLICA STATUS\\G\"","mysql -h primary -e \"SHOW GLOBAL STATUS LIKE 'Threads_running'\""],
+  cmds:[
+  {m:["mysql -h replica -e \"show replica status","mysql -h replica -e \"show slave status","show replica status"], out:`        Replica_IO_Running: [g]Yes[/g]
+       Replica_SQL_Running: [g]Yes[/g]
+       Source_Log_File: binlog.004211     Read_Source_Log_Pos: 88120334
+  Relay_Source_Log_File: [y]binlog.004207[/y]  Exec_Source_Log_Pos: 1201
+   Seconds_Behind_Source: [r]2412[/r]
+  Replica_SQL_Running_State: [y]Applying batch of row changes (delete)[/y]
+           Last_SQL_Error: `, clue:"sqlbehind", unlock:["mysql -h replica -e \"SHOW PROCESSLIST\""]},
+  {m:["mysql -h replica -e \"show processlist","mysql -h replica -e \"show full processlist","show processlist"], out:`Id   User         Command  Time   State                                        Info
+12   system user  Connect  2398   [y]Applying batch of row changes (delete)[/y]    [b]DELETE FROM payments.audit_log[/b]
+13   system user  Connect  2398   Waiting for an event from Coordinator        NULL
+88   report_ro    Query    1      executing                                    SELECT ... FROM settlements ...`, clue:"applying", unlock:["mysql -h replica -e \"SHOW CREATE TABLE payments.audit_log\""]},
+  {m:["mysql -h replica -e \"show create table payments.audit_log","mysql -h primary -e \"show create table payments.audit_log","show create table"], out:`CREATE TABLE \`audit_log\` (
+  \`event_id\` varchar(36) NOT NULL,
+  \`txn_id\` varchar(32) DEFAULT NULL,
+  \`action\` varchar(32) DEFAULT NULL,
+  \`payload\` json DEFAULT NULL,
+  \`created_at\` datetime NOT NULL,
+  KEY \`idx_created_at\` (\`created_at\`)
+) ENGINE=InnoDB  [d]/* 412M rows */[/d]
+[r]-- no PRIMARY KEY, no UNIQUE KEY[/r]`, clue:"nopk", unlock:["cat /opt/jobs/purge_audit_log.sql"]},
+  {m:["cat /opt/jobs/purge_audit_log.sql","cat purge"], out:`-- nightly purge, scheduled 01:00 (new, went live tonight)
+[y]DELETE FROM payments.audit_log WHERE created_at < NOW() - INTERVAL 90 DAY;[/y]
+-- deletes ~[b]18.4M rows[/b] in ONE transaction`, clue:"onetxn"},
+  {m:["mysql -h primary -e \"show global variables like 'binlog_format'","mysql -h primary -e \"show variables like 'binlog_format'"], out:`binlog_format      ROW
+binlog_row_image   FULL`, note:"ROW is the standard, safe format. It's not wrong by itself; it's why a missing primary key hurts so much."},
+  {m:["mysql -h primary -e \"show global status like 'threads_running'","mysql -h primary"], out:`Threads_running   6
+[d]primary CPU 22%, no long transactions open now[/d]`, note:"The primary is relaxed. The DELETE finished there long ago; the replica is still replaying it."},
+  {m:["iostat","iostat -x 1 3"], out:`Device   r/s     w/s    %util
+nvme0n1  [y]9120[/y]    210    [y]97.8[/y]
+[d](replica)[/d]`, note:"The replica's disk is pegged by reads. It's a symptom of all the table scans, not a hardware fault."}
+ ]},
+ dash:[
+  {title:"Replica lag (seconds)", x:["00:30","00:45","01:00","01:15","01:30","01:45","02:00"], series:[{name:"lag", v:[0,0,0,780,1560,2100,2412]}], marks:[{i:2, label:"purge job"}], clue:"timing"},
+  {title:"Primary CPU %", unit:"%", x:["00:30","00:45","01:00","01:15","01:30","01:45","02:00"], series:[{name:"CPU", v:[18,17,61,21,20,22,22]}], marks:[{i:2, label:"purge job"}], note:"The primary blipped for ~3 minutes during the DELETE and then went back to normal. The problem is downstream."},
+  {title:"Replica rows read per second", x:["00:30","00:45","01:00","01:15","01:30","01:45","02:00"], series:[{name:"rows read/s", v:[4000,3800,4100,2.1e7,2.3e7,2.2e7,2.2e7]}], marks:[{i:2, label:"purge job"}], clue:"scans"},
+  {title:"Network: binlog bytes received by replica", x:["00:30","00:45","01:00","01:15","01:30","01:45","02:00"], series:[{name:"MB/min", v:[12,11,240,14,12,13,12]}], note:"The binlog arrived quickly (the I/O thread is caught up). The network isn't the bottleneck."}
+ ],
+ clues:{
+  sqlbehind:"The I/O thread is caught up; the SQL (applier) thread is 2,412 s behind",
+  applying:"The replica's applier is stuck on «DELETE FROM payments.audit_log»",
+  nopk:"«audit_log» has no primary or unique key (412M rows)",
+  onetxn:"The new purge job deletes ~18.4M rows in a single transaction",
+  timing:"Lag started climbing exactly when the 01:00 purge job ran",
+  scans:"The replica is reading ~22M rows/s: full scans for each deleted row"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"The new purge job deletes 18.4M rows in one transaction from a table with no primary key. With row-based replication, the replica must find each deleted row by scanning, so it falls further behind", ok:true},
+  {t:"The network between primary and replica is slow", ok:false, why:"The I/O thread is caught up; the binlog arrived in minutes.", say:[["ravi","The I/O thread is caught up: Read_Source_Log_Pos is current. The binlog got here fine; it's the *applying* that's slow."]]},
+  {t:"The replica's disk is failing", ok:false, why:"It's busy because of the scans, not broken. %util at 98% is the symptom.", say:[["priya","The disk is busy because we're asking it to scan 412M rows over and over. It's a symptom. What's making it scan?"]]},
+  {t:"Report queries on the replica are blocking replication", ok:false, why:"One small report query is running; the applier is busy with the DELETE itself.", say:[["meera","There's one tiny report query running. The applier thread isn't waiting on a lock; it's busy deleting."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Add a primary key to «audit_log» (an auto-increment id, or a PK on event_id) and enforce «sql_require_primary_key=ON»", kind:"must", why:"With a key, each row event is an index lookup instead of a scan. That's the real fix for replication.", miss:[["priya","Batching is great, but every future update or delete on audit_log still has no key. The next bulk change will hurt the replica the same way."]]},
+  {t:"Rewrite the purge to delete in batches (e.g. 10k rows per transaction by id/created_at, with short pauses)", kind:"must", why:"Small transactions replicate smoothly and can run in parallel. No single 18M-row event blocks everything.", miss:[["ravi","PK's added for the future, but the purge job is still one 18M-row transaction. Tomorrow night at 01:00 it'll freeze the replica again."]]},
+  {t:"Tonight: point reports at the second replica (which skipped the purge window) until this one catches up", kind:"good", why:"Merchants get fresh numbers now, while the slow replica recovers."},
+  {t:"Alert on replica lag growing for 5+ minutes, and review DDL/DML jobs that touch large tables", kind:"good", why:"Catches the next one early."},
+  {t:"Turn on multi-threaded replication («replica_parallel_workers=8»)", kind:"meh", why:"Helps with many small transactions; a single giant transaction is still applied by one worker."},
+  {t:"Skip the transaction on the replica («sql_replica_skip_counter=1»)", kind:"bad", why:"The replica would silently keep 18.4M rows the primary deleted. Reports and any failover would then be on different data.", say:[["meera","Audit counts on the replica don't match the primary any more: 18.4M extra rows. Which one do we trust? 😬"],["priya","Skipping events makes the replica diverge. We'll have to rebuild it from a backup now."]]},
+  {t:"Restart the replica to clear the stuck delete", kind:"bad", why:"The applier rolls back and starts the whole 18.4M-row transaction again from zero.", say:[["ravi","Restarted. The applier rolled back 40 minutes of work and is starting the same DELETE again. Lag is now going *up* faster."]]},
+  {t:"Point the reports at the primary", kind:"bad", why:"Heavy reporting queries on the payments primary risk slowing down live payments.", say:[["dev","Primary CPU just went 22% → 88% and checkout p99 doubled. Please take the reports off the primary!"]]}
+ ]},
+ post:{
+  summary:"The reporting replica fell **40+ minutes** behind after the new nightly purge job ran at 01:00. Merchant settlement reports showed stale balances. The primary was healthy throughout.",
+  cause:"The purge deleted **18.4M rows in one transaction** from «audit_log», a 412M-row table with **no primary key**. Under **row-based replication** the binlog holds one event per deleted row. The replica must locate each row before deleting it, and without a usable key that means scanning. That made it read ~22M rows/s while applying the single transaction, which can't be parallelised. On the primary the same DELETE used «idx_created_at» once and finished in 3 minutes.",
+  prevent:["Every table gets a primary key; enforce with «sql_require_primary_key»","Purges and backfills run in small batches with pauses, and are reviewed for replication impact","Replica lag alerts with a runbook (fail reports over to another replica)","Test large DML on a staging replica first"]
+ },
+ learned:["Replica lag: check **I/O vs SQL thread** first. Receiving or applying?","Row-based replication + **no primary key** = a table scan per changed row on the replica.","Purge in **batches**. One giant transaction blocks replication and can't be parallelised.","Never «skip» replication events to make lag disappear. The replica silently diverges."]
+}
+]);

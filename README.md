@@ -83,7 +83,10 @@ A simulated workstation: you get paged, acknowledge, and investigate a real-look
 - **Notes**: once you have enough clues, pick the root cause and the fixes to ship. Wrong causes and harmful fixes visibly backfire in Slack
 - Resolving produces a blameless **postmortem** with a timeline built from your own actions
 
-Cases live in zone files via `QUEST.cases(zoneId, [...])` (see the schema comment in `quest-engine.js`) and are listed in the `CASES` registry. Current cases: Spark small files, Spark executor memoryOverhead kills, Kafka poison message, Postgres WAL pinned by a paused Debezium slot, RAG embedding-model mismatch.
+- **❓ Guide** tab and a 1-2-3 stepper (Investigate → Root cause → Ship the fix) explain the rules, each tool, scoring, and the terms used in that incident
+- Every incident links to the course: **📚 Brush up first** on the pager, study material in the Guide (readable in place or opened in a new tab), and **Go deeper** links in the postmortem. Course pages live at `#learn-<zone>-<level>` and `#card-<zone>-<key>`, and they link back to the incidents that use them
+
+Cases live in zone files via `QUEST.cases(zoneId, [...])` (see the schema comment in `quest-engine.js`); each needs an entry in the `CASES` registry with its `topics` and `study` refs (`"zone:levelIndex"` or `"zone/cardKey"`). Current cases (12): Spark small files, Spark executor memoryOverhead kills, Kafka poison message, Postgres WAL pinned by a paused Debezium slot, RAG embedding-model mismatch, MySQL replica lag from a PK-less purge, Iceberg metadata bloat from failed maintenance, Debezium purged binlog after a password rotation, dbt incremental duplicates, Redshift CTAS losing its DISTKEY, a runaway LangGraph agent, and indirect prompt injection exfiltrating PII.
 
 ## Story missions
 

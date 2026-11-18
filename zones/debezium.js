@@ -210,3 +210,103 @@ Plus source-side checks: binlog retention vs connector lag (MySQL), slot retaine
  ["pick","Lag grows; queue full; producer compression none. Quick win?",["producer.override.compression.type=zstd + linger.ms","Raise max.batch.size only","Lower max.queue.size","More snapshot threads"],0,"Bigger, compressed producer batches."]
 ]}
 ]);
+
+/* ===== On-call desk: Debezium incident ===== */
+QUEST.cases("debezium", [
+{
+ title:"The lake is missing two days of orders", icon:"🕳️", sev:1, clock:"10:15", channel:"inc-2340-orders-cdc-gap", svc:"orders-cdc · Debezium MySQL connector", need:4, uiName:"Connect UI",
+ terms:[["CDC","Change data capture: streaming every insert, update and delete from a database's log into Kafka."],["Binlog","MySQL's change log, stored in numbered files (binlog.000412…). Debezium reads it like a replica would."],["Binlog retention","How long MySQL keeps binlog files before purging them («binlog_expire_logs_seconds»)."],["Connector offset","Where Debezium last read: binlog file + position (or GTID). It resumes from there after a restart."],["Snapshot","Debezium's initial full read of the tables. «when_needed» re-snapshots if the offset is no longer usable."],["Incremental snapshot","A snapshot done in chunks while streaming continues, triggered by a signal. No downtime, no table locks."],["Secrets rotation","Regularly changing database passwords. Every client must get the new one."]],
+ pager:`[r]FIRING[/r]  lake.orders freshness > 6h   (last change applied: [r]Mon 16 Nov 09:02[/r])
+connector  orders-cdc   state [r]FAILED[/r]
+task 0     io.debezium.DebeziumException: [y]The connector is trying to read binlog starting at
+           binlog.000412, pos 88231, but this is no longer available on the server.[/y]`,
+ brief:"Finance noticed the lake's «orders» table hasn't changed since Monday morning. It's Wednesday. The connector streams MySQL «orders» into Kafka and on to the lake. A routine **DB password rotation** ran on Monday at 09:00.",
+ slack:[
+  {at:0, who:"meera", t:"lake.orders stopped at Monday 09:02. My reconciliation is off by ~2 days of orders. 😟"},
+  {at:5, who:"priya", t:"The error says the binlog file it wants is gone. Two questions: why did it stop reading in the first place, and how long do we keep binlogs?", cmd:"curl -s connect:8083/connectors/orders-cdc/status"},
+  {at:55, who:"dev", t:"Can we just restart it? Restarting fixes most Connect issues."},
+  {on:"purged", who:"priya", t:"So the earliest binlog on the server is newer than our offset. How long does MySQL keep binlogs?", cmd:"mysql -h orders-db -e \"SHOW VARIABLES LIKE 'binlog_expire_logs_seconds'\""},
+  {on:"retention", who:"ravi", t:"One day of binlog. So if the connector was down for more than a day, its position is gone. Why did it go down Monday? Check the worker logs from then.", cmd:"grep -i orders-cdc /var/log/kafka-connect/connect.log.2026-11-16 | head"},
+  {on:"authfail", who:"sana", t:"That's the Monday rotation. The new password went to the app's vault path. Is the Connect secret even updated? Compare them."  , cmd:"vault kv get secret/connect/orders-cdc"}
+ ],
+ hints:["Read the connector status trace: what position is it trying to resume from?","Compare that with the oldest binlog still on the server (SHOW BINARY LOGS) and the retention setting.","Find why the connector stopped on Monday: look at the Connect worker log from that morning."],
+ term:{host:"cdc-ops", user:"oncall", suggest:["curl -s connect:8083/connectors/orders-cdc/status","mysql -h orders-db -e \"SHOW BINARY LOGS\""],
+  cmds:[
+  {m:["curl -s connect:8083/connectors/orders-cdc/status","curl connect:8083/connectors/orders-cdc/status"], out:`{"name":"orders-cdc","connector":{"state":"RUNNING"},
+ "tasks":[{"id":0,"state":"[r]FAILED[/r]","trace":"io.debezium.DebeziumException: The connector is trying to read binlog starting at
+   SourceInfo [currentGtid=null, currentBinlogFilename=[y]binlog.000412[/y], currentBinlogPosition=88231 ...],
+   but this is no longer available on the server. Reconfigure the connector to use a snapshot when needed."}]}`, clue:"wantoffset", unlock:["mysql -h orders-db -e \"SHOW BINARY LOGS\""]},
+  {m:["mysql -h orders-db -e \"show binary logs","mysql -h orders-db -e \"show master logs"], out:`Log_name         File_size
+[r]binlog.000431[/r]    1073741901    [d]<- oldest available (Tue 17 Nov 10:20)[/d]
+binlog.000432    1073741822
+...
+binlog.000447     412290112    [d]<- current[/d]`, clue:"purged", unlock:["mysql -h orders-db -e \"SHOW VARIABLES LIKE 'binlog_expire_logs_seconds'\""]},
+  {m:["mysql -h orders-db -e \"show variables like 'binlog_expire","mysql -h orders-db -e \"show variables like 'binlog"], out:`Variable_name                 Value
+binlog_expire_logs_seconds    [r]86400[/r]    [d](1 day)[/d]
+binlog_format                 ROW
+binlog_row_image              FULL`, clue:"retention", unlock:["grep -i orders-cdc /var/log/kafka-connect/connect.log.2026-11-16 | head"]},
+  {m:["grep -i orders-cdc /var/log/kafka-connect","grep orders-cdc","cat /var/log/kafka-connect"], out:`2026-11-16 09:02:40 INFO  [orders-cdc|task-0] Connected to MySQL binlog at orders-db:3306, starting at binlog.000412 pos 88231
+2026-11-16 09:03:12 [r]ERROR [orders-cdc|task-0] Access denied for user 'debezium'@'10.4.%' (using password: YES)[/r]
+2026-11-16 09:03:12 ERROR [orders-cdc|task-0] Task is being killed and will not recover until manually restarted
+2026-11-16 09:03:12 INFO  [orders-cdc|task-0] [y]Task state FAILED[/y]
+[d](no alerts were configured on task state)[/d]`, clue:"authfail"},
+  {m:["vault kv get","vault read"], out:`== Secret Path ==  secret/data/orders-db/app
+password   ******** (version 14, updated 2026-11-16 09:00)
+== Secret Path ==  secret/data/connect/orders-cdc
+password   ******** ([y]version 6, updated 2026-08-12[/y])`, clue:"oldsecret"},
+  {m:["kafka-topics","kafka-console-consumer"], out:`Topic: dbserver.orders.orders  PartitionCount: 6  ReplicationFactor: 3
+[d]last message timestamp: 2026-11-16 09:02:38[/d]`, note:"Confirms the topic stopped receiving changes on Monday, which is the symptom. Kafka itself is healthy."},
+  {m:["mysql -h orders-db -e \"select count(*)","mysql -h orders-db -e \"select"], out:`count(*)
+  [b]1,284,113[/b]   [d]-- orders created since Mon 09:00 (all present in MySQL)[/d]`, note:"The data is safe in MySQL. Only the lake copy is behind, so nothing is lost if you re-sync properly."}
+ ]},
+ dash:[
+  {title:"Events produced by orders-cdc (per hour)", x:["Mon 06","Mon 09","Mon 12","Tue 00","Tue 12","Wed 00","Wed 09"], series:[{name:"events/h", v:[52000,8100,0,0,0,0,0]}], marks:[{i:1, label:"password rotation"}], clue:"stopped"},
+  {title:"MySQL orders-db write QPS", x:["Mon 06","Mon 09","Mon 12","Tue 00","Tue 12","Wed 00","Wed 09"], series:[{name:"QPS", v:[310,880,920,210,940,190,870]}], note:"Normal traffic: orders kept flowing into MySQL the whole time. The source is fine."},
+  {title:"Kafka broker disk %", unit:"%", x:["Mon 06","Mon 09","Mon 12","Tue 00","Tue 12","Wed 00","Wed 09"], series:[{name:"disk", v:[48,48,47,47,47,46,46]}], note:"Brokers are healthy. Kafka isn't the problem."}
+ ],
+ ui:[
+  {title:"Connectors", md:`| Connector | State | Task 0 | Since |
+|---|---|---|---|
+| orders-cdc | RUNNING | **FAILED** | Mon 09:03 |
+| payments-cdc | RUNNING | RUNNING | Mon 09:41 (restarted after rotation) |
+| lake-s3-sink | RUNNING | RUNNING | — |`, clue:"stopped"},
+  {title:"orders-cdc · config (excerpt)", md:`| Key | Value |
+|---|---|
+| snapshot.mode | **initial** |
+| database.password | \${vault:connect/orders-cdc:password} |
+| signal.data.collection | *(not set)* |
+| errors.max.retries | -1 |`, clue:"config"}
+ ],
+ clues:{
+  wantoffset:"The task wants to resume from binlog.000412 (Monday's position)",
+  purged:"The oldest binlog on the server is binlog.000431 (Tue 10:20); 000412 is already purged",
+  retention:"binlog_expire_logs_seconds = 86400: MySQL keeps only 1 day of binlog",
+  authfail:"Mon 09:03: Access denied for user 'debezium', and the task FAILED with no alert",
+  oldsecret:"Vault: the app password was rotated Monday, but the Connect secret is from August",
+  stopped:"orders-cdc stopped producing events right after the Monday 09:00 rotation",
+  config:"snapshot.mode=initial and no signal table, so it can't re-sync on its own"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"Monday's password rotation didn't update the connector's secret, so the task failed silently. It stayed down longer than the 1-day binlog retention, so its saved position was purged and it can't resume", ok:true},
+  {t:"Kafka lost the messages", ok:false, why:"The topic simply stopped receiving events Monday. Brokers are healthy.", say:[["ravi","Kafka never received anything after Monday 09:02. Nothing was lost in Kafka; nothing was sent."]]},
+  {t:"MySQL purged the binlog too early: that's a MySQL bug", ok:false, why:"MySQL did exactly what it was configured to do (keep 1 day). The question is why the connector was down for 2 days.", say:[["priya","MySQL kept exactly one day, as configured. The real question is why our connector was down for two days without anyone noticing."]]},
+  {t:"The lake S3 sink is broken", ok:false, why:"The sink is running; there are no new events to sink.", say:[["meera","The sink is fine. It's waiting for events that never arrive."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Point the connector at the current secret (and grant its user what it needs)", kind:"must", why:"Without valid credentials nothing else can work.", miss:[["dev","Re-snapshot started… and failed in 2 seconds: Access denied for user 'debezium'. It's still on the old password."]]},
+  {t:"Re-sync the gap: set snapshot.mode=when_needed (or add a signal table and run an incremental snapshot of «orders»), then resume streaming", kind:"must", why:"A snapshot re-reads current table state, so the lake gets every order from the last two days with no locks or downtime (incremental).", miss:[["meera","The connector is RUNNING again but it can't resume: the binlog file is gone. lake.orders is still frozen at Monday."]]},
+  {t:"Raise binlog retention to 7 days (check disk headroom first)", kind:"good", why:"Gives a week of buffer to fix a stopped connector before its position disappears."},
+  {t:"Alert on connector task state ≠ RUNNING and on lake table freshness", kind:"good", why:"You'd have known on Monday at 09:05, not Wednesday."},
+  {t:"Put the Connect secret in the rotation runbook (or make Connect read the same rotated path)", kind:"good", why:"Fixes the process that caused it."},
+  {t:"Just restart the connector", kind:"meh", why:"A restart doesn't change the credentials or bring back purged binlogs. It fails again straight away."},
+  {t:"Set snapshot.mode=never and start reading from the current binlog position", kind:"bad", why:"It would look healthy while 1.28M orders from the gap never reach the lake. Silent data loss.", say:[["meera","The connector is green, but my reconciliation is now permanently short by 1.28M orders from Mon–Wed. Those changes were skipped. 😱"],["priya","Skipping ahead makes the gap permanent. We'll have to re-snapshot anyway."]]},
+  {t:"Hand-edit the stored offset to point at the oldest available binlog (000431)", kind:"bad", why:"Same gap, more confusing: changes between Monday and Tuesday 10:20 are skipped silently.", say:[["meera","Orders from Monday 09:00 to Tuesday 10:20 are missing in the lake. Did we skip a day?"]]}
+ ]},
+ post:{
+  summary:"The Debezium «orders-cdc» connector was down from **Mon 09:03 to Wed 10:15**. lake.orders missed ~**1.28M orders**. No data was lost at the source.",
+  cause:"The Monday DB password rotation updated the application's Vault path but not the Connect secret. The task got **Access denied** and moved to **FAILED**, which in Kafka Connect means it won't retry until restarted, and nothing alerted on task state. MySQL keeps binlogs for **1 day**. By Tuesday 10:20, binlog.000412 (the connector's saved position) had been purged, so a simple restart could never resume. With «snapshot.mode=initial» and no signal table, there was no automatic way back.",
+  prevent:["Alerts on Connect task state and on lake freshness per table","Binlog retention ≥ the time to detect and fix a stopped connector (7 days)","Rotation runbooks list every consumer of a credential, including CDC","Configure a signal table so incremental snapshots are always one command away"]
+ },
+ learned:["A CDC connector is only as safe as its **source log retention**. Stop longer than that and the position is gone.","Restarting doesn't fix a **purged offset**. You need a **snapshot** (ideally incremental).","Never skip ahead to \"latest\" in CDC. It turns an outage into **silent data loss**.","Alert on **task state** and **freshness**, not only on errors in logs."]
+}
+]);

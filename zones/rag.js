@@ -465,6 +465,7 @@ QUEST.interviews("rag", [
 QUEST.cases("rag", [
 {
  title:"The bot can't find the new policy", icon:"🤖", sev:2, clock:"11:30", channel:"inc-2324-assistant-retrieval", svc:"support-assistant · RAG (pgvector)", need:4,
+ terms:[["RAG", "Retrieval-augmented generation: fetch relevant document chunks, then have the LLM answer from them."], ["Chunk", "A piece of a document (a few hundred tokens) that is embedded and stored for search."], ["Embedding", "A list of numbers that represents meaning. Similar texts get nearby vectors, but only within the same model."], ["Cosine similarity", "How close two vectors point (≈1 very similar, ≈0 unrelated). Retrieval ranks chunks by it."], ["recall@5", "Share of test questions where the correct chunk is in the top 5 results. Measures retrieval alone."], ["Faithfulness", "Whether the answer sticks to the retrieved context. Measures generation alone."], ["Blue/green re-index", "Build a complete new index next to the old one, test it, then switch traffic in one step."]],
  pager:`[y]WARN[/y]  support-assistant  eval: retrieval recall@5 dropped [r]0.91 → 0.58[/r]
 online   "I couldn't find that in our policies" answers up [r]4.1×[/r] since Monday
 escal.   human handoffs +62% (support lead raised this)

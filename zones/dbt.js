@@ -137,3 +137,98 @@ In Airflow, run dbt with per-model tasks (e.g. Cosmos) for visibility and retrie
  ["pick","Pipelines run on stale source data silently. Add…",["dbt source freshness before build","Contracts","Unit tests","Snapshots"],0,"Stop early on stale inputs."]
 ]}
 ]);
+
+/* ===== On-call desk: dbt incident ===== */
+QUEST.cases("dbt", [
+{
+ title:"Revenue doubled overnight", icon:"📈", sev:1, clock:"08:50", channel:"inc-2344-revenue-mismatch", svc:"finance mart · dbt on Snowflake", need:4,
+ terms:[["Model","A dbt SELECT statement that builds a table or view. «fct_payments» is the payments fact table."],["Incremental model","A model that only processes new or changed rows on each run instead of rebuilding everything."],["is_incremental()","A dbt macro that's true on incremental runs, so you can filter to just the new rows."],["unique_key","Tells dbt which column identifies a row, so re-processed rows are updated (merged) instead of appended."],["Incremental strategy","How new rows are written: «append» (insert only), «merge» (upsert on unique_key), «delete+insert»."],["Lookback window","Re-reading the last N days on each run to catch late-arriving data."],["dbt test","An assertion run after a build, like «unique» or «not_null» on a column."]],
+ pager:`[r]FIRING[/r]  finance_recon: mart revenue vs ledger mismatch [r]+97.4%[/r]
+mart      fct_payments  Nov 15-17 GMV = [r]₹1,842 cr[/r]
+ledger    source of truth            = ₹933 cr
+impact    CFO's daily revenue email goes out at [b]09:30[/b]`,
+ brief:"The CFO's daily email is built from «fct_payments». The reconciliation check says the mart shows almost **twice** the ledger's revenue for the last three days. Yesterday a PR was merged to \"handle late-arriving payments\".",
+ slack:[
+  {at:0, who:"arjun", t:"Is revenue really up 97%?? I'd love that, but the CFO email goes out at 9:30 and I don't believe it. 🙃"},
+  {at:5, who:"priya", t:"Mart revenue double the ledger. Before guessing, check if rows are **duplicated**: count rows vs distinct payment IDs.", cmd:"snowsql -q \"select count(*), count(distinct payment_id) from marts.fct_payments where created_date >= '2026-11-15'\""},
+  {at:50, who:"meera", t:"Diwali sales were good, but my ops numbers say +8%, not +97%."},
+  {on:"dupes", who:"priya", t:"Same payment_id appearing more than once. How does this model write rows? Open it.", cmd:"cat models/marts/fct_payments.sql"},
+  {on:"append", who:"ravi", t:"Append with no unique_key… and when did the filter change? Check git.", cmd:"git log -p -1 -- models/marts/fct_payments.sql"},
+  {on:"lookback", who:"priya", t:"And why didn't a test catch it? Check the model's tests.", cmd:"cat models/marts/schema.yml"}
+ ],
+ hints:["Compare row count with distinct payment_id for the affected days.","Look at how the model writes: its materialization, incremental strategy and unique_key.","Yesterday's PR changed the incremental filter. What happens when an append-only model re-reads 3 days on every run?"],
+ term:{host:"analytics-ci", user:"oncall", suggest:["snowsql -q \"select count(*), count(distinct payment_id) from marts.fct_payments where created_date >= '2026-11-15'\"","dbt ls -s fct_payments --output json"],
+  cmds:[
+  {m:["snowsql -q \"select count(*), count(distinct payment_id)"], out:`COUNT(*)    | COUNT(DISTINCT PAYMENT_ID)
+[r]18,402,311[/r]  | [g]9,330,104[/g]
+[d]→ ~1.97 rows per payment_id since Nov 15[/d]`, clue:"dupes", unlock:["cat models/marts/fct_payments.sql","dbt run-results"]},
+  {m:["cat models/marts/fct_payments.sql"], out:`{{ config(materialized='incremental',
+          incremental_strategy='[r]append[/r]') }}   [d]-- no unique_key[/d]
+
+select payment_id, merchant_id, amount, status, created_date, updated_at
+from {{ ref('stg_payments') }}
+{% if is_incremental() %}
+where updated_at >= (select dateadd(day, -3, max(updated_at)) from {{ this }})
+{% endif %}`, clue:"append", unlock:["git log -p -1 -- models/marts/fct_payments.sql"]},
+  {m:["git log -p -1","git log"], out:`commit [y]c81f2e9[/y] (Tue 17 Nov 18:20, rohan)  Handle late-arriving payments with a 3-day lookback
+-where updated_at > (select max(updated_at) from {{ this }})
++where updated_at >= (select dateadd(day, -3, max(updated_at)) from {{ this }})`, clue:"lookback", unlock:["cat models/marts/schema.yml"]},
+  {m:["cat models/marts/schema.yml"], out:`models:
+  - name: fct_payments
+    columns:
+      - name: payment_id
+        tests: [[y]not_null[/y]]        [d]# no unique test[/d]
+      - name: amount
+        tests: [not_null]`, clue:"notest"},
+  {m:["dbt run-results","cat target/run_results.json"], out:`fct_payments   [g]success[/g]   rows_affected: [r]3,104,882[/r]   [d](typical: ~3.1M per day → this run re-inserted ~3 days)[/d]
+stg_payments   [g]success[/g]`, clue:"rows"},
+  {m:["dbt source freshness"], out:`source payments.raw_payments   [g]PASS[/g]  max_loaded_at 08:41 (9 min ago)`, note:"Sources are fresh. Late or missing source data isn't the issue."},
+  {m:["dbt ls"], out:`[{"name":"fct_payments","resource_type":"model","config":{"materialized":"incremental"}}]`, note:"Just lists the model. Open the SQL to see how it writes rows."},
+  {m:["snowsql -q \"select warehouse","snowsql -q \"show warehouses"], out:`TRANSFORM_WH   XSMALL→MEDIUM autoscale   credits today: 41 (normal)`, note:"Warehouse usage is normal. Performance isn't the problem; correctness is."}
+ ]},
+ dash:[
+  {title:"Mart GMV vs ledger (₹ cr per day)", x:["Nov 11","Nov 12","Nov 13","Nov 14","Nov 15","Nov 16","Nov 17"], series:[{name:"mart", v:[300,305,298,310,612,618,612]}, {name:"ledger", v:[300,305,298,310,309,312,312]}], marks:[{i:4, label:"after PR"}], clue:"gap"},
+  {title:"Daily orders (ops system)", x:["Nov 11","Nov 12","Nov 13","Nov 14","Nov 15","Nov 16","Nov 17"], series:[{name:"orders", v:[3.0e6,3.05e6,2.98e6,3.1e6,3.21e6,3.24e6,3.22e6]}], note:"Real business grew ~8% for Diwali, nowhere near 97%."},
+  {title:"dbt job duration (min)", x:["Nov 11","Nov 12","Nov 13","Nov 14","Nov 15","Nov 16","Nov 17"], series:[{name:"minutes", v:[11,12,11,12,16,17,16]}], note:"Runs got a bit longer because they re-read 3 days. That's a side effect, not the cause."}
+ ],
+ files:[
+  {path:"models/marts/fct_payments.sql", meta:"changed in c81f2e9 (Tue)", text:`{{ config(materialized='incremental',
+          incremental_strategy='append') }}
+
+select payment_id, merchant_id, amount, status, created_date, updated_at
+from {{ ref('stg_payments') }}
+{% if is_incremental() %}
+where updated_at >= (select dateadd(day, -3, max(updated_at)) from {{ this }})
+{% endif %}`, clues:{2:"append", 7:"lookback"}, notes:{4:"The selected columns are fine."}}
+ ],
+ clues:{
+  dupes:"Since Nov 15, fct_payments has 18.4M rows but only 9.3M distinct payment_ids",
+  append:"fct_payments is incremental with strategy «append» and no unique_key",
+  lookback:"PR c81f2e9 added a 3-day lookback to the incremental filter",
+  notest:"payment_id has no «unique» test, only not_null",
+  rows:"Last run inserted 3.1M rows, re-inserting payments already in the table",
+  gap:"Mart GMV doubled vs the ledger starting the day after the PR"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"The new 3-day lookback re-selects rows that are already in the table, and the «append» strategy with no unique_key inserts them again, creating duplicate payments; no unique test caught it", ok:true},
+  {t:"Diwali sales really did nearly double", ok:false, why:"The ledger and ops systems show +8%. Only the mart doubled, with duplicate IDs.", say:[["meera","Ops says +8%. And the same payment_id is in the mart twice. That's not sales, that's duplicates."]]},
+  {t:"The source loaded late and then twice", ok:false, why:"Source freshness passes, and duplicates appear only in the mart.", say:[["ravi","Source freshness is green and stg_payments has unique IDs. The duplication happens in fct_payments."]]},
+  {t:"Snowflake returned wrong results", ok:false, why:"The SQL did exactly what it says: append everything the filter selects.", say:[["priya","Snowflake did exactly what we asked: append everything from the last 3 days, every run."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Switch to «incremental_strategy='merge'» with «unique_key='payment_id'» (keep the lookback)", kind:"must", why:"Re-processed rows now update in place. The lookback still catches late payments, without duplicates.", miss:[["meera","Rebuilt and correct today… but tomorrow's run still appends 3 days again. Duplicates are back in the morning."]]},
+  {t:"Rebuild the affected range (or «dbt run --full-refresh -s fct_payments») to remove existing duplicates", kind:"must", why:"Changing the strategy fixes future runs; the 9M duplicate rows already there still have to go.", miss:[["arjun","Tomorrow's run will be fine, great. But today's table still shows ₹1,842 cr. I can't send that to the CFO."]]},
+  {t:"Add a «unique» test on payment_id and a revenue-vs-ledger check that blocks the CFO email on failure", kind:"good", why:"A broken number should stop the email, not reach the CFO."},
+  {t:"Tell Finance which days were affected and hold the 09:30 email until the rebuild passes", kind:"good", why:"Being upfront protects trust in the data."},
+  {t:"Revert the PR's lookback only", kind:"meh", why:"Stops new duplicates but leaves the existing ones, and late-arriving payments are missed again."},
+  {t:"Divide the dashboard's revenue by 2 for Nov 15-17", kind:"bad", why:"Patching numbers by hand hides the bug and is wrong wherever the duplicate ratio isn't exactly 2.", say:[["arjun","Merchant-level numbers don't add up any more: some merchants are halved, but their payments weren't duplicated. Finance can't sign this off."]]},
+  {t:"Add «select distinct» to the final dashboard query", kind:"bad", why:"Hides duplicates in one report while every other consumer of fct_payments stays wrong. Also slow.", say:[["meera","The CFO email looks right now, but the merchant payouts model also reads fct_payments, and it still shows double. We nearly overpaid merchants by ₹900 cr."]]}
+ ]},
+ post:{
+  summary:"The finance mart reported **~2× revenue** for Nov 15-17 (₹1,842 cr vs ₹933 cr in the ledger). The reconciliation check caught it before the CFO email went out.",
+  cause:"PR «c81f2e9» added a **3-day lookback** to «fct_payments»'s incremental filter to catch late payments. The model used «incremental_strategy='append'» with **no unique_key**, so each run re-inserted the previous 3 days, roughly doubling those dates. «payment_id» had only a «not_null» test, so nothing failed.",
+  prevent:["Every incremental model with a lookback must have a unique_key and merge or delete+insert","«unique» tests on every primary key in marts","Reconciliation vs the ledger gates the CFO email","PR template question: \"what happens if this runs twice on the same data?\""]
+ },
+ learned:["Incremental + **lookback** needs **unique_key** + **merge**. Append-only re-reads mean duplicates.","First check for a too-good number: **count(*) vs count(distinct id)**.","Fix the model **and** clean up the data already written.","Tests on keys («unique», «not_null») plus reconciliation turn silent errors into loud ones."]
+}
+]);

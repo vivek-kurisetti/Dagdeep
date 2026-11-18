@@ -165,6 +165,7 @@ Patroni (with etcd/Consul) or managed services promote a standby; **pg_rewind** 
 QUEST.cases("postgres", [
 {
  title:"Primary DB disk at 92% and climbing", icon:"💽", sev:1, clock:"16:20", channel:"inc-2320-orders-db-disk", svc:"orders-db · PostgreSQL 15 primary", need:4,
+ terms:[["Primary", "The database server that accepts writes. If its disk fills, writes stop."], ["WAL", "Write-ahead log: every change is written here first (16 MB files in pg_wal) for crash recovery and replication."], ["Checkpoint", "A point where dirty pages are flushed to disk, after which old WAL can be recycled, if nobody else needs it."], ["Replication slot", "A bookmark that tells Postgres to keep WAL until a consumer (a standby or a CDC tool) has read it."], ["restart_lsn", "The oldest WAL position a slot still needs. Everything after it is kept."], ["Debezium", "A CDC (change data capture) tool that streams database changes into Kafka using a logical replication slot."], ["max_slot_wal_keep_size", "A cap on how much WAL any slot may hold. -1 means no limit."]],
  pager:`[r]FIRING[/r]  orders-db-primary  disk /var/lib/postgresql  [r]92% used[/r]
 growth    ~38 GB/hour over the last 6h
 forecast  [r]FULL in ~1h 40m[/r]  → primary will stop accepting writes

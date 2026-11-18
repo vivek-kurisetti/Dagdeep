@@ -240,7 +240,8 @@ function mapView(){
     ${nx ? `<a class="q-next" id="qNext" href="#mis-${nx.z}-${nx.i}"><span class="q-next-ic">${nx.M ? nx.M.icon : "🎬"}</span><div><small>${nx.i ? "Continue" : "Start here"} · ${esc(ZMAP[nx.z].title)} · mission ${nx.i + 1}</small><b>${nx.M ? esc(nx.M.title) : "Story mission"}</b>${nx.M ? `<p>${fm(nx.M.setup)}</p>` : ""}</div><span class="q-next-go">▶</span></a>` : ""}
     <section class="q-desk-home"><div class="q-sec-row"><h2 class="q-sec-h">📟 On-call desk</h2><small>${CASES.filter(c => csStars(c.z, c.i)).length}/${CASES.length} resolved</small></div>
       <p class="muted">You're on call. Get paged, dig through Slack, the terminal, dashboards and code, then find the root cause and ship the fix.</p>
-      ${caseList(CASES)}</section>
+      ${(() => { const open = CASES.filter(c => !csStars(c.z, c.i)), top = (open.length ? open : CASES).slice(0, 3), rest = CASES.filter(c => !top.includes(c));
+        return caseList(top) + (rest.length ? `<details class="q-allcases"><summary>All ${CASES.length} incidents · 🗄️ data and 🤖 AI</summary>${caseList(rest)}</details>` : ""); })()}</section>
     <h2 class="q-sec-h">🗺️ Zones</h2>
     <div class="q-tabs" role="tablist">${WORLDS.map(w => `<button role="tab" data-w="${w.id}" aria-selected="${worldTab === w.id}">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</button>`).join("")}</div>
     <div class="q-zones">${ZONES.filter(z => z.world === worldTab).map(tile).join("")}</div>
@@ -294,7 +295,7 @@ function zonePanel(id, Z, tab, got){
     <ol class="q-path">${Z.levels.map((L, li) => { const head = L.act && (li === 0 || Z.levels[li - 1].act !== L.act) ? `<li class="q-act"><span>${esc(L.act)}</span></li>` : ""; const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
       return head + `<li class="q-node ${kind} ${L.act ? "expert" : ""} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
         ${open ? `<a href="#lvl-${id}-${li}" class="q-dot">` : `<span class="q-dot">`}${L.boss ? "👑" : L.arcade ? "🕹" : li + 1}${open ? "</a>" : "</span>"}
-        <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>`;
+        <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${(L.rounds || []).some(r => r[0] === "learn") ? ` · <a class="q-readl" href="#learn-${id}-${li}">📖 Read</a>` : ""}${CASES.some(c => (c.study || []).includes(`${id}:${li}`)) ? ` · <a class="q-readl" href="#learn-${id}-${li}">📟 Incident</a>` : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>`;
   // cards
   const deck = [];
   Z.levels.forEach((L, li) => (L.rounds || []).forEach((r, ri) => { if (r[0] === "learn") deck.push({id:`${li}-${ri}`, li, t:r[1], b:r[2], d:r[5], L}); }));
@@ -822,16 +823,62 @@ Q.cases = function(id, list){
   list.forEach(c => { c.cards = (c.cards || []).map(k => { if (typeof k === "string") return k; Z.cardBook = Z.cardBook || {}; Z.cardBook[k.k] = k; return k.k; }); });
   Z.cases = list;
 };
+// study refs: "zone:levelIndex" (a drill level's concept cards) or "zone/cardKey" (a story concept card)
 const CASES = [
-  {z:"spark", i:0, icon:"🐢", sev:2, title:"The nightly job got 4× slower", svc:"settlements-daily · Spark on EMR"},
-  {z:"kafka", i:0, icon:"☠️", sev:1, title:"One partition is 3 million behind", svc:"payments-ledger consumer"},
-  {z:"postgres", i:0, icon:"💽", sev:1, title:"Primary DB disk at 92% and climbing", svc:"orders-db · PostgreSQL 15"},
-  {z:"spark", i:1, icon:"💥", sev:2, title:"Executors keep getting killed", svc:"risk-features · Spark on EMR"},
-  {z:"rag", i:0, icon:"🤖", sev:2, title:"The bot can't find the new policy", svc:"support-assistant · RAG"}
+  {z:"spark", i:0, icon:"🐢", sev:2, title:"The nightly job got 4× slower", svc:"settlements-daily · Spark on EMR", topics:"Small files · partitions · streaming triggers", study:["spark/smallfiles","spark:2","spark:19"]},
+  {z:"kafka", i:0, icon:"☠️", sev:1, title:"One partition is 3 million behind", svc:"payments-ledger consumer", topics:"Consumer lag · offsets · poison messages · DLQ", study:["kafka/dlq","kafka/offsets","kafka/groups","kafka:3"]},
+  {z:"postgres", i:0, icon:"💽", sev:1, title:"Primary DB disk at 92% and climbing", svc:"orders-db · PostgreSQL 15", topics:"WAL · replication slots · Debezium", study:["postgres/slots","postgres:1","postgres:9","debezium:7"]},
+  {z:"spark", i:1, icon:"💥", sev:2, title:"Executors keep getting killed", svc:"risk-features · Spark on EMR", topics:"Executor memory · memoryOverhead · pandas UDFs", study:["spark/memory","spark:12","spark:17"]},
+  {z:"rag", i:0, icon:"🤖", sev:2, title:"The bot can't find the new policy", svc:"support-assistant · RAG", topics:"Embeddings · vector search · RAG evals", study:["rag/embeddings","rag/evals","rag:1","rag:5"]},
+  {z:"mysql", i:0, icon:"🐌", sev:2, title:"Read replica is 40 minutes behind", svc:"payments-mysql · reporting replica", topics:"Row-based replication · primary keys · batched purges", study:["mysql:3","mysql:9","mysql:0"]},
+  {z:"iceberg", i:0, icon:"🧊", sev:2, title:"Queries spend 3 minutes just planning", svc:"lake.payments · Iceberg on S3 + Trino", topics:"Snapshots · manifests · table maintenance", study:["iceberg:0","iceberg:4","iceberg:6"]},
+  {z:"debezium", i:0, icon:"🕳️", sev:1, title:"The lake is missing two days of orders", svc:"orders-cdc · Debezium MySQL connector", topics:"Binlog retention · snapshots · connector ops", study:["debezium:2","debezium:6","debezium:8","debezium:10"]},
+  {z:"dbt", i:0, icon:"📈", sev:1, title:"Revenue doubled overnight", svc:"finance mart · dbt on Snowflake", topics:"Incremental models · unique_key · tests", study:["dbt:1","dbt:6","dbt:2"]},
+  {z:"redshift", i:0, icon:"🧭", sev:3, title:"The 9 AM dashboard takes 6 minutes", svc:"exec-dashboard · Redshift ra3", topics:"Distribution keys · sort keys · statistics", study:["redshift:1","redshift:2","redshift:5"]},
+  {z:"agents", i:0, icon:"🔁", sev:1, title:"An agent burned ₹4 lakh overnight", svc:"refund-agent · LangGraph", topics:"Agent loops · step limits · tool errors · cost", study:["agents:1","agents:6","agents:7","observability:8"]},
+  {z:"aiattack", i:0, icon:"🕵️", sev:1, title:"The bot emailed customer data outside", svc:"support-agent · tools: email, CRM", topics:"Indirect prompt injection · least privilege · exfiltration", study:["aiattack:0","aiattack:2","aiattack:6","aidefense:2"]}
 ];
+Q.CASES = CASES;
 const csStars = (z, i) => ((P.cs || {})[z] || {})[i] || 0;
 const caseList = list => `<div class="q-cases">${list.map(c => { const s = csStars(c.z, c.i); return `<a class="q-case" href="#case-${c.z}-${c.i}" style="--h:${ZMAP[c.z].hue}">
-  <span class="q-case-ic">${c.icon}</span><div><span class="q-sev s${c.sev}">SEV-${c.sev}</span><b>${esc(c.title)}</b><small>${esc(c.svc)}</small>${s ? stars(s, "sm") : ""}</div><span class="q-ep-go">${s ? "Replay" : "Take the page"}</span></a>`; }).join("")}</div>`;
+  <span class="q-case-ic">${c.icon}</span><div><span class="q-sev s${c.sev}">SEV-${c.sev}</span><b>${esc(c.title)}</b><small>${esc(c.svc)}</small>${c.topics ? `<small class="q-case-top">📚 ${esc(c.topics)}</small>` : ""}${s ? stars(s, "sm") : ""}</div><span class="q-ep-go">${s ? "Replay" : "Take the page"}</span></a>`; }).join("")}</div>`;
+const learnHTML = (r, open) => `<div class="q-studyl"><h4>${fm(r[1])}</h4><p>${fm(r[2])}</p>${r[3] && r[3].length ? `<ol class="q-flow">${r[3].map(f => `<li>${fm(f)}</li>`).join("")}</ol>` : ""}${r[4] ? `<pre class="q-code">${esc(r[4])}</pre>` : ""}${r[5] ? `<details class="q-deep" ${open ? "open" : ""}><summary>Go deeper</summary><div class="q-deep-b">${md(r[5])}</div></details>` : ""}</div>`;
+const refInfo = ref => {
+  let m;
+  if ((m = ref.match(/^([a-z]+):(\d+)$/))){
+    const Z = Q.data[m[1]], L = Z && Z.levels[+m[2]]; if (!L) return null;
+    const ls = (L.rounds || []).filter(r => r[0] === "learn");
+    return {ref, z:m[1], zone:ZMAP[m[1]].title, kind:`Drill ${+m[2] + 1}`, title:L.t, sub:ls.map(r => r[1]).join(" · "), body:ls.map(r => learnHTML(r)).join(""), href:`#learn-${m[1]}-${m[2]}`};
+  }
+  if ((m = ref.match(/^([a-z]+)\/(\w+)$/))){
+    const Z = Q.data[m[1]], C = Z && Z.cardBook && Z.cardBook[m[2]]; if (!C) return null;
+    return {ref, z:m[1], zone:ZMAP[m[1]].title, kind:"Concept card", title:C.t, sub:C.one || "", body:cardHTML(C, "deck"), href:`#card-${m[1]}-${m[2]}`};
+  }
+  return null;
+};
+const refList = (refs, mode) => `<div class="q-refs">${refs.map(refInfo).filter(Boolean).map(R => mode === "links"
+  ? `<a class="q-reflink" href="${R.href}" target="_blank" rel="noopener"><span class="q-ref-k">📚 ${esc(R.zone)} · ${esc(R.kind)}</span><b>${fm(R.title)}</b><small>${fm(R.sub)}</small><span class="q-ref-go">↗</span></a>`
+  : `<details class="q-ref"><summary><span class="q-ref-k">📚 ${esc(R.zone)} · ${esc(R.kind)}</span><b>${fm(R.title)}</b><small>${fm(R.sub)}</small></summary><div class="q-ref-b">${R.body}<a class="btn" href="${R.href}" target="_blank" rel="noopener">Open in the course ↗</a></div></details>`).join("")}</div>`;
+const needZones = (ids, cb) => { const rest = ids.filter(x => ZMAP[x] && !Q.data[x]); if (!rest.length) return cb(); needZone(rest[0], () => needZones(ids, cb)); };
+const reg = (z, i) => CASES.find(c => c.z === z && c.i === i) || {};
+const refZones = refs => [...new Set((refs || []).map(r => r.split(/[:/]/)[0]))];
+const casesFor = ref => CASES.filter(c => (c.study || []).includes(ref));
+function studyView(id, li, key){
+  const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
+  needZone(id, () => {
+    const Z = Q.data[id], ref = key ? `${id}/${key}` : `${id}:${li}`, R = refInfo(ref);
+    if (!R){ location.hash = "#zone-" + id; return; }
+    document.title = `${R.title} · ${z.title} · Dagdeep`;
+    const L = key ? null : Z.levels[li], cs = casesFor(ref);
+    const body = key ? cardHTML(Z.cardBook[key]) : (L.rounds || []).filter(r => r[0] === "learn").map(r => learnHTML(r, true)).join("");
+    root().innerHTML = `<div class="q-wrap q-studyv" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
+      <a class="q-back" href="#zone-${id}/${key ? "cards" : "drills"}">← ${esc(z.title)}</a>
+      <p class="q-eyebrow">📚 Course · ${esc(z.title)} · ${esc(R.kind)}</p><h1>${fm(R.title)}</h1>
+      ${body || `<p class="muted">This drill is hands-on practice. Play it to learn by doing.</p>`}
+      <div class="q-res-b">${key ? `<a class="btn big" href="#zone-${id}/cards">All ${esc(z.title)} cards</a>` : unlocked(id, li) ? `<a class="btn big solid" href="#lvl-${id}-${li}">Practise this drill ▶</a>` : `<a class="btn big" href="#zone-${id}/drills">${esc(z.title)} drills</a>`}</div>
+      ${cs.length ? `<h2 class="q-sec-h">📟 See it break in production</h2><p class="muted">Incidents on the on-call desk that use this concept.</p>${caseList(cs)}` : ""}</div>`;
+  });
+}
 const termFmt = t => esc(t).replace(/\[(r|y|g|b|d|c)\]([\s\S]*?)\[\/\1\]/g, '<span class="t-$1">$2</span>');
 const nfmt = v => v >= 1e9 ? +(v / 1e9).toFixed(1) + "B" : v >= 1e6 ? +(v / 1e6).toFixed(1) + "M" : v >= 1e3 ? +(v / 1e3).toFixed(1) + "k" : +(+v).toFixed(2) + "";
 function chartSVG(D){
@@ -851,9 +898,15 @@ function caseView(id, ci){
   needZone(id, () => {
     const Z = Q.data[id], C = (Z.cases || [])[ci];
     if (!C){ location.hash = "#zone-" + id; return; }
+    const R = reg(id, ci); C.study = C.study || R.study || [];
+    needZones(refZones(C.study), () => pagerView(id, ci, z, Z, C));
+  });
+}
+function pagerView(id, ci, z, Z, C){
+  {
     P.last = id; save(); setKeys(null);
     document.title = `${C.title} · On-call · Dagdeep`;
-    const sev = C.sev || 2;
+    const sev = C.sev || 2, need = C.need || 3, first = !P.ach.pager;
     root().innerHTML = `<div class="q-wrap q-pagerv" style="--h:${z.hue}">
       <div class="q-pager"><div class="q-pager-ring">📟</div>
         <p class="q-eyebrow">Incoming page · ${esc(C.clock || "03:12")}</p>
@@ -861,13 +914,22 @@ function caseView(id, ci){
         <h1>${esc(C.title)}</h1>
         <pre class="q-pager-alert">${termFmt(C.pager)}</pre>
         <p class="q-pager-brief">${fm(C.brief || "")}</p>
-        <div class="q-pager-how"><b>How this works</b><ul><li>💬 Read Slack, 🖥 run commands in the terminal, 📈 study dashboards and 🧾 read the code.</li><li>🚩 Flag anything that looks like evidence. Some of it is noise.</li><li>📝 When you've got enough clues, write up the root cause and ship a fix.</li><li>Wrong fixes hit prod. Hints cost stars.</li></ul></div>
+        <div class="q-pager-how">
+          <p class="q-pg-goal">🎯 <b>Your job:</b> find out <b>why</b> this is happening, prove it with evidence, and ship the fix that resolves it <b>without breaking anything else</b>.</p>
+          <b>Rules of the desk</b>
+          <ol><li><b>Investigate</b> with 💬 Slack, ⌨️ the terminal, 📈 dashboards${C.ui ? `, 🖥 ${esc(C.uiName || "console")}` : ""}${C.files ? " and 🧾 code" : ""}.</li>
+          <li><b>Flag evidence</b> 🚩 on anything that explains the alert. Real clues go to your notes; noise is called out.</li>
+          <li>With at least <b>${need} clues</b>, open 📝 <b>Notes</b>, pick the <b>root cause</b> and tick <b>every fix you'd ship</b>.</li>
+          <li>Wrong causes and harmful fixes <b>backfire in Slack</b> and cost you stars.</li></ol>
+          <p class="q-pg-score">⭐⭐⭐ no wrong calls, ≤1 hint, ≤3 noise flags · ⭐⭐ ≤1 wrong call, ≤2 hints · ⭐ resolved</p>
+          <p class="muted">Stuck? Tap <b>❓ Guide</b> on the desk any time for the full rules, what each tool is, the terms used, and the course pages for this incident.</p></div>
+        ${C.study.length ? `<div class="q-pg-study"><b>📚 Brush up first</b> <small>(optional · opens the course in a new tab)</small>${refList(C.study, "links")}</div>` : ""}
         <button class="btn big solid q-ack">Acknowledge &amp; join the bridge</button>
         <a class="q-back" href="#zone-${id}/debug">Not now</a></div></div>`;
     const ackB = root().querySelector(".q-ack");
     ackB.onclick = () => desk(id, ci, z, Z, C);
     setKeys(e => { if (!document.body.contains(ackB)){ setKeys(null); return; } if (e.key === "Enter"){ e.preventDefault(); desk(id, ci, z, Z, C); } });
-  });
+  }
 }
 function desk(id, ci, z, Z, C){
   setKeys(null);
@@ -882,24 +944,26 @@ function desk(id, ci, z, Z, C){
   if (C.dash) apps.push(["dash", "📈", "Dashboards"]);
   if (C.ui) apps.push(["ui", "🖥", C.uiName || "Console"]);
   if (C.files) apps.push(["code", "🧾", "Code"]);
-  apps.push(["notes", "📝", "Notes"]);
+  apps.push(["notes", "📝", "Notes"], ["guide", "❓", "Guide"]);
   const host = T.host || "prod-bastion", user = T.user || "you";
   root().innerHTML = `<div class="q-wrap q-desk" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
     <div class="q-incbar"><a class="q-x" href="#zone-${id}/debug" aria-label="Leave">✕</a>
       <span class="q-sev s${sev}">SEV-${sev}</span>
       <div class="q-inc-t"><b>${esc(C.title)}</b><small>#${esc(C.channel || "inc")} · ${esc(C.svc || z.title)}</small></div>
       <span class="q-inc-st"><span class="q-inc-clock" title="Time since you acknowledged">⏱ 00:00</span><span class="q-inc-clues" title="Clues found · ${need} needed to write up">🔎 0/${clueIds.length}</span></span></div>
+    <div class="q-stepper"><button data-go="slack" class="on"><i>1</i><span>Investigate <b class="q-st-n">0/${need} clues</b></span></button><button data-go="notes"><i>2</i><span>Root cause</span></button><button data-go="notes"><i>3</i><span>Ship the fix</span></button></div>
     <nav class="q-dock" role="tablist">${apps.map(([k, ic, l]) => `<button role="tab" data-app="${k}" aria-selected="${k === "slack"}"><span>${ic}</span><small>${l}</small><i class="q-badge-n" hidden></i></button>`).join("")}</nav>
     <div class="q-apps">
-      <section class="q-app" data-app="slack"><div class="q-slack-h"># ${esc(C.channel || "inc")}<small>${esc(C.svc || "")}</small></div><div class="q-slack"></div>
+      <section class="q-app" data-app="slack"><p class="q-app-tip">ℹ️ <b>Slack</b> is the team's incident channel. Teammates share what they know, suggest commands (tap ⌨️ to run one) and react to the fixes you ship. Stuck? Ask for a hint: it costs stars.</p><div class="q-slack-h"># ${esc(C.channel || "inc")}<small>${esc(C.svc || "")}</small></div><div class="q-slack"></div>
         <div class="q-slack-f"><button class="btn q-hint">💡 Ask for a hint <small>(${(C.hints || []).length} left)</small></button></div></section>
-      <section class="q-app" data-app="term" hidden><div class="q-term"><div class="q-term-out"><p class="t-d">${termFmt(T.motd || `Connected to ${host}. Type «help» for ideas.`).replace(/«(.+?)»/g, "<b>$1</b>")}</p></div>
+      <section class="q-app" data-app="term" hidden><p class="q-app-tip">ℹ️ <b>Terminal</b>: a shell on the production box. Type a command and press Enter, or tap a suggestion below. If an output explains the alert, tap <b>🚩 Flag this output</b>. Built-ins: «help», «history», «clear»; ↑/↓ for history, Tab to complete.</p><div class="q-term"><div class="q-term-out"><p class="t-d">${termFmt(T.motd || `Connected to ${host}. Type «help» for ideas.`).replace(/«(.+?)»/g, "<b>$1</b>")}</p></div>
         <form class="q-term-in" autocomplete="off"><span class="q-ps">${esc(user)}@${esc(host)}:~$</span><input aria-label="Terminal command" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go"></form></div>
         <div class="q-chips" aria-label="Suggested commands"></div></section>
-      ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">Compare the panels. Flag the ones that explain the alert, not the ones that just look busy.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
-      ${C.ui ? `<section class="q-app" data-app="ui" hidden><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
-      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">Tap a suspicious line to flag it.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
-      <section class="q-app" data-app="notes" hidden><div class="q-notes"></div></section>
+      ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">ℹ️ <b>Dashboards</b>: monitoring graphs (think Grafana or Datadog). Red dashed lines mark deploys and events. Flag the panels that <b>explain</b> the alert, not the ones that just look busy or show the symptom.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
+      ${C.ui ? `<section class="q-app" data-app="ui" hidden><p class="q-app-tip">ℹ️ <b>${esc(C.uiName || "Console")}</b>: the system's own UI. Same rule: flag what explains the alert.</p><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
+      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">ℹ️ <b>Code</b>: the repos involved in this incident. Tap a line to flag it if it's the bug or the change that caused it. Harmless lines count as noise.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
+      <section class="q-app" data-app="notes" hidden><p class="q-app-tip">ℹ️ <b>Notes</b>: your evidence and the incident write-up. Once you have enough clues, pick one root cause and tick every action you'd ship.</p><div class="q-notes"></div></section>
+      <section class="q-app" data-app="guide" hidden><div class="q-guide"></div></section>
     </div></div>`;
   const $ = s => root().querySelector(s), $$ = s => root().querySelectorAll(s);
   const slackEl = $(".q-slack"), out = $(".q-term-out"), inp = $(".q-term-in input");
@@ -910,10 +974,45 @@ function desk(id, ci, z, Z, C){
     $$(".q-app").forEach(a => a.hidden = a.dataset.app !== k);
     if (k === "slack"){ st.unread = 0; badge(); slackEl.lastElementChild && slackEl.lastElementChild.scrollIntoView({block:"nearest"}); }
     if (k === "notes") notes();
+    if (k === "guide") guide();
     if (k === "term" && matchMedia("(hover: hover)").matches) inp.focus();
   };
   const badge = () => { const b = $('.q-dock [data-app="slack"] .q-badge-n'); if (b){ b.hidden = !st.unread; b.textContent = st.unread; } };
   $$(".q-dock button").forEach(b => b.onclick = () => show(b.dataset.app));
+  $$(".q-stepper button").forEach(b => b.onclick = () => show(b.dataset.go));
+  const stepper = () => {
+    const n = Object.keys(st.found).length, sb = $$(".q-stepper button"), stage = n < need ? 0 : st.cause == null ? 1 : 2;
+    sb.forEach((b, k) => { b.classList.toggle("on", k === stage); b.classList.toggle("done", k < stage); });
+    const sn = $(".q-st-n"); if (sn) sn.textContent = `${Math.min(n, need)}/${need} clues`;
+  };
+  const TOOLS = [["💬", "Slack", "The incident channel on Slack or Teams", "Read what teammates know. Tap ⌨️ commands they suggest. Ask for a hint if stuck (costs stars)."],
+    ["⌨️", "Terminal", "SSH into a prod box or bastion", "Type commands (or tap suggestions). Flag outputs that explain the alert."],
+    ...(C.dash ? [["📈", "Dashboards", "Grafana, Datadog, CloudWatch", "Find *when* things changed and *what* changed with it. Red dashed lines are deploys/events."]] : []),
+    ...(C.ui ? [["🖥", C.uiName || "Console", "The system's own UI", "Look for the internal detail behind the symptom."]] : []),
+    ...(C.files ? [["🧾", "Code", "GitHub / GitLab", "Find the line or the recent change that caused it."]] : []),
+    ["📝", "Notes", "Your incident doc", "Evidence you've flagged, then the root cause and the fixes you ship."]];
+  const guideEl = $(".q-guide");
+  function guide(){
+    guideEl.innerHTML = `<h3>🎯 Your goal</h3><p>Find <b>why</b> “${esc(C.title)}” is happening, back it with evidence, and ship the fix that resolves it <b>without breaking anything else</b>. That's what a good on-call engineer does.</p>
+      <div class="q-gstat"><span>🔎 <b>${Object.keys(st.found).length}</b>/${need} clues</span><span>💡 <b>${st.hints}</b> hints</span><span>❌ <b>${st.wrong}</b> wrong calls</span><span>🙅 <b>${st.noise}</b> noise flags</span></div>
+      <h3>🧭 How to play</h3><ol class="q-gsteps">
+        <li><b>Investigate.</b> Start in Slack, then use the terminal and the other tools. Ask: <i>what changed, and when?</i></li>
+        <li><b>Flag evidence 🚩.</b> Every terminal output, dashboard panel, console panel and code line can be flagged. <span class="q-gk yes">✓ green</span> = a real clue, saved to Notes. <span class="q-gk no">✗ grey</span> = noise; it tells you why it isn't the cause.</li>
+        <li><b>Name the root cause.</b> After <b>${need} clues</b>, open 📝 Notes and pick the <b>one</b> cause that explains <i>all</i> the evidence.</li>
+        <li><b>Ship the fix.</b> Tick <b>every</b> action you'd take now. A complete fix usually <b>stops the damage today</b> and <b>stops it from happening again</b>. Leave out anything that would make things worse.</li>
+        <li><b>Read the postmortem.</b> It's built from your own actions, with the real root cause, the traps, and interview answers.</li></ol>
+      <h3>🧰 Your tools</h3><div class="q-tw"><table><thead><tr><th>Tool</th><th>In real life</th><th>What to do here</th></tr></thead><tbody>${TOOLS.map(t => `<tr><td>${t[0]} <b>${esc(t[1])}</b></td><td>${esc(t[2])}</td><td>${fm(t[3])}</td></tr>`).join("")}</tbody></table></div>
+      <h3>🧩 What happens when you ship</h3><ul>
+        <li><b>Wrong root cause</b>: the team pushes back in Slack with evidence. Counts as a wrong call.</li>
+        <li><b>A harmful fix</b> (e.g. deleting data, hiding the symptom): it backfires in prod. Wrong call.</li>
+        <li><b>A missing essential fix</b>: the alert keeps firing or it'll happen again tomorrow. Wrong call.</li>
+        <li><b>Nice-to-have fixes</b> (alerts, guardrails) are never wrong, and the postmortem lists any you skipped.</li></ul>
+      <h3>⭐ Scoring</h3><div class="q-tw"><table><tbody><tr><td>⭐⭐⭐</td><td>No wrong calls, at most 1 hint, at most 3 noise flags</td></tr><tr><td>⭐⭐</td><td>At most 1 wrong call and at most 2 hints</td></tr><tr><td>⭐</td><td>Resolved</td></tr></tbody></table></div>
+      ${C.terms ? `<h3>📖 Terms in this incident</h3><dl class="q-terms">${C.terms.map(([t, d]) => `<dt>${fm(t)}</dt><dd>${fm(d)}</dd>`).join("")}</dl>` : ""}
+      ${C.study.length ? `<h3>📚 Study material for this incident</h3><p class="muted">Straight from the course. Expand to read here, or open the full page in a new tab. Your investigation stays put.</p>${refList(C.study)}` : ""}
+      <button class="btn big solid q-gback">Back to investigating ▸</button>`;
+    guideEl.querySelector(".q-gback").onclick = () => show(Object.keys(st.found).length >= need ? "notes" : "slack");
+  }
   // Slack
   const post = async (list, gap = 700) => {
     for (const m of list){
@@ -945,7 +1044,7 @@ function desk(id, ci, z, Z, C){
   (C.slack || []).forEach((m, k) => { if (m.at === 0){ st.fired.add(k); } });
   post((C.slack || []).filter(m => m.at === 0), 900);
   // Evidence
-  const clueCount = () => { const n = Object.keys(st.found).length, e = $(".q-inc-clues"); if (e){ e.textContent = `🔎 ${n}/${clueIds.length}`; e.title = `${n} clues found · ${need} needed to write up`; e.classList.toggle("ok", n >= need); } return n; };
+  const clueCount = () => { const n = Object.keys(st.found).length, e = $(".q-inc-clues"); if (e){ e.textContent = `🔎 ${n}/${clueIds.length}`; e.title = `${n} clues found · ${need} needed to write up`; e.classList.toggle("ok", n >= need); } stepper(); return n; };
   const flagNote = (anchor, html, cls) => {
     const isLine = anchor.classList.contains("q-cl");
     const old = isLine ? (anchor.nextElementSibling && anchor.nextElementSibling.classList.contains("q-flagnote") ? anchor.nextElementSibling : null) : anchor.querySelector(":scope > .q-flagnote");
@@ -1037,7 +1136,7 @@ function desk(id, ci, z, Z, C){
       <fieldset class="q-wf"><legend>${fm(C.cause.q || "What's the root cause?")}</legend>${C.cause.o.map((o, i) => `<label class="q-wopt"><input type="radio" name="cause" value="${i}" ${st.cause === i ? "checked" : ""}><span>${fm(o.t)}</span></label>`).join("")}</fieldset>
       <fieldset class="q-wf"><legend>${fm(C.fix.q || "What do you ship? Pick every action you'd take.")}</legend>${C.fix.o.map((o, i) => `<label class="q-wopt"><input type="checkbox" value="${i}" ${st.fix.has(i) ? "checked" : ""}><span>${fm(o.t)}</span></label>`).join("")}</fieldset>
       <button class="btn big solid q-ship">🚀 Ship the fix</button>`}`;
-    notesEl.querySelectorAll('input[name="cause"]').forEach(r => r.onchange = () => st.cause = +r.value);
+    notesEl.querySelectorAll('input[name="cause"]').forEach(r => r.onchange = () => { st.cause = +r.value; stepper(); });
     notesEl.querySelectorAll('input[type="checkbox"]').forEach(r => r.onchange = () => r.checked ? st.fix.add(+r.value) : st.fix.delete(+r.value));
     const sb = notesEl.querySelector(".q-ship"); if (sb) sb.onclick = ship;
   }
@@ -1093,6 +1192,7 @@ function desk(id, ci, z, Z, C){
           ${(() => { const skipped = C.fix.o.filter(o => o.kind === "good" && !sel.includes(o)); return skipped.length ? `<p class="muted">Also worth doing: ${skipped.map(o => fm(o.t)).join(" · ")}</p>` : ""; })()}</section>
         ${C.post && C.post.prevent ? `<section><h3>Action items · so it never happens again</h3><ul class="q-acts">${C.post.prevent.map(x => `<li>☐ ${fm(x)}</li>`).join("")}</ul></section>` : ""}
         <section><h3>Traps you avoided (or didn't)</h3><ul>${C.fix.o.filter(o => o.kind === "bad").map(o => `<li>❌ <b>${fm(o.t)}</b> — ${fm(o.why || "")}</li>`).join("")}${C.cause.o.filter(o => !o.ok && o.why).map(o => `<li>🪤 <b>${fm(o.t)}</b> — ${fm(o.why)}</li>`).join("")}</ul></section>
+        ${C.study.length ? `<section><h3>📚 Go deeper in the course</h3>${refList(C.study, "links")}</section>` : ""}
         ${C.learned ? `<section class="q-learned"><h3>🎤 Say this in an interview</h3><ul>${C.learned.map(x => `<li>${fm(x)}</li>`).join("")}</ul></section>` : ""}
       </article>
       ${cards.length ? `<h2 class="q-sec-h">🃏 Cards from this incident</h2><div class="q-xcards">${cards.map(([, c]) => `<details class="q-xcd"><summary><b>${fm(c.t)}</b><small>${fm(c.one || "")}</small></summary>${cardHTML(c, "deck")}</details>`).join("")}</div>` : ""}
@@ -1112,6 +1212,8 @@ window.loadQuest = function(h){
   else if ((m = h.match(/^mis-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "ms");
   else if ((m = h.match(/^iv-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "iv");
   else if ((m = h.match(/^case-([a-z]+)-(\d+)$/))) caseView(m[1], +m[2]);
+  else if ((m = h.match(/^learn-([a-z]+)-(\d+)$/))) studyView(m[1], +m[2]);
+  else if ((m = h.match(/^card-([a-z]+)-(\w+)$/))) studyView(m[1], 0, m[2]);
   else if ((m = h.match(/^zone-([a-z]+)(?:\/([a-z]+))?/))) zoneView(m[1], m[2]);
   else mapView();
   window.scrollTo(0, 0);

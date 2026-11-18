@@ -155,3 +155,110 @@ Implementations: Apache Polaris, Lakekeeper, Gravitino, Unity Catalog's Iceberg 
  ["pick","An equality delete at seq 20 seems not to remove a row inserted at seq 25. Bug?",["No — by design it applies only to older data","Yes, file a bug","Compaction broke it","v3 only"],0,"Sequence-number semantics."]
 ]}
 ]);
+
+/* ===== On-call desk: Iceberg incident ===== */
+QUEST.cases("iceberg", [
+{
+ title:"Queries spend 3 minutes just planning", icon:"🧊", sev:2, clock:"09:40", channel:"inc-2336-lake-payments-slow", svc:"lake.payments · Iceberg on S3 + Trino", need:4, uiName:"Trino UI",
+ terms:[["Snapshot","A version of an Iceberg table. Every commit (each streaming micro-batch, too) creates one."],["metadata.json","The table's root file: schema, partition spec and the list of snapshots. Rewritten on every commit."],["Manifest list / manifest","Files that index the data files: a snapshot points to a manifest list, which points to manifests, which point to data files."],["Query planning","Before reading data, the engine reads metadata to decide which files to scan."],["expire_snapshots","Maintenance that removes old snapshots (and files only they reference)."],["rewrite_manifests / rewrite_data_files","Maintenance that compacts many small manifests or data files into fewer big ones."],["IAM role","The AWS identity a job runs as. It decides which S3 paths and actions the job may use."]],
+ pager:`[y]WARN[/y]  trino  p95 query time on lake.payments [r]3m 41s[/r] (was 9s)
+planning  [r]3m 22s[/r] of that is "planning" before any split is scheduled
+since     creeping up for months; dashboards started timing out this week
+impact    analyst dashboards time out`,
+ brief:"«lake.payments» is an Iceberg table fed by a Flink streaming job that commits every **30 seconds**. A nightly Airflow job (iceberg_maintenance) is supposed to keep it tidy. Back in March the platform team rotated IAM roles for all batch jobs.",
+ slack:[
+  {at:0, who:"meera", t:"Every dashboard on lake.payments is timing out since this morning. Honestly it's been getting slower for months; we just lived with it."},
+  {at:5, who:"priya", t:"Planning time, not execution time, is the interesting bit. Planning reads **metadata**. How big is this table's metadata?", cmd:"aws s3 ls s3://payu-lake/payments/metadata/ --summarize --human-readable"},
+  {at:50, who:"dev", t:"Want me to add Trino workers? We have budget."},
+  {on:"metabig", who:"priya", t:"A 480 MB metadata.json is a lot. How many snapshots are we keeping? Query the metadata tables.", cmd:"trino -e \"select count(*), min(committed_at) from lake.\\\"payments$snapshots\\\"\""},
+  {on:"snaps", who:"ravi", t:"Snapshots since March?! Isn't iceberg_maintenance supposed to expire those every night? Check the Airflow task logs.", cmd:"airflow tasks logs iceberg_maintenance expire_snapshots --latest"},
+  {on:"denied", who:"dev", t:"Ah. That role was rotated in the March security hardening. Let me check what the new policy allows…", cmd:"aws iam get-role-policy --role-name lake-maintenance --policy-name s3-access"}
+ ],
+ hints:["Planning time comes from reading metadata: metadata.json, manifest lists and manifests. Check how big they are.","Count the table's snapshots and manifests using Iceberg metadata tables («payments$snapshots», «payments$manifests»).","Snapshots should be expired nightly. Why isn't the maintenance job doing it? Read its logs."],
+ term:{host:"lake-ops", user:"oncall", suggest:["aws s3 ls s3://payu-lake/payments/metadata/ --summarize --human-readable","airflow dags list-runs -d iceberg_maintenance"],
+  cmds:[
+  {m:["aws s3 ls s3://payu-lake/payments/metadata"], out:`2026-11-18 09:39:41  [r]481.2 MiB[/r] 01274812-7f1e...-metadata.json
+2026-11-18 09:39:41   [y]1.9 MiB[/y]  snap-88120419...-manifest-list.avro
+[d]... 412,551 more objects ...[/d]
+Total Objects: [r]412553[/r]
+   Total Size: 1.1 TiB`, clue:"metabig", unlock:["trino -e \"select count(*), min(committed_at) from lake.\\\"payments$snapshots\\\"\""]},
+  {m:["trino -e \"select count(*), min(committed_at)","trino -e \"select count(*) from lake.\\\"payments$snapshots"], out:` _col0  |        _col1
+--------+-------------------------
+ [r]742180[/r] | [r]2026-03-02 00:00:31 UTC[/r]
+[d](1 row)  -- expected: ~2 days × 2,880 commits/day ≈ 5,760[/d]`, clue:"snaps", unlock:["trino -e \"select count(*) from lake.\\\"payments$manifests\\\"\"","airflow tasks logs iceberg_maintenance expire_snapshots --latest"]},
+  {m:["trino -e \"select count(*) from lake.\\\"payments$manifests"], out:` _col0
+--------
+ [r]96214[/r]   [d]-- manifests in the current snapshot (healthy tables: tens to hundreds)[/d]`, clue:"manifests"},
+  {m:["airflow dags list-runs"], out:`dag_id              run_id                       state
+iceberg_maintenance scheduled__2026-11-17T20:30  [g]success[/g]
+iceberg_maintenance scheduled__2026-11-16T20:30  [g]success[/g]
+iceberg_maintenance scheduled__2026-11-10T20:30  [g]success[/g]
+[d](all green for 30 days)[/d]`, note:"All green… but green only means the DAG didn't raise. Read the task logs to see what it actually did.", unlock:["airflow tasks logs iceberg_maintenance expire_snapshots --latest"]},
+  {m:["airflow tasks logs iceberg_maintenance"], out:`[2026-11-17 20:31:02] INFO  Running CALL lake.system.expire_snapshots('payments', TIMESTAMP '2026-11-15 20:31:00')
+[2026-11-17 20:31:09] [r]WARN  S3Exception: Access Denied (Service: S3, Status Code: 403) on DeleteObject s3://payu-lake/payments/metadata/...[/r]
+[2026-11-17 20:31:09] [y]WARN  expire_snapshots failed; continuing (fail_on_error=False)[/y]
+[2026-11-17 20:31:10] INFO  Running CALL lake.system.rewrite_manifests('payments')
+[2026-11-17 20:31:15] [r]WARN  S3Exception: Access Denied … PutObject[/r]
+[2026-11-17 20:31:15] INFO  Task exited with return code 0`, clue:"denied", unlock:["aws iam get-role-policy --role-name lake-maintenance --policy-name s3-access"]},
+  {m:["aws iam get-role-policy"], out:`{
+  "PolicyName": "s3-access",
+  "Statement": [{ "Effect": "Allow",
+     "Action": [[y]"s3:GetObject", "s3:ListBucket"[/y]],
+     "Resource": ["arn:aws:s3:::payu-lake/*"] }]
+}
+[d]-- rotated 2 Mar 2026 by platform-iam; previous version also allowed s3:PutObject, s3:DeleteObject[/d]`, clue:"readonly"},
+  {m:["trino -e \"show stats","trino -e \"select count(*) from lake.payments"], out:` _col0
+------------
+ 3812091233
+[d]Query 2026... planning: 3m 18s, execution: 6.2s[/d]`, note:"Row count and data size are as expected. Execution is only 6 s; the time goes on planning."}
+ ]},
+ dash:[
+  {title:"Trino query time on lake.payments (s)", x:["Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"], series:[{name:"planning", v:[2,9,20,38,61,92,128,170,202]}, {name:"execution", v:[6,6,7,6,6,7,6,6,6]}], marks:[{i:0, label:"IAM rotation"}], clue:"planning"},
+  {title:"Snapshots retained", x:["Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"], series:[{name:"snapshots", v:[5800,92000,180000,268000,355000,440000,530000,620000,742180]}], marks:[{i:0, label:"IAM rotation"}], clue:"snapgrowth"},
+  {title:"Trino cluster CPU %", unit:"%", x:["Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"], series:[{name:"CPU", v:[41,40,39,42,40,41,43,42,42]}], note:"Workers are at ~40%. More workers won't speed up coordinator-side planning."},
+  {title:"Flink commit interval (s)", x:["Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov"], series:[{name:"interval", v:[30,30,30,30,30,30,30,30,30]}], note:"Unchanged at 30 s. Frequent commits are fine *if* maintenance runs. Nothing changed here."}
+ ],
+ ui:[
+  {title:"Query 20261118_093912 · stats", md:`| Phase | Time |
+|---|---|
+| Queued | 0.1 s |
+| **Planning** | **3 min 18 s** |
+| Scheduling splits | 4.1 s |
+| Execution | 6.2 s |
+| Splits | 2,941 |`, clue:"planning"},
+  {title:"Coordinator JVM", md:`| Heap used | GC pauses (last 10 min) | Notes |
+|---|---|---|
+| 21 / 32 GB | 14 s total | Large metadata.json parsed per query |`, note:"The coordinator is working hard *because* of the giant metadata. That's a symptom."}
+ ],
+ clues:{
+  metabig:"metadata.json is 481 MB and the metadata folder has 412k objects",
+  snaps:"The table keeps 742,180 snapshots going back to March",
+  manifests:"The current snapshot has 96k manifests (healthy: tens to hundreds)",
+  snapgrowth:"Snapshots have grown steadily (≈2,880/day) ever since the March IAM rotation; nothing is expiring them",
+  planning:"Query time is almost all planning (3 min 18 s) vs 6 s of execution",
+  denied:"Maintenance logs: expire_snapshots and rewrite_manifests get S3 Access Denied, yet the task exits 0",
+  readonly:"The rotated IAM role only allows Get/List, not Put/Delete"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"Table maintenance has silently failed (S3 Access Denied since the IAM rotation, swallowed by fail_on_error=False), so snapshots and manifests pile up from 30-second commits and planning has to read huge metadata", ok:true},
+  {t:"The Trino cluster is too small", ok:false, why:"Workers sit at 40% CPU; time is spent in planning on the coordinator.", say:[["ravi","Workers are idle-ish at 40%. Execution takes 6 seconds. It's the 3-minute planning phase that's slow."]]},
+  {t:"Flink commits too often, so we should stop streaming", ok:false, why:"The 30 s interval didn't change. Frequent commits are normal when maintenance works.", say:[["priya","Flink has committed every 30 s for a year. What changed is that the cleanup stopped working."]]},
+  {t:"The data volume grew", ok:false, why:"Execution time and row counts are steady; only planning grew.", say:[["meera","Row counts are normal for November. And execution is 6 seconds — the data itself isn't the problem."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Restore s3:PutObject/DeleteObject on the maintenance role (scoped to the lake prefix)", kind:"must", why:"Maintenance can't fix anything until it can write and delete metadata.", miss:[["dev","Ran the maintenance calls, they failed instantly: Access Denied. The role still can't write."]]},
+  {t:"Run expire_snapshots (keep ~2 days), rewrite_manifests, then remove_orphan_files", kind:"must", why:"Shrinks metadata from 742k snapshots and 96k manifests to something planning can read in seconds.", miss:[["meera","Permissions fixed, nice, but queries are still 3 minutes. Nothing has actually cleaned up the 742k snapshots yet."]]},
+  {t:"Make maintenance fail loudly (fail_on_error=True) and alert on snapshot/manifest counts per table", kind:"good", why:"A green DAG that did nothing is worse than a red one."},
+  {t:"Add an IAM change check: dry-run every scheduled job's permissions after a rotation", kind:"good", why:"Catches this class of change on day one."},
+  {t:"Add 10 Trino workers", kind:"meh", why:"Planning happens on the coordinator. More workers cost money and change nothing."},
+  {t:"Delete old files under metadata/ directly in S3", kind:"bad", why:"You can't tell which files live snapshots still reference. Deleting by hand can corrupt the table for every reader.", say:[["meera","Every query on lake.payments now fails: «NotFoundException: Failed to open input stream for file … manifest». Did someone delete metadata files?!"],["priya","Restoring from S3 versioning. Never delete Iceberg files by hand. Let expire_snapshots and remove_orphan_files decide."]]},
+  {t:"Drop and recreate the table from the latest data files", kind:"bad", why:"You lose all history and time travel, break every running reader and writer, and risk missing in-flight commits.", say:[["dev","Flink is now failing: «Cannot commit: table was replaced». And finance's time-travel audit query for October is gone. 😬"]]}
+ ]},
+ post:{
+  summary:"Trino queries on «lake.payments» crept from **9 s to 3m 41s** over eight months. Almost all of that was planning. Analyst dashboards timed out.",
+  cause:"After the March IAM rotation, the maintenance role lost «s3:PutObject» and «s3:DeleteObject». The nightly «expire_snapshots» and «rewrite_manifests» calls hit **403 Access Denied**, but the job used «fail_on_error=False» and exited 0, so it stayed **green**. Meanwhile Flink kept committing every 30 s (2,880 snapshots a day), and nothing expired them. The table reached **742k snapshots**, a **481 MB metadata.json** and **96k manifests**. Every query had to read and filter that metadata before scheduling a single split.",
+  prevent:["Maintenance jobs fail loudly; alert on snapshot count, manifest count and metadata.json size","Permission dry-run for scheduled jobs after IAM changes","Streaming tables get compaction + snapshot expiry in their definition of done","Dashboards for planning vs execution time"]
+ },
+ learned:["Slow **planning** with fast **execution** = a metadata problem, not a compute problem.","Every Iceberg commit is a snapshot. Streaming without **expire_snapshots** and **rewrite_manifests** grows metadata forever.","A **green** job isn't a working job. Swallowed errors hide outages.","Never delete Iceberg files by hand. Use the maintenance procedures."]
+}
+]);

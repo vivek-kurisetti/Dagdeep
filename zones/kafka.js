@@ -483,6 +483,7 @@ Reduce impact: keep poll loops short (tune «max.poll.records», move slow work 
 QUEST.cases("kafka", [
 {
  title:"One partition is 3 million behind", icon:"☠️", sev:1, clock:"10:47", channel:"inc-2315-ledger-lag", svc:"payments-ledger consumer · Kafka", need:4,
+ terms:[["Partition", "An ordered, append-only log. A topic is split into partitions; each is read by exactly one consumer in a group."], ["Offset", "A record's position in a partition. The consumer group commits the offset it has finished up to."], ["Consumer lag", "Log-end offset minus committed offset: how many records are waiting to be processed."], ["Consumer group", "A set of consumers sharing a topic's partitions between them."], ["CrashLoopBackOff", "Kubernetes keeps restarting a container that keeps crashing, waiting longer each time."], ["Poison message", "A record the consumer can't process. Without error handling it crashes on it forever."], ["DLQ", "Dead-letter queue: a topic where unprocessable records are parked (with error details) so the main flow keeps moving."]],
  pager:`[r]FIRING[/r]  consumer lag > 500k  group=ledger-writer  topic=payments.v2
 partition 7   lag [r]3,042,118[/r]  (growing ~1.1k/s)
 partitions 0-6, 8-11   lag < 200

@@ -144,3 +144,90 @@ ENCODE AUTO: AZ64 for numeric/date/time, LZO/ZSTD for strings. Keep the **first 
  ["pick","Data science queries slow down ETL on the main cluster. Fix without copying data?",["Data sharing to a separate workgroup","CTAS copies","More queues only","Spectrum"],0,"Separate compute, same data."]
 ]}
 ]);
+
+/* ===== On-call desk: Redshift incident ===== */
+QUEST.cases("redshift", [
+{
+ title:"The 9 AM dashboard takes 6 minutes", icon:"🧭", sev:3, clock:"09:12", channel:"inc-2350-exec-dashboard-slow", svc:"exec-dashboard · Redshift ra3.4xlarge × 4", need:4,
+ terms:[["Slice / node","Redshift splits each node into slices; every table's rows are spread across all slices."],["Distribution style","How rows are spread: KEY (by a column), EVEN (round-robin), ALL (full copy on every node), AUTO."],["DISTKEY","With KEY distribution, rows with the same value land on the same slice, so joins on that column need no data movement."],["DS_BCAST_INNER / DS_DIST_BOTH","EXPLAIN labels for data movement: broadcasting a whole table to every node, or reshuffling both sides of a join."],["SORTKEY","The order rows are stored in, so range filters (e.g. on dates) can skip blocks."],["Disk-based step","A query step whose working memory overflowed, so it spilled to disk. Slow."],["stats_off / ANALYZE","How stale the planner's statistics are; ANALYZE refreshes them."]],
+ pager:`[y]WARN[/y]  exec-dashboard "Daily GMV by city" p95 load time [r]6m 12s[/r] (SLO 30s)
+query     orders ⋈ customers, last 30 days, group by city
+since     Monday 07:00
+cluster   CPU 38%  ·  WLM queue wait 0.4s  ·  concurrency normal`,
+ brief:"Leadership opens this dashboard at 9 AM every day. Over the weekend the data team **rebuilt the «orders» table** (2.1B rows) with a CTAS to add new columns. Nothing else changed.",
+ slack:[
+  {at:0, who:"arjun", t:"The CEO's dashboard is spinning for 6 minutes. Last week it loaded in 15 seconds. 😬"},
+  {at:5, who:"priya", t:"Queue wait is tiny, so it's not WLM. The query itself got slower. Get its plan.", cmd:"psql -c \"EXPLAIN select c.city, sum(o.amount) from orders o join customers c on o.customer_id = c.customer_id where o.order_date >= current_date - 30 group by 1\""},
+  {at:55, who:"dev", t:"Want me to resize to 8 nodes? Takes about 20 minutes."},
+  {on:"bcast", who:"priya", t:"Broadcasting a 2-billion-row table to every node is the smoking gun. What does «orders» look like physically now?", cmd:"psql -c \"select \\\"table\\\", diststyle, sortkey1, skew_rows, unsorted, stats_off, tbl_rows from svv_table_info where \\\"table\\\" in ('orders','customers')\""},
+  {on:"evendist", who:"ravi", t:"The old table was DISTKEY(customer_id) SORTKEY(order_date). The CTAS didn't carry those over. Check the migration.", cmd:"cat migrations/2026_11_15_orders_add_columns.sql"}
+ ],
+ hints:["Queue wait and concurrency are fine, so look at the query's own plan (EXPLAIN).","Look for data movement in the join: DS_BCAST_INNER or DS_DIST_BOTH on a huge table is expensive.","Compare orders' distribution style and sort key now vs before the weekend rebuild (svv_table_info)."],
+ term:{host:"analytics-bastion", user:"oncall", suggest:["psql -c \"select query, elapsed, queue_time from stl_wlm_query order by starttime desc limit 3\"","psql -c \"EXPLAIN select c.city, sum(o.amount) from orders o join customers c on o.customer_id = c.customer_id where o.order_date >= current_date - 30 group by 1\""],
+  cmds:[
+  {m:["psql -c \"select query, elapsed","psql -c \"select * from stl_wlm_query"], out:`  query  | elapsed_s | queue_s
+---------+-----------+---------
+ 9912281 |   371.8   |   [g]0.4[/g]
+ 9912240 |   368.1   |   [g]0.3[/g]`, note:"Queue time is under a second. WLM isn't the problem; execution is."},
+  {m:["psql -c \"explain"], out:`XN HashAggregate  (cost=9182771233.12..)
+  ->  XN Hash Join [r]DS_BCAST_INNER[/r]  (cost=..  rows=2100000000)
+        Hash Cond: ("outer".customer_id = "inner".customer_id)
+        ->  XN Seq Scan on customers c  (rows=48000000)
+        ->  XN Hash  (rows=[r]2100000000[/r])
+              ->  XN Seq Scan on orders o   Filter: (order_date >= ...)  [y](rows=2100000000, no range-restricted scan)[/y]`, clue:"bcast", unlock:["psql -c \"select \\\"table\\\", diststyle, sortkey1, skew_rows, unsorted, stats_off, tbl_rows from svv_table_info where \\\"table\\\" in ('orders','customers')\"","psql -c \"select query, step, rows, workmem, is_diskbased from svl_query_summary where query = 9912281 and is_diskbased = 't'\""]},
+  {m:["psql -c \"select \\\"table\\\", diststyle","psql -c \"select * from svv_table_info"], out:`  table    | diststyle          | sortkey1    | skew_rows | unsorted | stats_off | tbl_rows
+-----------+--------------------+-------------+-----------+----------+-----------+------------
+ orders    | [r]EVEN[/r]               | [r](none)[/r]      |   1.00    |   [y]100.0[/y]  |   [y]100.0[/y]   | 2100000000
+ customers | KEY(customer_id)   | customer_id |   1.02    |    0.0   |     0.0   |   48000000`, clue:"evendist", unlock:["cat migrations/2026_11_15_orders_add_columns.sql"]},
+  {m:["psql -c \"select query, step","psql -c \"select * from svl_query_summary"], out:` query   | step | rows       | workmem     | is_diskbased
+---------+------+------------+-------------+-------------
+ 9912281 |   2  | 2100000000 | 2.1 GB      | [r]t[/r]
+[d](hash step spilled to disk)[/d]`, clue:"spill"},
+  {m:["cat migrations/2026_11_15_orders_add_columns.sql","cat migrations"], out:`-- Add channel + device columns (Sat 15 Nov)
+[y]CREATE TABLE orders_new AS[/y]
+SELECT o.*, d.channel, d.device_type
+FROM orders o LEFT JOIN order_devices d USING (order_id);
+[d]-- no DISTSTYLE / DISTKEY / SORTKEY specified → CTAS picked EVEN, no sort key[/d]
+ALTER TABLE orders RENAME TO orders_old;
+ALTER TABLE orders_new RENAME TO orders;
+[d]-- no ANALYZE[/d]`, clue:"ctas"},
+  {m:["psql -c \"select * from stv_partitions","psql -c \"select sum(used)"], out:`disk used: 61% of capacity`, note:"Plenty of disk headroom. Storage isn't the issue."},
+  {m:["psql -c \"select * from stv_recents","psql -c \"select * from stv_inflight"], out:`2 queries running · both exec-dashboard · no blocking locks`, note:"No lock contention or runaway queries. It's just this query being slow."}
+ ]},
+ dash:[
+  {title:"Dashboard query time (s)", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"p95", v:[14,15,14,13,12,372,368,371]}], marks:[{i:3, label:"orders rebuilt (CTAS)"}], clue:"timing"},
+  {title:"Network bytes between nodes (GB/query)", unit:"G", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"GB", v:[0.3,0.3,0.3,0.2,0.2,96,94,95]}], marks:[{i:3, label:"CTAS"}], clue:"network"},
+  {title:"Cluster CPU %", unit:"%", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"CPU", v:[36,35,37,22,20,38,39,38]}], note:"CPU looks normal. The query spends its time moving data over the network and spilling, not computing."},
+  {title:"WLM queue wait (s)", x:["Wed","Thu","Fri","Sat","Sun","Mon","Tue","Wed"], series:[{name:"wait", v:[0.3,0.4,0.3,0.2,0.2,0.4,0.4,0.4]}], note:"Queue wait is under a second. Concurrency and WLM aren't the problem."}
+ ],
+ clues:{
+  bcast:"EXPLAIN: the join broadcasts all 2.1B rows of orders (DS_BCAST_INNER) and scans with no date range restriction",
+  evendist:"orders is now DISTSTYLE EVEN with no sort key, and stats_off = 100",
+  ctas:"Saturday's migration rebuilt orders with a CTAS and no DISTKEY/SORTKEY/ANALYZE",
+  spill:"The hash step spills to disk (is_diskbased = t)",
+  timing:"Query time jumped from ~14 s to ~370 s right after the Saturday rebuild",
+  network:"Data moved between nodes per query went from 0.3 GB to ~95 GB"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"Saturday's CTAS rebuilt «orders» with EVEN distribution, no sort key and no statistics. The join on customer_id now broadcasts 2.1B rows across the network, can't skip blocks by date, and spills to disk", ok:true},
+  {t:"The cluster is too small for the data", ok:false, why:"Same data size last week ran in 14 s. CPU is 38%.", say:[["ravi","Same cluster, same data size last Friday: 14 seconds. And CPU is at 38%."]]},
+  {t:"WLM / concurrency: too many queries at 9 AM", ok:false, why:"Queue wait is 0.4 s and nothing is blocking.", say:[["priya","Queue wait is 0.4 seconds. It's not waiting; it's executing slowly."]]},
+  {t:"The new channel/device columns made rows too wide", ok:false, why:"Redshift is columnar: unused columns aren't read. The plan shows data movement, not wide scans.", say:[["priya","Columnar storage: the dashboard doesn't select the new columns, so they cost nothing. Look at the join strategy."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Recreate «orders» with «DISTKEY(customer_id) SORTKEY(order_date)» (deep copy via CREATE TABLE … LIKE / INSERT), then swap", kind:"must", why:"Co-locates orders with customers for the join (no broadcast) and lets date filters skip blocks.", miss:[["arjun","Stats are fresh but it still takes 5 minutes. The plan still broadcasts orders."]]},
+  {t:"Run ANALYZE on the new orders table", kind:"must", why:"Fresh statistics let the planner pick the right join and memory sizes.", miss:[["priya","Layout is right now, but stats_off is still 100. The planner is guessing row counts and the hash step still spills. Run ANALYZE."]]},
+  {t:"Fix the migration template: CTAS must state DISTKEY/SORTKEY (or use CREATE TABLE … LIKE) and end with ANALYZE", kind:"good", why:"Stops the next table rebuild from silently changing physical design."},
+  {t:"Alert on dashboard query p95 and on DS_BCAST_INNER for tables over 100M rows", kind:"good", why:"Catches plan regressions on day one."},
+  {t:"Run VACUUM SORT on orders", kind:"meh", why:"There's no sort key to sort by, so it does little until the table is rebuilt."},
+  {t:"Resize the cluster to 8 nodes", kind:"bad", why:"Twice the cost, still broadcasting 2.1B rows. Maybe 30% faster, nowhere near 15 s.", say:[["dev","Resized to 8 nodes. Dashboard went from 6m 12s to 4m 40s. And the monthly bill just doubled."],["arjun","Finance is asking why Redshift costs doubled this month. 💸"]]},
+  {t:"Turn on concurrency scaling", kind:"bad", why:"Concurrency scaling adds clusters for *more queries*, not a faster single query. Extra cost, no gain.", say:[["dev","Concurrency scaling kicked in. It's billing us for a second cluster, and the one dashboard query is still 6 minutes."]]}
+ ]},
+ post:{
+  summary:"The executive \"Daily GMV by city\" dashboard went from **~14 s to ~6 min** after a weekend table rebuild. Nothing else changed.",
+  cause:"Saturday's migration rebuilt «orders» (2.1B rows) with «CREATE TABLE … AS SELECT» and **no distribution or sort key**. Redshift chose **EVEN** distribution and no sort key, and with no ANALYZE the stats were 100% stale. Previously «orders» was «DISTKEY(customer_id)», co-located with «customers», so the join needed no data movement. Now the planner **broadcast** the whole table (~95 GB moved per query), couldn't skip blocks for the 30-day filter without «SORTKEY(order_date)», and the hash step **spilled to disk**.",
+  prevent:["Migration templates require explicit DISTKEY/SORTKEY (or LIKE) and ANALYZE","Plan-regression check (EXPLAIN diff) for top dashboard queries after schema changes","Alert on dashboard p95 and on large broadcasts"]
+ },
+ learned:["Slow query + low queue wait → read the **plan**: look for «DS_BCAST_INNER» / «DS_DIST_BOTH».","Join tables on their **DISTKEY** so matching rows sit on the same slice.","CTAS doesn't copy your distribution and sort keys. Declare them, then **ANALYZE**.","Bigger clusters and concurrency scaling don't fix a bad physical design. They just cost more."]
+}
+]);

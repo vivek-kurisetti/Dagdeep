@@ -690,6 +690,7 @@ Fix: raise «spark.executor.memoryOverhead» (15–25% for PySpark), set «spark
 QUEST.cases("spark", [
 {
  title:"The nightly job got 4× slower", icon:"🐢", sev:2, clock:"06:12", channel:"inc-2291-settlements-slow", svc:"settlements-daily · Spark on EMR", need:4,
+ terms:[["SLA", "Service-level agreement: the time by which a job's output must be ready (here, 07:00 for Finance)."], ["Driver / executors", "The driver plans the job and hands out tasks; executors are the worker processes that run them."], ["Task", "The smallest unit of Spark work: roughly one task per input split. Each task has a fixed cost to schedule and start."], ["Small files", "Many files far smaller than ~128 MB. Each one costs a listing call, an S3 open and footer reads, whatever its size."], ["Listing", "Before reading, the driver asks S3 for every file under the path. Millions of files = minutes of listing."], ["Streaming trigger", "How often a Structured Streaming query runs a micro-batch. Each micro-batch writes new files."], ["Compaction", "Rewriting many small files into fewer large ones, without changing the data."]],
  pager:`[r]FIRING[/r]  settlements_daily runtime > SLA
 cluster   emr-prod-etl (j-2QX8KD41)   10 × r5.2xlarge
 started   05:00 IST     status RUNNING (stage 2/7)
@@ -822,6 +823,7 @@ parsed = events.select(F.from_json(F.col("value").cast("string"), SCHEMA).alias(
 },
 {
  title:"Executors keep getting killed", icon:"💥", sev:2, clock:"14:05", channel:"inc-2307-risk-features-oom", svc:"risk-features · Spark on EMR", need:4,
+ terms:[["Exit 137", "The process got SIGKILL (128 + 9). On YARN that usually means the container went over its memory limit."], ["Container", "The memory box YARN gives an executor: heap + memoryOverhead. Go over it and YARN kills it."], ["JVM heap", "Memory managed by Java (spark.executor.memory): DataFrames, caching, shuffle buffers."], ["memoryOverhead", "Memory outside the heap: Python workers, Arrow buffers, native libs, thread stacks. Default max(384 MB, 10% of heap)."], ["pandas UDF", "A Python function Spark runs on Arrow batches in separate Python processes, outside the JVM."], ["Arrow batch", "A columnar chunk of rows Spark ships to Python; «maxRecordsPerBatch» sets its size."]],
  pager:`[r]FIRING[/r]  risk_features_hourly FAILED (attempt 4/4)
 error     Job aborted due to stage failure: Task 37 in stage 4.0 failed 4 times
           ExecutorLostFailure (executor 12 exited caused by one of the running tasks)

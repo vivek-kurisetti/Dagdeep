@@ -146,3 +146,114 @@ Every production incident becomes an eval scenario. Track per-scenario pass rate
  ["pick","Ready to move from human approval to auto-approve. Evidence needed?",["Strong pass^k on low-risk segments + clean incident history","A demo","Average judge score","CEO approval only"],0,"Data-driven autonomy."]
 ]}
 ]);
+
+/* ===== On-call desk: Agentic AI incident ===== */
+QUEST.cases("agents", [
+{
+ title:"An agent burned ₹4 lakh overnight", icon:"🔁", sev:1, clock:"07:30", channel:"inc-2355-agent-cost", svc:"refund-agent · LangGraph on Claude", need:4, uiName:"LangSmith",
+ terms:[["Agent loop","The model decides an action, a tool runs, the result goes back to the model, and it repeats until the model says it's done."],["Tool call","The model asks the app to run a function (here «get_order_status», «issue_refund»)."],["recursion_limit","LangGraph's cap on how many steps one run may take before it stops with an error."],["Context growth","Each step adds the tool result to the conversation, so every later call re-sends a longer prompt. Cost grows roughly quadratically."],["HTTP 429","\"Too many requests\": a rate limit. The right response is to wait and retry with backoff, then give up."],["Circuit breaker","A guard that stops calling a failing dependency for a while instead of hammering it."],["Budget guard","A hard limit on tokens or money per run, user or day."]],
+ pager:`[r]FIRING[/r]  LLM spend  refund-agent  [r]₹4.1 lakh[/r] in 9h (daily budget ₹30k)
+top run    conv_88a1f   [r]1,840 steps[/r]   3.9M input tokens
+runs > 50 steps: [r]212[/r] (normal: 0)
+provider   rate-limit headroom: 4%`,
+ brief:"The refund agent helps support agents resolve refund tickets. It's a LangGraph loop with tools to look up orders and issue refunds. Last week it was **migrated from a prebuilt AgentExecutor to a custom LangGraph graph**. Overnight, the Orders API was in a maintenance window.",
+ slack:[
+  {at:0, who:"arjun", t:"Why is our AI bill ₹4 lakh for one night?! The whole month's budget is ₹9 lakh."},
+  {at:5, who:"kai", t:"Let's look at the worst run first. What is it actually doing for 1,840 steps?", cmd:"langsmith runs get conv_88a1f --steps 6"},
+  {at:50, who:"dev", t:"Maybe Anthropic raised prices? I can switch us to a cheaper model in 5 minutes."},
+  {on:"loop", who:"kai", t:"Same tool, same error, again and again. What does the Orders API return when it's rate-limited, and how does our tool pass that back?", cmd:"cat agent/tools/orders.py"},
+  {on:"toolerr", who:"priya", t:"So the model reads \"please retry\" and dutifully retries, forever. But the graph should have stopped it long before step 1,840. What's the step limit?", cmd:"grep -n recursion_limit agent/graph.py"},
+  {on:"limit", who:"sana", t:"And no per-run budget either? We should be able to kill a run that costs more than a few rupees."}
+ ],
+ hints:["Look inside the most expensive run: which tool is called, and what does it return each time?","The tool turns an HTTP 429 into the text \"please retry\" and hands it to the model. What would a model do with that?","Every agent loop needs a hard stop: a step limit and a cost budget. Check the graph's recursion_limit."],
+ term:{host:"ai-ops", user:"oncall", suggest:["langsmith runs list --project refund-agent --sort cost --limit 3","curl -s orders-api/health"],
+  cmds:[
+  {m:["langsmith runs list"], out:`run_id      steps   input_tokens   cost(₹)   status
+conv_88a1f  [r]1840[/r]    3,912,004      [r]9,844[/r]     running
+conv_71c02  [r]1702[/r]    3,511,880      8,912     running
+conv_5e9b0  [r]1655[/r]    3,402,117      8,601     running
+[d]… 209 more runs with > 50 steps (normal p99: 9 steps)[/d]`, clue:"runaway", unlock:["langsmith runs get conv_88a1f --steps 6"]},
+  {m:["langsmith runs get"], out:`step 1838  tool_call  get_order_status(order_id="O-77120")
+step 1838  tool_out   "[y]Error: Orders API is busy (429). Please retry.[/y]"
+step 1839  llm        "The Orders API is busy. I'll retry checking the order status."
+step 1839  tool_call  get_order_status(order_id="O-77120")
+step 1839  tool_out   "[y]Error: Orders API is busy (429). Please retry.[/y]"
+step 1840  llm        "Retrying…"
+[d]prompt size at step 1840: 2,140 tokens of instructions + [r]1,838 prior steps[/r][/d]`, clue:"loop", unlock:["cat agent/tools/orders.py"]},
+  {m:["cat agent/tools/orders.py"], out:`@tool
+def get_order_status(order_id: str) -> str:
+    """Look up an order's status."""
+    r = requests.get(f"{ORDERS}/orders/{order_id}", timeout=5)
+    if r.status_code != 200:
+        [r]return f"Error: Orders API is busy ({r.status_code}). Please retry."[/r]
+    return r.text`, clue:"toolerr", unlock:["grep -n recursion_limit agent/graph.py"]},
+  {m:["grep -n recursion_limit agent/graph.py","grep recursion_limit","cat agent/graph.py"], out:`41:    # was AgentExecutor(max_iterations=15) before the migration
+42:    app = graph.compile(checkpointer=saver)
+57:    result = app.invoke(state, config={"[r]recursion_limit[/r]": [r]10_000[/r]})   # raised "so long chats don't crash"
+[d]-- no token or cost budget anywhere in the graph[/d]`, clue:"limit"},
+  {m:["curl -s orders-api/health","curl orders-api"], out:`{"status":"degraded","reason":"[y]scheduled maintenance 23:00–05:00, rate limit 5 req/s[/y]"}`, clue:"maint"},
+  {m:["curl -s llm-gateway/pricing","curl llm-gateway"], out:`model claude-sonnet   input $3 / MTok   output $15 / MTok   [d](unchanged since June)[/d]`, note:"Prices didn't change. The bill grew because the token volume exploded."},
+  {m:["kubectl get pods"], out:`NAME                      READY   STATUS    RESTARTS   AGE
+refund-agent-7f9c-x81kd   1/1     Running   0          6d
+refund-agent-7f9c-q2m7w   1/1     Running   0          6d`, note:"Pods are healthy. The agent isn't crashing; it's looping."}
+ ]},
+ dash:[
+  {title:"LLM spend per hour (₹)", x:["22:00","23:00","00:00","01:00","02:00","03:00","04:00","05:00","06:00"], series:[{name:"₹/h", v:[1100,9800,31000,48000,62000,71000,78000,80000,21000]}], marks:[{i:1, label:"Orders API maintenance"}], clue:"spend"},
+  {title:"Steps per run (p99)", x:["22:00","23:00","00:00","01:00","02:00","03:00","04:00","05:00","06:00"], series:[{name:"p99 steps", v:[9,140,520,880,1190,1420,1650,1840,1840]}], marks:[{i:1, label:"maintenance"}], clue:"runaway"},
+  {title:"LLM latency p95 (s)", unit:"s", x:["22:00","23:00","00:00","01:00","02:00","03:00","04:00","05:00","06:00"], series:[{name:"p95", v:[3.1,3.4,4.8,6.2,7.9,9.1,9.8,10.2,4.0]}], note:"Latency rose because prompts got huge. That's a consequence, not the cause."},
+  {title:"Tickets resolved per hour", x:["22:00","23:00","00:00","01:00","02:00","03:00","04:00","05:00","06:00"], series:[{name:"resolved", v:[44,6,0,0,0,0,0,0,31]}], note:"Nothing got resolved during the window, as expected when no tool works. It shows the impact, not the mechanism."}
+ ],
+ ui:[
+  {title:"Trace tree · conv_88a1f", md:`| Step | Node | Tokens in | Cost ₹ |
+|---|---|---|---|
+| 1 | agent → get_order_status | 2,310 | 0.6 |
+| 100 | agent → get_order_status | 41,200 | 10.4 |
+| 1000 | agent → get_order_status | 402,880 | 101 |
+| 1840 | agent → get_order_status | **740,112** | **186** |`, clue:"context"}
+ ],
+ files:[
+  {path:"agent/graph.py", meta:"migrated from AgentExecutor last week", text:`graph = StateGraph(State)
+graph.add_node("agent", call_model)
+graph.add_node("tools", ToolNode([get_order_status, issue_refund]))
+graph.add_edge(START, "agent")
+graph.add_conditional_edges("agent", tools_condition)
+graph.add_edge("tools", "agent")
+app = graph.compile(checkpointer=saver)
+
+def handle(ticket):
+    state = {"messages": [system_prompt, ticket]}
+    return app.invoke(state, config={"recursion_limit": 10_000})`, clues:{11:"limit"}, notes:{6:"tools → agent is the normal ReAct loop. The edge is fine; what's missing is a limit."}}
+ ],
+ clues:{
+  runaway:"212 runs took 50+ steps overnight (the worst: 1,840; normal p99: 9)",
+  loop:"The worst run calls get_order_status on the same order over and over",
+  toolerr:"The tool turns HTTP 429 into the text \"Please retry.\" and returns it to the model",
+  limit:"recursion_limit was raised to 10,000 (the old AgentExecutor stopped at 15) and there's no cost budget",
+  maint:"The Orders API was in maintenance (23:00–05:00) with a 5 req/s rate limit",
+  spend:"Spend rose from ~₹1k to ~₹80k per hour from the start of the maintenance window",
+  context:"Each step re-sends the whole history: 740k input tokens per call by step 1,840"
+ },
+ cause:{q:"What's the root cause?", o:[
+  {t:"During the Orders API's rate-limited maintenance, the tool told the model \"please retry\", so it retried forever. The new graph had no real step limit (10,000) and no cost budget, and the context grew with every step", ok:true},
+  {t:"The LLM provider raised prices", ok:false, why:"Pricing is unchanged; token volume exploded.", say:[["kai","Price per token hasn't changed since June. We sent 300× more tokens."]]},
+  {t:"The model is hallucinating", ok:false, why:"It's doing exactly what the tool told it to: retry. The design is the problem.", say:[["priya","It's not hallucinating. The tool literally says \"Please retry\", and nothing ever tells it to stop."]]},
+  {t:"A traffic spike of refund tickets", ok:false, why:"Tickets were normal; each run just never ended.", say:[["arjun","Ticket volume was a normal Tuesday night. It's the steps per run that went crazy."]]}
+ ]},
+ fix:{q:"What do you ship? Pick every action you'd take.", o:[
+  {t:"Set a sane step limit (e.g. recursion_limit ≈ 25) plus a per-run token/₹ budget that ends the run with a handoff to a human", kind:"must", why:"Every agent loop needs a hard stop. Runaway runs cost a few rupees, not thousands.", miss:[["kai","Retries are handled in the tool now, but there's still no ceiling. Any new failure mode can loop to step 10,000 again."]]},
+  {t:"Handle 429/5xx inside the tool: retry with backoff a few times, then return a structured, final error (\"orders unavailable, escalate\")", kind:"must", why:"Retrying is the tool's job, not the model's. The model should get a clear \"stop and escalate\" signal.", miss:[["priya","The limit stops runs at 25 steps, good, but every ticket during an outage now burns 25 LLM calls retrying uselessly. Retry belongs in the tool."]]},
+  {t:"Kill the currently running runaway runs", kind:"good", why:"Stops the bleeding right now: 212 runs are still spending."},
+  {t:"Alerts on cost per hour and on steps per run (p99), plus a circuit breaker on the Orders API", kind:"good", why:"You'd catch it within the hour, and the agent stops calling a dead API."},
+  {t:"Add an eval: \"tool keeps failing\" must end in a handoff within N steps", kind:"good", why:"Locks the behaviour in so the next refactor can't remove it."},
+  {t:"Switch to a cheaper model", kind:"meh", why:"Makes each loop iteration cheaper. The loop still never ends."},
+  {t:"Ask the Orders team to remove their rate limit", kind:"bad", why:"The agent would hammer a system in maintenance even harder, and still loop on the next error.", say:[["dev","Orders team removed the limit… the agent sent 40k requests in 5 minutes and knocked the Orders API over. Now *checkout* status lookups are failing too. 😬"]]},
+  {t:"Remove the get_order_status tool for now", kind:"bad", why:"Without order data, the agent guesses refund eligibility or refunds blindly.", say:[["arjun","The agent just issued 37 refunds without checking order status — including on orders that were never paid. Put the tool back!!"]]}
+ ]},
+ post:{
+  summary:"The refund agent spent **₹4.1 lakh in 9 hours** (daily budget ₹30k). 212 runs looped for up to 1,840 steps while the Orders API was rate-limited for maintenance.",
+  cause:"Three design gaps met one ordinary event. (1) «get_order_status» turned HTTP 429 into the text \"*Please retry.*\" and returned it to the model, which reasonably retried. (2) The LangGraph migration set «recursion_limit=10_000». The old AgentExecutor stopped at 15, and there was **no token or cost budget**. (3) Every step re-sent the full history, so prompts reached **740k tokens** per call and cost grew roughly quadratically.",
+  prevent:["Hard step limit + per-run budget with a human handoff, enforced in the graph","Tools own their retries (backoff, max attempts) and return structured terminal errors","Circuit breakers on downstream APIs","Cost/steps alerts and a 'failing tool' eval in CI"]
+ },
+ learned:["Agents need **hard stops**: max steps, max tokens/₹ per run, then hand off to a human.","**Retries belong in the tool** (with backoff), not in the model's reasoning.","Cost per step grows with the **context**. Long loops get expensive fast.","Migrations can silently drop safety defaults (max_iterations=15 → 10,000)."]
+}
+]);
