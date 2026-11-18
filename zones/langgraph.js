@@ -111,7 +111,7 @@ Define separate **input**, **output** and **private** state schemas so callers o
  ["tf","Flow truths",[["Each Send can carry a different input state.",true,"That's the point."],["Interrupts inside subgraphs are invisible to the parent.",false,"They surface to the caller."]]]
 ]},
 {act:"Expert", t:"Memory, time travel & deployment", sub:"Store, forking, double-texting", rounds:[
- ["learn","Long-term memory with the Store","The **Store** is a key-value store with **namespaces** (e.g. «("memories", user_id)»), shared across threads. With an embedding index configured, «store.search(namespace, query=…)» does **semantic search** over memories.",null,null,`### Memory patterns
+ ["learn","Long-term memory with the Store","The **Store** is a key-value store with **namespaces** (e.g. «('memories', user_id)»), shared across threads. With an embedding index configured, «store.search(namespace, query=…)» does **semantic search** over memories.",null,null,`### Memory patterns
 - **Semantic**: facts about the user ("prefers Hindi replies").
 - **Episodic**: past successful interactions as few-shot examples.
 - **Procedural**: updated instructions/prompts the agent refines over time.
