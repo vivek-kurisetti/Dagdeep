@@ -103,7 +103,7 @@ Write concern «{w: 'majority', j: true}» = durable on a majority. **Causal con
  ["tf","Replication truths",[["An $inc is replicated as $inc.",false,"Converted to an idempotent $set."],["A small oplog window risks expensive initial syncs.",true,"Size it generously."]]]
 ]},
 {act:"Expert", t:"Sharding deep", sub:"Ranges, balancer, zones, resharding", rounds:[
- ["learn","Ranges, the balancer and targeting","A sharded collection's data is divided into **ranges** (formerly "chunks") by shard key. The **balancer** moves ranges between shards to even out **data size** (MongoDB 7.0+ balances by data size rather than chunk count; auto-splitting was removed). mongos routes using the cached routing table.",null,null,`### Operations and targeting
+ ["learn","Ranges, the balancer and targeting","A sharded collection's data is divided into **ranges** (formerly chunks) by shard key. The **balancer** moves ranges between shards to even out **data size** (MongoDB 7.0+ balances by data size rather than chunk count; auto-splitting was removed). mongos routes using the cached routing table.",null,null,`### Operations and targeting
 - Queries with the **full shard key** (or a prefix for ranged keys) → targeted to one shard.
 - Without it → **scatter-gather** to all shards, merged on mongos.
 - Single-document updates/deletes by «_id» in a collection sharded on another key → broadcast or need the shard key (recent versions relax this but targeting is still faster).
