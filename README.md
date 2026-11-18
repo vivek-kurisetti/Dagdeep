@@ -10,6 +10,7 @@ Live site: https://vivek0803.github.io/Dagdeep/
 - **Zones** have a short story mission, a path of levels that unlock in order, and a **card deck** of every concept you've collected.
 - **Levels** have 3 hearts, a streak multiplier, and a feedback sheet after every round that teaches the why. Stars = hearts left.
 - **Round types:** concept power-up, pick, sort (one card at a time into buckets), order the steps, match pairs, fill the code blanks, spot the bug, and true/false speed rounds.
+- **Expert tier** in every zone: 4–6 extra levels on internals, numbers and failure modes, with **deep cards** (a "Go deeper" panel with full explanations, tables and code) and **calculation rounds** where you work out real numbers (RCUs, KV cache size, error budgets…), ending in an expert boss.
 - **Boss levels** add a timer to every round. Spark also has 8 arcade levels (Plan or Run?, Partition Packer, Shuffle Hunter, Hash Router, Join Duel, Skew Smasher, Executor Fit, The Nightly Job).
 
 ### Data Engineering world
@@ -49,9 +50,12 @@ QUEST.zone("kafka", {
       ["match", "Prompt", [["term", "meaning"], ["term2", "meaning2"], ["term3", "meaning3"]], "why"],
       ["fill", "Prompt", "code with ___ blanks", ["answer1"], ["decoy"], "why"],
       ["bug", "Prompt", ["line 1", "line 2"], 1, "why"],
-      ["tf", "Prompt", [["statement", true, "why"]]]
+      ["tf", "Prompt", [["statement", true, "why"]]],
+      ["num", "Question?", 42, 0.5, "unit", "why"],   // answer, tolerance
+      ["learn", "Deep card", "Short body", null, null, `Deep text: ### headings, - bullets, | tables |, ~~~ code`]
     ]},
     {t: "Boss", boss: true, time: 30, rounds: [/* ... */]},
+    {act: "Expert", t: "Expert level", rounds: [/* ... */]},   // or append later with QUEST.more(id, [levels])
     {t: "Arcade", arcade: "planOrRun"}
   ]
 });

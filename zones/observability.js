@@ -35,3 +35,89 @@ levels:[
  ["pick","Logs contain customer card numbers. Fix?",["Redact PII before export","Keep logs 7 days","Encrypt dashboards only","Disable tracing"],0,"Never store what you don't need."]
 ]}
 ]});
+
+QUEST.more("observability", [
+{act:"Expert", t:"OpenTelemetry for GenAI deep", sub:"Spans, attributes, content capture", rounds:[
+ ["learn","GenAI semantic conventions","OpenTelemetry's GenAI conventions define how to describe model calls, agent runs and tool executions as **spans**, plus **metrics** and optional **events** for prompts/completions.",null,null,`### Spans
+- Model call spans named like «chat {model}» with attributes such as «gen_ai.operation.name» (chat, embeddings, …), «gen_ai.request.model», «gen_ai.response.model», «gen_ai.request.temperature», «gen_ai.request.max_tokens», «gen_ai.usage.input_tokens», «gen_ai.usage.output_tokens», «gen_ai.response.finish_reasons».
+- Agent spans for invoking agents and executing tools («execute_tool {tool}»), nested under your request span.
+- Request vs response model matters: an alias like "latest" can resolve to a different concrete model.
+
+### Content capture
+Prompt and completion **contents are opt-in** (they may contain PII/secrets). Capture them only where allowed, redact in the collector (processors), or store content in a separate, access-controlled system referenced by id.
+
+### Metrics
+Histograms like client **token usage** and **operation duration** let you chart p50/p95 latency and tokens by model and operation without storing every trace.
+
+### Instrumentation
+Auto-instrumentation libraries (OpenLLMetry, OpenInference, vendor SDKs) wrap provider SDKs and frameworks; export via OTLP to any backend (Langfuse, Phoenix, Datadog, Grafana Tempo, Honeycomb…). The OTel Collector handles batching, sampling, redaction and routing.`],
+ ["match","Attribute",[["gen_ai.request.model","Model you asked for"],["gen_ai.response.model","Model that actually answered"],["gen_ai.usage.output_tokens","Generated tokens"],["gen_ai.response.finish_reasons","Why generation stopped"],["gen_ai.operation.name","chat, embeddings, execute_tool…"]],"Standard names make dashboards portable."],
+ ["pick","Quality shifted though you never changed code; spans show request model 'x-latest' but a new response model value. Meaning?",["The provider alias now points to a different model version","Tracing bug","Cache hit","Temperature drift"],0,"Pin versions; alert on response model changes."],
+ ["sort","Default capture or opt-in only?",{"Capture by default":["Token counts","Latency","Model names","Finish reasons","Error types"],"Opt-in with redaction":["Full prompt text","Full completion text","Tool arguments containing customer data"]},"Metadata freely, content carefully."],
+ ["tf","OTel truths",[["Prompt contents should always be stored in traces.",false,"Opt-in; redact sensitive data."],["The OTel Collector can redact attributes before export.",true,"Processors."]]]
+]},
+{act:"Expert", t:"Sampling & telemetry cost", sub:"Head vs tail sampling", rounds:[
+ ["learn","Keep the interesting traces","**Head sampling** decides at the start (e.g. keep 10%) — cheap but blind. **Tail sampling** decides after the trace completes — keep all errors, slow requests, low eval scores, negative feedback, and a small random sample of the rest.",null,null,`### Sizing telemetry
+Estimate: requests/day × spans/request × bytes/span. LLM spans with content are large (prompts can be tens of KB). Store full content for a short retention, keep metrics and metadata longer.
+
+### Practical policy
+- 100% of errors and guardrail blocks.
+- 100% of traces with negative feedback or low online-eval scores.
+- p99 latency outliers.
+- 1–10% random baseline for trends and evals.
+- Truncate very long payloads (keep head and tail) and store references for full documents.
+
+### Correlation
+Propagate trace ids into logs and user-facing request ids so support tickets map to traces. Attach conversation/session ids for multi-turn analysis.`],
+ ["num","50,000 conversations/day × 8 spans each × 4 KB per span. Telemetry per day in GB (1 GB = 10⁶ KB)?",1.6,0.05,"GB","50,000 × 8 × 4 KB = 1,600,000 KB = 1.6 GB/day before any content capture."],
+ ["sort","Keep with tail sampling?",{"Keep":["Trace ending in a 500 error","Trace with thumbs-down feedback","p99.9 latency trace","Guardrail-blocked request"],"Sample down":["Ordinary successful fast request","Health-check traffic"]},"Spend storage on what you'll investigate."],
+ ["pick","Head sampling at 5% means you rarely have traces for user-reported errors. Fix?",["Tail sampling that keeps all errors and flagged traces","Raise to 100% forever","Turn off tracing","Log only metrics"],0,"Decide after the outcome is known."],
+ ["tf","Sampling truths",[["Head sampling can keep all error traces reliably.",false,"It decides before knowing the outcome."],["Metrics can be computed on 100% of traffic even if traces are sampled.",true,"Aggregate before sampling."]]]
+]},
+{act:"Expert", t:"SLOs for LLM products", sub:"Latency, availability, quality budgets", rounds:[
+ ["learn","Define SLOs users feel","Classic SLOs (availability, latency) still apply, measured at the right points: **TTFT p95** for chat, **end-to-end p95** for agent tasks, **success rate** including provider 429/5xx after retries. Add **quality SLOs** from online evals and feedback.",null,null,`### Examples
+- Availability: 99.5% of chat requests return a non-error response (after retries/fallbacks) per 30 days.
+- Latency: p95 TTFT < 1.5 s; p95 full answer < 8 s.
+- Quality: ≥ 92% of sampled answers pass the faithfulness judge per week; thumbs-down rate < 4%.
+- Cost: median cost per resolved conversation < ₹2.
+
+### Error budgets
+99.5% availability over 30 days allows 0.5% failures: for 3 million requests, 15,000 failed requests. Burn-rate alerts (fast and slow windows) catch incidents early without paging on noise.
+
+### Dependencies
+Provider outages and rate limits are part of your SLO. Mitigate with retries + backoff, **fallback models/providers** through a gateway, graceful degradation (cached answers, smaller model), and queueing for non-interactive work.
+
+### Quality SLO caveats
+Judges drift too: monitor judge agreement with periodic human samples. Segment by language, customer tier and feature.`],
+ ["num","SLO 99.5% success over 30 days; 3,000,000 requests. Allowed failed requests in the error budget?",15000,0,"requests","0.5% × 3,000,000 = 15,000."],
+ ["match","SLO type",[["p95 TTFT < 1.5 s","Perceived responsiveness of chat"],["Faithfulness pass rate ≥ 92%","Quality from sampled online evals"],["99.5% non-error responses","Availability including provider failures"],["Cost per resolved conversation","Efficiency"]],"Users feel latency, correctness and failures."],
+ ["pick","Provider returns 429s at peak and your availability SLO burns. Best mitigation?",["Gateway with retries/backoff + fallback model + request queueing","Disable retries","Bigger prompts","Lower SLO silently"],0,"Engineer around dependency limits."],
+ ["tf","SLO truths",[["Average latency is a good SLO metric.",false,"Use percentiles."],["Quality SLOs need monitoring of the judge itself.",true,"Judges drift."]]]
+]},
+{act:"Expert", t:"Cost & capacity engineering", sub:"Caching, routing, batch, limits", rounds:[
+ ["learn","Model the bill","Cost = Σ (input tokens × input price + cached input × cache price + output tokens × output price) per model. Track it per feature, tenant and conversation. Biggest levers: **prompt caching**, **routing** to smaller models, **trimming context**, **batch APIs** for offline work, and **output length** control.",null,null,`### Rate limits
+Providers limit requests per minute and tokens per minute (often input and output separately). Plan capacity: peak RPM × average tokens; reserve headroom; queue background jobs; spread across regions/providers if allowed.
+
+### Gateways
+An LLM gateway (e.g. LiteLLM, Portkey, cloud-native gateways) centralizes keys, retries, fallbacks, budgets per team, caching, and logging — one place to enforce spend limits and observe usage.
+
+### Caching metrics
+Monitor **cache hit rate** (cached input tokens ÷ total input). Low hit rate usually means the prefix varies (timestamps, user names early in the prompt) or calls are spaced beyond the cache TTL.
+
+### Worked example
+1M input tokens/day at $3/M; 70% served from cache at 0.1× price: 0.3 × $3 + 0.7 × $0.30 = $0.90 + $0.21 = **$1.11/day** vs $3.00 — a 63% cut on input.`],
+ ["num","1M input tokens/day at $3/M; 70% are cache hits billed at 0.1×. Daily input cost in USD (2 decimals)?",1.11,0.01,"USD","0.3 × $3 + 0.7 × $0.30 = $1.11."],
+ ["sort","Cuts cost without hurting quality (usually)?",{"Usually safe":["Prompt caching of stable prefixes","Batch API for nightly classification","Trimming irrelevant retrieved chunks"],"Needs evals first":["Routing everything to the smallest model","Halving max_tokens","Removing few-shot examples"]},"Some savings are free; others need measurement."],
+ ["pick","Cache hit rate is 4% despite a 30k-token shared system prompt. Likely cause?",["Something variable (timestamp/user name) sits early in the prefix","Too few users","Wrong region","Streaming enabled"],0,"Move variable content to the end."],
+ ["tf","Cost truths",[["Batch APIs are suitable for real-time chat.",false,"They trade latency for price."],["A gateway can enforce per-team budgets.",true,"Central control point."]]]
+]},
+{act:"Expert", t:"Expert boss: Observability on-call", boss:true, time:45, rounds:[
+ ["pick","Answers changed overnight; spans show a new response model under the same alias. Fix?",["Pin explicit model versions and alert on response model changes","Ignore","Lower temperature","Clear caches"],0,"Version drift."],
+ ["pick","Traces for reported failures are missing due to 5% head sampling. Fix?",["Tail sampling keeping errors/feedback/outliers","100% forever","Disable sampling of metrics","Logs only"],0,"Outcome-aware sampling."],
+ ["pick","Compliance flags full prompts with card data in the tracing backend. Fix?",["Redact in SDK/collector; make content capture opt-in","Shorter retention only","Encrypt dashboards","Disable tracing"],0,"Don't collect what you can't keep."],
+ ["pick","Error budget burned 40% in one hour from provider 5xx. First move?",["Fail over to fallback model/provider via gateway","Page the data team","Retrain","Lower SLO"],0,"Mitigate dependency failure."],
+ ["pick","Daily cost doubled; one tenant's tokens 10×. Next?",["Per-tenant budgets/rate limits; investigate their usage pattern","Raise global quota","Disable caching","Ignore"],0,"Attribute and cap."],
+ ["pick","Faithfulness SLO dipped only for Telugu queries. Next?",["Segment traces, inspect retrieval/eval for that language","Global prompt rewrite","Raise temperature","Ignore small segments"],0,"Segment analysis."],
+ ["pick","p95 TTFT high; traces show 2 s spent before the LLM call in guardrails. Fix?",["Run guardrails in parallel with retrieval / faster classifier","Remove all guardrails","Bigger LLM","More logs"],0,"Fix the slowest span first."]
+]}
+]);

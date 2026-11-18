@@ -47,3 +47,119 @@ levels:[
  ["pick","PR reviews should run automatically in GitHub Actions. Use…",["claude -p with --output-format json and limited tools","Interactive mode","/compact","A subagent only"],0,"Headless mode."]
 ]}
 ]});
+
+QUEST.more("claudecode", [
+{act:"Expert", t:"The agent loop & context", sub:"Tools, thinking, checkpoints", rounds:[
+ ["learn","How Claude Code works a task","Claude Code runs an agent loop: read context (CLAUDE.md, your message), plan, call tools (Read, Grep, Glob, Edit, Write, Bash, WebFetch/WebSearch, subagents, MCP tools), observe results, repeat. Everything it reads costs **context**.",null,null,`### Watching context
+- «/context» shows what fills the window (system, tools, MCP tool definitions, memory files, messages).
+- MCP servers with many tools can eat thousands of tokens before you type — disable unused servers.
+- Auto-compaction summarizes when the window fills; «/compact focus on the migration plan» lets you steer what's kept.
+- «/clear» between unrelated tasks beats one endless session.
+
+### Thinking and planning
+- **Plan mode** (Shift+Tab to cycle modes) lets Claude explore and propose a plan without editing files.
+- Asking it to "think" more allocates more reasoning for hard problems; use it for architecture decisions and tricky bugs, not trivial edits.
+
+### Safety nets
+- **Checkpoints**: file edits are checkpointed; rewind code and/or conversation (Esc Esc or «/rewind») to undo a wrong direction. Checkpoints don't undo external side effects (database writes, deployments, pushes).
+- Git remains the real safety net: commit before big changes.
+
+### Effective prompting
+Give verifiable goals ("make tests in payments/ pass; don't change the public API"), point to files with «@path», ask for tests first (TDD), and let it iterate against tests or screenshots.`],
+ ["sort","Good habit or anti-pattern?",{"Good habit":["/clear between unrelated tasks","Plan mode before a large refactor","Giving a test command to verify against","Disabling unused MCP servers"],"Anti-pattern":["One 8-hour session for everything","Relying on rewind to undo a database migration","Vague goals like 'make it better'"]},"Context and verifiability drive quality."],
+ ["pick","Rewind restored the code, but the staging DB still has the bad migration. Why?",["Checkpoints only track file edits, not external side effects","Rewind is broken","Git conflict","Plan mode was on"],0,"Undo external changes yourself."],
+ ["match","Command / key",[["/context","See what's consuming the context window"],["/compact <focus>","Summarize while keeping chosen details"],["Shift+Tab","Cycle permission modes incl. plan mode"],["Esc Esc / /rewind","Restore an earlier checkpoint"],["@path","Pull a file into context"]],"Daily drivers."],
+ ["tf","Loop truths",[["MCP tool definitions consume context even if unused.",true,"Disable servers you don't need."],["Checkpoints replace git.",false,"Commit regularly."]]]
+]},
+{act:"Expert", t:"Skills in depth", sub:"Progressive disclosure engineering", rounds:[
+ ["learn","Three loading levels","**Level 1**: the skill's «name» + «description» are always in context (small). **Level 2**: the SKILL.md body loads when the task matches. **Level 3+**: referenced files (reference docs, templates) are read only when needed, and **scripts are executed** — their code doesn't need to enter context, only their output.",null,null,`### Frontmatter rules
+- «name»: lowercase letters, numbers and hyphens, up to 64 characters.
+- «description»: up to 1,024 characters; say **what it does and when to use it**, with trigger words users actually say.
+- In Claude Code, «allowed-tools» can restrict which tools the skill may use without asking.
+
+### Writing good skills
+- Keep SKILL.md focused (a few hundred lines at most); move details to reference files linked **one level deep** («see reference/iceberg-procedures.md»).
+- Prefer **scripts** for deterministic, fragile or repetitive work (validation, parsing, file generation) — reliable and token-cheap.
+- Give a workflow checklist and **feedback loops** ("run scripts/validate.py; fix errors; repeat").
+- Provide examples of inputs/outputs; avoid explaining things the model already knows.
+- Test with real tasks and watch which files it reads.
+
+### Where skills come from
+Personal («~/.claude/skills/»), project («.claude/skills/», committed), and **plugins**. Skills are model-invoked; slash commands are user-invoked; subagents run in separate contexts; MCP connects external systems — they combine well.`],
+ ["fill","A well-formed skill header",'---\nname: ___\ndescription: ___\n---\n# Iceberg maintenance\n1. Run scripts/health.py <table> and read the report\n2. Follow reference/procedures.md for compaction options',["iceberg-maintenance","Compacts small files, expires snapshots and removes orphans on Iceberg tables. Use when asked to maintain, clean up or speed up lake tables."],["Iceberg Maintenance!","Helps with data"],"Lowercase-hyphen name; description says what and when."],
+ ["pick","A skill must validate 200 YAML configs exactly the same way every time. Best design?",["A script in the skill that Claude runs, with SKILL.md describing when/how","Long instructions describing every rule","A subagent","A hook"],0,"Deterministic work → scripts."],
+ ["order","How a skill gets used",["Startup: only name + description are loaded","User asks for a matching task","Claude reads the SKILL.md body","It opens a referenced file only if needed","It runs bundled scripts and uses their output"],"Progressive disclosure keeps context lean."],
+ ["tf","Skill truths",[["Script source code must be read into context to run it.",false,"Only its output enters context."],["Deeply nested reference chains are recommended.",false,"Keep references one level deep."]]]
+]},
+{act:"Expert", t:"Subagents & orchestration", sub:"Delegation patterns", rounds:[
+ ["learn","Delegation done right","Claude Code can spawn **subagents** (built-in ones like a general-purpose agent and a read-only explorer, plus your own in «.claude/agents/»). Each runs in its own context with its own system prompt and tool set, then returns a **summary**. Several can run in **parallel**.",null,null,`### Patterns
+- **Explore → plan → implement**: an explorer subagent maps the codebase; the main agent plans; implementation happens in the main context.
+- **Fan-out research**: parallel subagents investigate separate modules/services and report findings.
+- **Independent review**: a reviewer subagent with read-only tools critiques a diff with fresh eyes (no bias from having written it).
+- **Test runner**: runs noisy test suites and returns only failures + likely causes.
+
+### Writing subagent definitions
+- A sharp «description» (when to delegate — include "use proactively after…" if you want automatic delegation).
+- Minimal «tools» list; read-only for reviewers/explorers.
+- «model»: cheaper/faster models for search tasks, stronger ones for reasoning.
+- A system prompt with output format ("return: findings, files, confidence").
+
+### Costs
+Each subagent consumes its own tokens. Parallel fan-out is faster but multiplies spend — use it for breadth, not for small edits.`],
+ ["match","Pattern",[["Read-only explorer","Map an unfamiliar codebase without edits"],["Reviewer subagent","Fresh-eyes critique of a diff"],["Parallel investigators","Check 6 services for a deprecated API at once"],["Test runner subagent","Return only failures from a noisy suite"]],"Delegate to protect the main context."],
+ ["pick","The main session fills with 40k tokens of grep output while exploring. Better?",["Delegate exploration to a subagent that returns a summary","Increase context","Use /clear mid-task","Disable Grep"],0,"Context isolation."],
+ ["sort","Delegate or do it in the main thread?",{"Delegate":["Survey 30 files for a pattern","Independent security review","Long-running test triage"],"Main thread":["Small edit you're already looking at","Decision that needs the whole conversation context"]},"Delegation trades tokens for focus."],
+ ["tf","Subagent truths",[["Subagents share the main agent's context window.",false,"Each has its own."],["A subagent's tools list can be narrower than the main agent's.",true,"Least privilege."]]]
+]},
+{act:"Expert", t:"Hooks & policy in depth", sub:"Inputs, outputs, precedence", rounds:[
+ ["learn","Hook input and output","Hooks receive JSON on **stdin**: session id, transcript path, current directory, event name, and for tool events «tool_name» and «tool_input» (plus «tool_response» for PostToolUse). **Matchers** select tools by name or regex («Edit|Write», «Bash», «mcp__github__.*»).",null,null,`### Controlling behaviour
+- **Exit code 0**: success; stdout is shown in transcript mode (for UserPromptSubmit and SessionStart, stdout is **added to Claude's context**).
+- **Exit code 2**: blocking error — stderr goes to Claude (PreToolUse: the tool call is blocked; Stop: Claude is told to continue).
+- Other codes: non-blocking error shown to the user.
+- **JSON output** for finer control, e.g. PreToolUse can return a permission decision (allow / deny / ask) with a reason; Stop hooks can block stopping with a reason.
+
+### Examples
+- PreToolUse on «Bash»: deny commands matching «rm -rf», «terraform apply», or reading «.env».
+- PostToolUse on «Edit|Write»: run the formatter/linter; feed errors back with exit 2.
+- Stop: run the test suite; if it fails, exit 2 with the failures so Claude keeps working.
+- SessionStart: print the current sprint's open tickets to give context.
+
+### Settings precedence
+Enterprise **managed policy** settings override everything; then command-line flags; then **local project** («.claude/settings.local.json»); then **shared project** («.claude/settings.json»); then **user** («~/.claude/settings.json»). Deny rules win over allow rules.`],
+ ["order","Settings precedence, highest first",["Enterprise managed policy","Command-line arguments","Local project settings (.claude/settings.local.json)","Shared project settings (.claude/settings.json)","User settings (~/.claude/settings.json)"],"Admins can enforce policy that users can't override."],
+ ["bug","Which hook script fails to block the dangerous command?",["cmd=$(jq -r '.tool_input.command')","if echo \"$cmd\" | grep -q 'terraform apply'; then","  echo 'Blocked: use the deploy pipeline' >&2; exit 1","fi"],2,"Exit code 1 is a non-blocking error. Use exit 2 to block a PreToolUse call."],
+ ["match","Hook event → typical job",[["UserPromptSubmit","Add context or block prompts with secrets"],["PreToolUse","Allow/deny/ask before a tool runs"],["PostToolUse","Lint/format/test after edits"],["Stop","Refuse to finish until tests pass"],["PreCompact","Save notes before compaction"]],"Deterministic guardrails."],
+ ["tf","Hook truths",[["SessionStart hook stdout can be added to Claude's context.",true,"Useful for dynamic context."],["A local project setting can override an enterprise managed policy.",false,"Managed policy wins."]]]
+]},
+{act:"Expert", t:"Automation & the Agent SDK", sub:"Headless, CI, SDK, sandboxing", rounds:[
+ ["learn","Claude Code beyond the terminal","**Headless mode** («claude -p») runs a single task non-interactively with JSON or streaming JSON output, pre-approved tools and a max turn count. The **Claude Agent SDK** (Python/TypeScript) exposes the same agent harness — tools, context management, permissions, hooks, subagents, MCP — for building your own agents.",null,null,`### CI patterns
+- PR review: «claude -p "review this diff for security issues" --output-format json --allowedTools "Read,Grep,Glob"».
+- Issue triage, changelog drafting, migration batches across many repos (fan out one headless run per repo).
+- GitHub Actions integration responds to @-mentions in issues/PRs.
+- Always: least-privilege tools, no production credentials, explicit turn/time limits, and human review of changes.
+
+### Agent SDK basics
+- A «query()» call runs the agent loop and streams messages; a client object supports multi-turn sessions.
+- Configure: system prompt, allowed/disallowed tools, permission mode, MCP servers, custom in-process tools, hooks, subagents, working directory.
+- Use it for non-coding agents too (support, research, ops) — the harness handles context compaction and tool execution.
+
+### Sandboxing
+Claude Code can run Bash inside a **sandbox** with filesystem and network isolation (allowed paths and domains), cutting permission prompts while containing damage from mistakes or prompt injection in repo files.
+
+### Repo-borne injection
+Files in a repo (README, CLAUDE.md in a dependency, issue text) can contain instructions. Treat untrusted repos with restricted permissions and sandboxing.`],
+ ["fill","A locked-down CI review run",'claude -p "Review the diff in PR #42 for SQL injection" \\\n  --output-format ___ \\\n  --allowedTools "___" \\\n  --max-turns 10',["json","Read,Grep,Glob"],["text","Bash,Write,Edit","yaml"],"Read-only tools for a review bot."],
+ ["sort","Headless/SDK fit or interactive fit?",{"Headless / SDK":["Nightly dependency-upgrade PRs across 40 repos","PR review bot in CI","Custom support agent with company tools"],"Interactive":["Exploring a new codebase with a teammate","Designing an architecture change with back-and-forth"]},"Automation vs collaboration."],
+ ["pick","Running Claude Code on an untrusted open-source repo. Safest setup?",["Sandboxed Bash, restricted tools, no secrets in environment","bypassPermissions for speed","Admin cloud credentials","Auto-approve everything"],0,"Contain prompt injection risks."],
+ ["tf","Automation truths",[["The Agent SDK exposes the same harness as Claude Code.",true,"Tools, context management, permissions, MCP."],["CI runs should use production credentials for convenience.",false,"Least privilege, always."]]]
+]},
+{act:"Expert", t:"Expert boss: Platform team rollout", boss:true, time:45, rounds:[
+ ["pick","Sessions start with 30k tokens used before any prompt. Check…",["/context: MCP tool definitions and memory files","Model size","Network","Git"],0,"Trim always-loaded context."],
+ ["pick","Org must forbid reading secrets everywhere, overriding user settings. Use…",["Enterprise managed policy settings with deny rules","CLAUDE.md note","A skill","User settings"],0,"Highest precedence."],
+ ["pick","A PreToolUse hook prints an error but the command still runs. Fix?",["Exit with code 2 (or return a deny decision)","Exit 1","Print to stdout","Sleep"],0,"Blocking semantics."],
+ ["pick","Skill rarely triggers; description is 'Utilities'. Fix?",["Describe what it does and when, with trigger words","Longer body","Rename folder","Add scripts"],0,"Descriptions drive matching."],
+ ["pick","Exploring 200 files floods context. Use…",["Read-only explorer subagent returning a summary","/compact every minute","Bigger model","WebSearch"],0,"Context isolation."],
+ ["pick","Weekly upgrades across 40 repos should run unattended. Use…",["Headless claude -p or the Agent SDK with limited tools","Interactive sessions","Plan mode","A hook"],0,"Automation."],
+ ["pick","Untrusted repo contains instructions in its README targeting agents. Mitigate…",["Sandbox + restricted permissions + human review","Trust it","bypassPermissions","Delete README only"],0,"Repo-borne injection."]
+]}
+]);
