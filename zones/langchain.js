@@ -38,3 +38,90 @@ levels:[
  ["pick","RAG chain needs both context and the question in the prompt. Use…",["{'context': retriever | fmt, 'question': RunnablePassthrough()}","Two separate chains","with_structured_output","bind_tools"],0,"Parallel map into the prompt."]
 ]}
 ]});
+
+QUEST.more("langchain", [
+{act:"Expert", t:"Runnable internals", sub:"Config, branching, events", rounds:[
+ ["learn","RunnableConfig travels with every call","Every runnable accepts a **config**: «callbacks», «tags», «metadata», «run_name», «max_concurrency», «recursion_limit» and «configurable» values. It propagates to child runnables automatically, which is how tracing and per-request settings flow through a chain.",null,null,`### Composition primitives
+- «RunnableLambda(fn)»: wrap any function; gets the config if it accepts one.
+- «RunnableBranch((cond, runnable), …, default)» or a router function returning a runnable.
+- «.bind(stop=[…])»: fix call arguments (e.g. tools, stop sequences).
+- «.with_config(run_name="classify", tags=["v7"])»: label for tracing.
+- «.configurable_fields(temperature=ConfigurableField(id="temp"))» and «.configurable_alternatives(...)»: swap model settings or whole models per call via «config={"configurable": {...}}».
+- «.with_retry(stop_after_attempt=3)» and «.with_fallbacks([...])».
+
+### Streaming internals
+- «stream()» yields output chunks of the final step.
+- «astream_events(version="v2")» yields **events from every step**: «on_chat_model_stream» tokens, «on_tool_start/end», «on_retriever_end», with names and tags — for UIs that show intermediate progress.
+
+### Batching
+«batch(inputs, config={"max_concurrency": 5})» runs in parallel threads/tasks with a cap — essential with rate limits. Combine with an «InMemoryRateLimiter» on the chat model.`],
+ ["match","Primitive",[["RunnableLambda","Wrap a Python function as a runnable"],["RunnableBranch","Choose a runnable by condition"],["configurable_alternatives","Swap models per request via config"],["astream_events","Stream events from every step"],["with_config(tags=...)","Label runs for tracing"]],"LCEL is more than the pipe."],
+ ["fill","Swap the model per request",'llm = ChatAnthropic(model="claude-haiku").configurable_alternatives(\n    ConfigurableField(id="___"), default_key="fast",\n    smart=ChatAnthropic(model="claude-opus"))\nchain = prompt | llm\nchain.invoke(q, config={"___": {"llm": "smart"}})',["llm","configurable"],["model","metadata","tags"],"Route hard requests to a bigger model without rebuilding chains."],
+ ["pick","A UI must show 'searching docs…' then stream tokens. Use…",["astream_events(version='v2')","batch()","invoke() twice","with_retry"],0,"Events from intermediate steps."],
+ ["tf","Runnable truths",[["Config like tags and callbacks propagates to child runnables.",true,"That's how traces nest."],["batch() ignores rate limits automatically.",false,"Set max_concurrency and/or a rate limiter."]]]
+]},
+{act:"Expert", t:"Tool calling deep", sub:"Schemas, errors, hidden args", rounds:[
+ ["learn","Tools as typed contracts","A tool's **name, description and args schema** (from type hints, docstrings or a Pydantic model) are sent to the model. The model returns «tool_calls» with ids; each result goes back as a «ToolMessage» with the matching «tool_call_id».",null,null,`### Details that matter
+- **Parallel tool calls**: a single AIMessage can contain several tool calls; execute them (concurrently if safe) and return one ToolMessage per id.
+- **Errors**: return a helpful error string as the tool result (or set «handle_tool_error») so the model can correct its call, instead of crashing the loop.
+- **Hidden / injected arguments**: things like «user_id», DB sessions or the runtime context shouldn't be chosen by the model. Use injected args («InjectedToolArg», or the tool runtime/context in agents) so they're filled by your code, never visible in the schema — critical for **authorization**.
+- **Artifacts**: «response_format="content_and_artifact"» returns a short text for the model and a full object (e.g. a dataframe) for your app.
+- **return_direct**: end the loop with the tool's output.
+
+### Structured output strategies in agents
+«create_agent(..., response_format=Schema)» uses the provider's native structured output when available, otherwise a tool-calling strategy, and validates the final answer against the schema.`],
+ ["bug","Which tool signature creates an authorization hole?",["def get_balance(merchant_id: str, runtime_user = injected) -> str","def refund(payment_id: str, amount_paise: int) -> str","def get_statement(user_id: str, month: str) -> str  # model chooses user_id","def search_docs(query: str) -> list"],2,"The model (or an injected prompt) can pick any user_id. Inject the caller's identity from your code instead."],
+ ["order","Handling a parallel tool-call response",["AIMessage arrives with 3 tool_calls","Validate each call's arguments","Execute independent calls concurrently","Append one ToolMessage per tool_call_id","Call the model again with all results"],"Ids must match one-to-one."],
+ ["pick","The model passes an invalid date and your tool raises an exception that kills the request. Better?",["Return a clear error message as the tool result so the model can retry","Catch and return nothing","Lower temperature","Remove the tool"],0,"Actionable errors let agents self-correct."],
+ ["tf","Tool truths",[["Injected tool args appear in the schema the model sees.",false,"They're hidden and filled by your code."],["One AI message can request several tools at once.",true,"Parallel tool calls."]]]
+]},
+{act:"Expert", t:"Agents with middleware", sub:"create_agent hooks", rounds:[
+ ["learn","Middleware shapes the agent loop","In LangChain 1.x, «create_agent» runs a model ↔ tools loop (built on LangGraph) and lets you plug **middleware** into it: hooks before/after the agent, before/after each model call, and wrappers around model calls and tool calls.",null,null,`### Hook points
+- «before_agent» / «after_agent»: once per invocation (load memory, final logging).
+- «before_model» / «after_model»: around every model call (trim/summarize history, check outputs, jump to end).
+- «wrap_model_call»: wrap the call itself — change model, tools or prompt dynamically, retry, fallback.
+- «wrap_tool_call»: wrap each tool execution — approvals, retries, caching, error shaping.
+
+### Built-in middleware (examples)
+- **Summarization**: compresses old messages near a token limit.
+- **Human-in-the-loop**: pauses before selected tools for approve/edit/reject (uses LangGraph interrupts + a checkpointer).
+- **PII** redaction/masking on inputs and outputs.
+- **Model fallback**, **model/tool call limits**, **tool retry**.
+
+### Dynamic behaviour
+Middleware can select a cheaper model for simple turns, filter which tools are visible based on user role, or inject retrieved context into the system prompt — without rewriting the agent loop.`],
+ ["match","Hook → good use",[["before_model","Summarize long history before each call"],["wrap_model_call","Switch to a bigger model for complex turns"],["wrap_tool_call","Require approval before refund tool runs"],["after_model","Block responses containing PII"],["before_agent","Load user preferences once per run"]],"Put cross-cutting logic in middleware."],
+ ["pick","Only admins should see the delete_merchant tool. Cleanest place?",["Middleware that filters tools by user role before the model call","Tell the model in the prompt","Remove the tool for everyone","A separate prompt per user"],0,"Enforce visibility in code."],
+ ["sort","Middleware or tool code?",{"Middleware":["Call limits across the whole run","Summarizing history","Approval gate for several risky tools"],"Tool code":["Validate refund amount ≤ captured amount","Query the payments DB"]},"Cross-cutting vs domain logic."],
+ ["tf","Agent truths",[["Human-in-the-loop middleware needs a checkpointer to pause and resume.",true,"Built on interrupts."],["create_agent is built on LangGraph.",true,"So persistence and streaming come with it."]]]
+]},
+{act:"Expert", t:"Retrieval & indexing deep", sub:"Retrievers, indexing API", rounds:[
+ ["learn","Retriever building blocks","LangChain ships retriever patterns you can compose: **EnsembleRetriever** (weighted RRF across retrievers, e.g. BM25 + vector), **MultiQueryRetriever** (LLM rephrasings), **ParentDocumentRetriever** (small chunks for search, parents for context), **ContextualCompressionRetriever** (rerank/filter results with a compressor such as a cross-encoder).",null,null,`### The indexing API
+Syncing documents into a vector store naively creates duplicates and never deletes stale chunks. The **indexing API** uses a **RecordManager** (SQL table of document hashes and source ids) to:
+- skip unchanged documents (content hash),
+- upsert changed ones,
+- delete chunks of documents that disappeared (cleanup modes: «incremental» deletes old versions of re-indexed sources; «full» deletes everything not in the current batch; «scoped_full» per source).
+
+~~~
+from langchain.indexes import SQLRecordManager, index
+rm = SQLRecordManager("pg/policies", db_url=DB_URL); rm.create_schema()
+index(docs, rm, vectorstore, cleanup="incremental", source_id_key="source")
+~~~
+
+### Loaders at scale
+Use «lazy_load()» to stream documents instead of loading everything into memory; attach metadata (source, updated_at, acl) at load time so retrieval filters work later.`],
+ ["match","Retriever",[["EnsembleRetriever","Fuse BM25 and vector results"],["ParentDocumentRetriever","Search small chunks, return parents"],["ContextualCompressionRetriever","Rerank or trim retrieved docs"],["MultiQueryRetriever","Generate rephrasings for recall"]],"Compose instead of rewriting."],
+ ["pick","Re-running ingestion doubles chunks in the vector store each night. Fix?",["Indexing API with a RecordManager and cleanup mode","Delete the store nightly","Bigger chunks","Ensemble retriever"],0,"Hash-based dedup and cleanup."],
+ ["fill","Hybrid retriever",'from langchain.retrievers import EnsembleRetriever\nhybrid = ___(retrievers=[bm25, vector_store.as_retriever(search_kwargs={"k": 20})],\n                       ___=[0.4, 0.6])',["EnsembleRetriever","weights"],["MultiQueryRetriever","scores","ratio"],"Weighted RRF over both lists."],
+ ["tf","Indexing truths",[["Cleanup mode 'full' can delete documents missing from the current batch.",true,"Use carefully with partial loads."],["lazy_load reads everything into memory first.",false,"It streams documents."]]]
+]},
+{act:"Expert", t:"Expert boss: LangChain in production", boss:true, time:45, rounds:[
+ ["pick","Requests from one tenant can fetch another tenant's statements via a tool arg. Fix?",["Injected identity from code, not model-chosen args","Prompt warning","Lower temperature","More tools"],0,"Authorization in code."],
+ ["pick","Batch job hits provider 429s. Fix?",["max_concurrency + rate limiter + with_retry","More threads","Bigger batches","Disable tracing"],0,"Respect limits."],
+ ["pick","Need per-request choice between a fast and a strong model. Use…",["configurable_alternatives","Two separate apps","RunnableParallel","bind_tools"],0,"Config-driven swaps."],
+ ["pick","Refund tool must pause for approval in a create_agent agent. Use…",["Human-in-the-loop middleware + checkpointer","A sleep in the tool","A second agent","Prompt only"],0,"Interrupt-based approvals."],
+ ["pick","Vector store keeps stale policy chunks. Fix?",["Indexing API with RecordManager cleanup","Restart the store","More k","Reranker"],0,"Sync deletions."],
+ ["pick","Tool exceptions crash conversations. Better?",["Return actionable errors as tool results","Hide errors","Retry forever","Remove validation"],0,"Let the model self-correct."],
+ ["pick","UI needs tool progress and tokens. Use…",["astream_events v2","invoke","batch","with_fallbacks"],0,"Events from every step."]
+]}
+]);
