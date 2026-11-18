@@ -39,3 +39,101 @@ levels:[
  ["pick","A model's column type changed and broke the BI tool. Prevent with…",["Model contract","Ephemeral","Seed","Exposure"],0,"Contracts enforce the schema at build time."]
 ]}
 ]});
+
+QUEST.more("dbt", [
+{act:"Expert", t:"How dbt compiles and runs", sub:"Parsing, manifest, DAG", rounds:[
+ ["learn","Parse → compile → execute","dbt **parses** every file into a graph of nodes, writes «manifest.json», **compiles** Jinja into SQL per node, then **executes** nodes in DAG order with «threads» running in parallel.",["Parse project → manifest.json","Resolve ref/source into the DAG","Compile Jinja per node","Run nodes in topological order, N threads","Write run_results.json"],null,`### Artifacts
+- «target/manifest.json»: every node, its config, dependencies, compiled path — used by docs, slim CI («--state»), orchestration tools and lineage.
+- «target/run_results.json»: status and timing per node of the last invocation.
+- «target/compiled/» and «target/run/»: the SQL that was compiled and the DDL/DML actually executed. **Debug here**, not in the Jinja.
+- «partial_parse.msgpack»: lets dbt re-parse only changed files.
+
+### Parse-time vs run-time Jinja
+Jinja runs at **parse** time too (to discover refs/configs). A macro that queries the warehouse («run_query») must be guarded with «{% if execute %}» or it will run (or fail) during parsing.
+
+### Threads
+«threads: 8» lets 8 independent models run at once. The DAG still limits parallelism: a long chain of dependencies runs one by one no matter how many threads.`],
+ ["bug","This macro breaks «dbt parse». Which line?",["{% macro latest_dt() %}","{% set result = run_query('select max(dt) from ' ~ ref('stg_payments')) %}","{{ return(result.columns[0].values()[0]) }}","{% endmacro %}"],1,"run_query runs at parse time too. Wrap it in {% if execute %} … {% endif %}."],
+ ["match","Artifact",[["manifest.json","The full project graph and configs"],["run_results.json","Status and timings of the last run"],["target/run/","SQL actually executed against the warehouse"],["catalog.json","Columns and stats from the warehouse for docs"]],"Artifacts power CI, docs and observability."],
+ ["num","A DAG has a chain of 6 dependent models (each 5 min) plus 20 independent models (each 3 min). With 8 threads, minimum total runtime (min)?",30,0,"min","The 6-model chain is sequential: 6 × 5 = 30 min. The independent models fit alongside in the other threads (20 × 3 = 60 thread-minutes over 7 threads ≈ 9 min)."],
+ ["tf","Compile truths",[["Jinja is evaluated only at run time.",false,"Also at parse time; guard warehouse calls with execute."],["More threads always shorten runs.",false,"The critical path of dependencies sets the floor."],["Compiled SQL lives under target/compiled.",true,"Read it when debugging."]]]
+]},
+{act:"Expert", t:"Incremental strategies deep", sub:"merge, insert_overwrite, microbatch", rounds:[
+ ["learn","Strategies by platform","The «incremental_strategy» decides the SQL dbt generates to apply new rows. Support varies by adapter.",null,null,`| Strategy | What dbt runs | Good for |
+|---|---|---|
+| append | INSERT new rows | Immutable event logs (duplicates possible on reruns) |
+| merge | MERGE on unique_key | Upserts (Snowflake, BigQuery, Databricks, Postgres 15+) |
+| delete+insert | DELETE matching keys, then INSERT | Adapters without efficient MERGE; batch reloads |
+| insert_overwrite | Replace whole partitions | BigQuery/Spark partitioned tables, late-arriving data per day |
+| microbatch | Run per time batch using event_time | Large time-series with backfills and retries per batch |
+
+### Late-arriving data
+«where updated_at > (select max(updated_at) from {{ this }})» misses rows that arrive late with older timestamps. Use a **lookback**: «> (select max(updated_at) - interval '3 days' from {{ this }})» with «unique_key» so re-processed rows upsert rather than duplicate.
+
+### Microbatch
+Configure «event_time», «batch_size» ('day'/'hour'), «begin» and «lookback». dbt runs one query per batch, can **retry only failed batches** («dbt retry»), and backfills with «--event-time-start / --event-time-end». Upstream models with «event_time» are auto-filtered to the batch window.
+
+### on_schema_change
+«ignore» (default), «fail», «append_new_columns», «sync_all_columns» — what to do when the model's columns change on an incremental table.`],
+ ["sort","Best strategy?",{"merge":["Payments table with status updates by payment_id"],"insert_overwrite":["Daily partitioned events where any day may be recomputed"],"microbatch":["3 years of clickstream that must be backfilled per day with retries"],"append":["Immutable audit log with idempotent ingestion upstream"]},"Strategy follows data semantics."],
+ ["fill","A microbatch model",'{{ config(\n    materialized=\'incremental\',\n    incremental_strategy=\'___\',\n    event_time=\'created_at\',\n    batch_size=\'___\',\n    begin=\'2024-01-01\',\n    lookback=2) }}\nselect * from {{ ref(\'stg_events\') }}',["microbatch","day"],["merge","weekly","partition"],"Each batch is its own query; failed batches can be retried alone."],
+ ["pick","An incremental model filters updated_at > max(updated_at) and misses mobile events that sync 2 days late. Fix?",["Add a lookback window and a unique_key","Use append","Full-refresh nightly only","More threads"],0,"Reprocess a window, upsert by key."],
+ ["tf","Incremental truths",[["append is safe to re-run without duplicates.",false,"Re-runs insert again."],["insert_overwrite replaces whole partitions.",true,"Great for recomputing days."],["on_schema_change defaults to ignore.",true,"New columns aren't added unless configured."]]]
+]},
+{act:"Expert", t:"Testing & quality at scale", sub:"Unit tests, contracts, freshness", rounds:[
+ ["learn","Layers of tests","**Unit tests** check transformation logic on mocked rows before building. **Data tests** check built data. **Contracts** enforce shape at build time. **Source freshness** checks raw data arrives on time.",null,null,`### Unit tests (YAML)
+~~~
+unit_tests:
+  - name: refund_reduces_net_amount
+    model: fct_payments
+    given:
+      - input: ref('stg_payments')
+        rows:
+          - {payment_id: 1, amount: 1000, refunded: 200}
+    expect:
+      rows:
+        - {payment_id: 1, net_amount: 800}
+~~~
+Runs as part of «dbt build» (or «dbt test --select test_type:unit»), typically in CI only.
+
+### Contracts and constraints
+«contract: {enforced: true}» requires the model's columns and data types to match the YAML exactly; the build fails otherwise. Constraints («not_null», «primary_key», «unique», «check») are created in the warehouse where supported, otherwise documented only.
+
+### Data test tuning
+«severity: warn», «warn_if: '>10'», «error_if: '>100'», «where:» filters, and «store_failures: true» to keep failing rows in a table for triage.
+
+### Source freshness
+«loaded_at_field: _loaded_at» with «warn_after: {count: 2, period: hour}» and «error_after: {count: 6, period: hour}»; run «dbt source freshness» before builds so stale inputs stop the pipeline.`],
+ ["match","Test type → catches",[["Unit test","Wrong refund arithmetic in SQL logic"],["Data test unique","Duplicate keys in built data"],["Contract","Column type changed from int to string"],["Source freshness","Upstream load stopped 6 hours ago"]],"Use all four."],
+ ["order","Quality gates in a production run",["dbt source freshness (stop if stale)","dbt build: unit tests on changed models (CI)","Models build with contracts enforced","Data tests run right after each model","Failures stored for triage; downstream models skipped"],"dbt build skips children of failed nodes."],
+ ["tf","Test truths",[["Unit tests need the built tables to exist.",false,"They use mocked inputs."],["dbt build skips downstream models when a test fails.",true,"Failures stop propagation."],["store_failures saves failing rows to a table.",true,"Easier triage."]]]
+]},
+{act:"Expert", t:"Large projects", sub:"Mesh, packages, orchestration", rounds:[
+ ["learn","Scaling dbt across teams","Big projects split by domain. **Model access** («public», «protected», «private»), **groups** with owners, **model versions** and **contracts** let teams publish stable interfaces; cross-project «ref('finance', 'fct_payments')» (dbt Mesh) consumes them.",null,null,`### Versions
+«versions: [{v: 1}, {v: 2}]» with «latest_version» lets you ship a breaking change as v2 while consumers migrate off v1 by a deprecation date.
+
+### Packages and macros
+«packages.yml» brings dbt_utils (generic tests, «generate_surrogate_key», «star»), dbt_expectations, audit helpers («compare_relations» to diff old vs new model output before switching). Pin versions.
+
+### Selection and state
+- «--select state:modified+ --defer --state prod/»: build changed models, read unchanged parents from production.
+- «result:error+ --state»: rerun failures and children (or «dbt retry»).
+- «--exclude tag:hourly» / YAML selectors for named selections.
+
+### Orchestration
+In Airflow, run dbt with per-model tasks (e.g. Cosmos) for visibility and retries, or one «dbt build» per domain for simplicity. Always pass «--target prod» and keep artifacts for the next run's state comparison.`],
+ ["match","Feature",[["access: private","Only models in the same group can ref it"],["Model versions","Ship breaking changes without breaking consumers"],["audit_helper.compare_relations","Diff a refactored model against the old one"],["dbt retry","Re-run only what failed last time"]],"Tools for teams, not just models."],
+ ["pick","You refactored fct_payments and want proof the output didn't change. Use…",["audit_helper compare_relations on old vs new","Just run tests","Look at row counts only","Docs"],0,"Row-level diff before switching."],
+ ["sort","Selector does what?",{"Build changed + children":["state:modified+ --defer"],"Rerun failures":["dbt retry","result:error+"],"Upstream of a model":["+fct_payments"]},"Selectors keep runs small."],
+ ["tf","Scale truths",[["A private model can be referenced from any project.",false,"Only within its group."],["--defer reads unchanged parents from another environment's relations.",true,"Saves rebuilding them."]]]
+]},
+{act:"Expert", t:"Expert boss: The dbt platform review", boss:true, time:45, rounds:[
+ ["pick","dbt parse fails in CI with a warehouse connection error from a macro. Fix?",["Guard run_query with {% if execute %}","Add threads","Use seeds","Disable partial parse"],0,"Parse-time Jinja."],
+ ["pick","Late events from mobile are missing in an incremental model. Fix?",["Lookback window + unique_key merge","append strategy","More tests","Ephemeral"],0,"Reprocess a window."],
+ ["pick","A 3-year backfill must be restartable per day. Strategy?",["microbatch with event_time and batch_size day","merge only","full refresh","view"],0,"Retry failed batches alone."],
+ ["pick","Refund arithmetic bug shipped despite data tests passing. Add…",["Unit tests with mocked rows","More unique tests","Freshness","Docs"],0,"Test logic, not just data."],
+ ["pick","Finance team changed a column type and broke marketing's model. Prevent?",["Contracts + model versions for shared models","Seeds","More threads","Ephemeral"],0,"Stable interfaces."],
+ ["pick","Daily run takes 3 h though most models are fast. First look at?",["The critical path of dependencies in run timings","Thread count only","Seeds","Docs"],0,"Long chains set runtime."],
+ ["pick","Pipelines run on stale source data silently. Add…",["dbt source freshness before build","Contracts","Unit tests","Snapshots"],0,"Stop early on stale inputs."]
+]}
+]);
