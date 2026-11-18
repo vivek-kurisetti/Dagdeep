@@ -72,6 +72,21 @@ window.DAGDEEP_FIREBASE = {
 
 7. Commit and push. The web config isn't a secret; the rules above ensure each signed-in user can only read and write their own document (`users/{uid}`). Guest progress is moved into the account on first sign-in.
 
+## Work simulator
+
+`#work` is a hub of real tasks from a data/AI engineer's week, in six different formats, each with its own clean layout:
+
+| Type | You… |
+|---|---|
+| 📟 Incident | get paged and investigate with Slack, a terminal, dashboards and code |
+| 🔍 PR review | read a diff, tap risky lines, say what's wrong, then approve or request changes |
+| 🧾 Log hunt | answer questions by tapping the right line in hundreds of filterable log lines |
+| 🎛️ Tune it | pick values for real config knobs, run a simulation, hit every goal in few runs |
+| 🧭 Postmortem | order shuffled events, label trigger/cause/symptom/response, then do the 5 whys |
+| 🚦 Triage | sort an inbox of alerts and tickets by urgency and pick the first move |
+
+Every task ends with a 🔬 deep dive, an interview answer and links to the course. Non-incident tasks live in zone files via `QUEST.work(zoneId, [...])` (schemas at the top of the work-simulator section in `quest-engine.js`) and are registered in `WORK`.
+
 ## On-call desk (workplace debugging)
 
 A simulated workstation: you get paged, acknowledge, and investigate a real-looking production incident.

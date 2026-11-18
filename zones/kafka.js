@@ -484,6 +484,7 @@ QUEST.cases("kafka", [
 {
  title:"One partition is 3 million behind", icon:"☠️", sev:1, clock:"10:47", channel:"inc-2315-ledger-lag", svc:"payments-ledger consumer · Kafka", need:4,
  terms:[["Partition", "An ordered, append-only log. A topic is split into partitions; each is read by exactly one consumer in a group."], ["Offset", "A record's position in a partition. The consumer group commits the offset it has finished up to."], ["Consumer lag", "Log-end offset minus committed offset: how many records are waiting to be processed."], ["Consumer group", "A set of consumers sharing a topic's partitions between them."], ["CrashLoopBackOff", "Kubernetes keeps restarting a container that keeps crashing, waiting longer each time."], ["Poison message", "A record the consumer can't process. Without error handling it crashes on it forever."], ["DLQ", "Dead-letter queue: a topic where unprocessable records are parked (with error details) so the main flow keeps moving."]],
+ deep:[{"t": "Reading lag correctly", "md": "- **Lag** = log-end offset − committed offset, per partition.\n- Lag **flat** = consumer keeping up (some lag is normal). Lag **growing linearly** at the produce rate = consumer stopped. Lag **growing slower** = consumer too slow.\n- **One partition** behind: that partition's consumer or data (poison message, hot key). **All partitions** behind: downstream slowness, too few consumers, or broker trouble.\n- The committed offset **not moving at all** is the key signal of a crash loop."}, {"t": "Error handling patterns for consumers", "md": "| Error type | Example | Handling |\n|---|---|---|\n| Transient | DB timeout, 503 | Retry with backoff in place (bounded), then pause the partition |\n| Permanent / bad data | Parse error, schema mismatch | **DLQ** with headers (error, topic, partition, offset), commit, continue |\n| Fatal | Auth failure, config error | Crash and alert |\n\nAlso: validate at the **producer** with a schema registry (Avro/Protobuf/JSON Schema) so bad data can't be written in the first place."}],
  pager:`[r]FIRING[/r]  consumer lag > 500k  group=ledger-writer  topic=payments.v2
 partition 7   lag [r]3,042,118[/r]  (growing ~1.1k/s)
 partitions 0-6, 8-11   lag < 200
@@ -609,5 +610,109 @@ def to_event(txn):
   ex:"~~~\nfor rec in consumer.poll(1.0):\n    try:\n        handle(rec)\n    except (ValueError, InvalidOperation) as e:      # bad data: don't retry\n        dlq.send(\"payments.v2.dlq\", rec.value, headers={\n            \"err\": str(e), \"src\": f\"{rec.topic}-{rec.partition}@{rec.offset}\"})\n    except DBTimeout:\n        raise                                       # retryable: let it retry\nconsumer.commit()\n~~~",
   traps:["Catching *every* exception and DLQ'ing it hides real outages (a DB down for 5 minutes ends up in the DLQ instead of being retried).","A DLQ nobody watches is a black hole. Alert on its size and assign an owner.","Resetting offsets to latest \"fixes\" lag by **dropping data**.","Kafka Connect has this built in: «errors.tolerance=all» plus «errors.deadletterqueue.topic.name»."],
   say:"A poison message is a record the consumer can't process; without per-record handling it crashes before committing and loops on the same offset forever, blocking that partition. I handle it by classifying errors: retryable ones get backoff, non-retryable ones go to a dead-letter topic with metadata, then I commit and continue. Processing is idempotent so I can replay the DLQ once the bug is fixed, and I alert on the DLQ size and on offsets that stop moving."}]
+}
+]);
+
+/* ===== Work simulator: Kafka ===== */
+QUEST.work("kafka", [
+{
+ type:"pr", title:"\"New payments consumer\"", three:"find all 3 problems with no false alarms",
+ brief:"The ledger team is replacing the old consumer with a simpler one. It reads «payments.v2» and writes every captured payment into the ledger database. Money flows through this code: **a lost or doubled message is a wrong merchant balance.**",
+ repo:"payu/ledger-writer", pr:"#91 Rewrite consumer with confluent-kafka (simpler, 120 lines → 25)", author:"neha",
+ desc:"Replaces our old consumer framework with plain «confluent-kafka».\n\n- New consumer group «ledger-writer-v2» so we can run it side by side\n- Auto-commit on, so we don't have to manage offsets\n- Notifies the merchant-app after each payment",
+ reasons:["Commits offsets before the work is done: a crash loses payments","Starts from the newest offset: skips messages that already exist","Not idempotent: a redelivered message is written twice","Blocks the poll loop too long: causes rebalances","Swallows errors that should crash or alert"],
+ files:[{path:"ledger/consumer.py", diff:`@@ -0,0 +1,25 @@
++from confluent_kafka import Consumer
++import json, requests
++
++conf = {
++    "bootstrap.servers": BROKERS,
++    "group.id": "ledger-writer-v2",
++    "enable.auto.commit": True,
++    "auto.offset.reset": "latest",
++    "max.poll.interval.ms": 300000,
++}
++consumer = Consumer(conf)
++consumer.subscribe(["payments.v2"])
++
++while True:
++    msg = consumer.poll(1.0)
++    if msg is None:
++        continue
++    if msg.error():
++        continue
++    evt = json.loads(msg.value())
++    db.execute("INSERT INTO ledger (txn_id, merchant_id, amount) VALUES (%s, %s, %s)",
++               (evt["txn_id"], evt["merchant_id"], evt["amount"]))
++    db.commit()
++    requests.post(NOTIFY_URL, json=evt, timeout=5)`}],
+ bugs:[
+  {f:0, at:"\"enable.auto.commit\": True", a:0, why:"Auto-commit commits offsets on a **timer** (every 5 s) for messages already *handed to you*, whether or not your DB insert finished. If the pod dies after a commit but before the insert, that payment is **never processed**. Commit **after** the work: «enable.auto.commit=False» and «consumer.commit(msg)» after «db.commit()» (at-least-once)."},
+  {f:0, at:"\"auto.offset.reset\": \"latest\"", a:1, why:"«ledger-writer-v2» is a **new group** with no committed offsets, so «auto.offset.reset» decides where it starts. «latest» = only messages produced after it joins, so everything between the old consumer stopping and this one starting is **silently skipped**. Use «earliest» (with idempotent writes) or explicitly seed the new group's offsets from the old group."},
+  {f:0, at:"VALUES (%s, %s, %s)\",", a:2, why:"Kafka consumers are **at-least-once**: after a crash or rebalance, messages since the last commit are delivered **again**. A plain INSERT writes the same payment twice. Make it idempotent: a unique key on «txn_id» with «ON CONFLICT (txn_id) DO NOTHING» (or an upsert)."}
+ ],
+ notes:[{f:0, at:"\"max.poll.interval.ms\": 300000", note:"5 minutes is the default and plenty for one insert plus a 5 s HTTP call."},{f:0, at:"if msg.error():", note:"«msg.error()» mostly carries informational events like partition EOF; skipping them is the documented pattern. Fatal errors are raised separately."},{f:0, at:"requests.post(NOTIFY_URL", note:"A 5 s timeout keeps this well under the 5-minute poll interval. Not ideal (an outbox pattern is better), but not a bug here."},{f:0, at:"db.commit()", note:"Committing the DB transaction per message is correct. The problem is what happens to Kafka offsets."}],
+ shipped:"On cutover day the new group started at **latest** and skipped **41,000 payments** produced during the switch. Two days later a pod crash after an auto-commit lost **312 more**, and a rebalance doubled **1,900** ledger rows. Finance spent a week reconciling.",
+ deep:[
+  {t:"Delivery semantics: at-most-once, at-least-once, exactly-once", md:"| Commit offset… | If the consumer crashes… | You get |\n|---|---|---|\n| **before** processing (or auto-commit) | committed-but-unprocessed messages are skipped | **at-most-once**: loss |\n| **after** processing | processed-but-uncommitted messages are re-delivered | **at-least-once**: duplicates |\n| atomically with the output | neither | **exactly-once** |\n\nFor payments, choose **at-least-once + idempotent writes**. Kafka's exactly-once (transactions, «isolation.level=read_committed») only covers Kafka → Kafka. Writing to an external DB needs idempotency or storing offsets in the same DB transaction."},
+  {t:"auto.offset.reset only applies when there's no valid offset", md:"It's consulted when a group has **no committed offset** for a partition (a brand-new group) or its offset is **out of range** (expired by retention or «offsets.retention.minutes», 7 days by default).\n\n- «earliest»: start from the oldest retained message. Safe with idempotent processing; may reprocess a lot.\n- «latest»: start from the end. Fine for metrics or UIs, dangerous for money.\n- Migrating to a new group? Seed offsets: «kafka-consumer-groups --reset-offsets --to-datetime …» or copy the old group's offsets, then start."},
+  {t:"Making consumers idempotent", md:"- **Natural key + unique constraint**: «INSERT … ON CONFLICT (txn_id) DO NOTHING».\n- **Upserts** keyed by entity id when the latest state wins.\n- **Store the offset with the data**: write «(topic, partition, offset)» in the same DB transaction and resume from it on startup. Then Kafka's committed offset becomes a hint.\n- Side effects (emails, HTTP calls) need their own dedup key, or an **outbox table** written in the same transaction and sent by a separate worker."}
+ ],
+ say:"For a consumer that moves money I want at-least-once delivery with idempotent writes: auto-commit off, commit after the DB transaction, a unique key on the business id so redeliveries are no-ops, and auto.offset.reset chosen deliberately, with offsets seeded when migrating to a new group."
+},
+{
+ type:"tune", title:"Stop the rebalance storm", three:"hit every goal in 2 runs or fewer",
+ brief:"The «ledger-writer» group (12 pods) keeps **rebalancing**, around 18 times an hour. Every rebalance pauses consumption and lag spikes.\n\nWhat you know:\n- At month-end the ledger DB slows down; one record can take up to **0.75 s** at p99.\n- Kubernetes CPU throttling sometimes **freezes a pod for ~15 s**.\n- The autoscaler adds or removes a pod about **twice an hour** (each is a planned rebalance).",
+ knobs:[
+  {k:"r", label:"max.poll.records", opts:[500,100,20], def:500, help:"The most records one «poll()» returns. Your code must process the whole batch and call «poll()» again within **max.poll.interval.ms**.\n\nWorst batch here ≈ records × 0.75 s: 500 → **375 s**, 100 → 75 s, 20 → 15 s."},
+  {k:"i", label:"max.poll.interval.ms", opts:[300000,900000], def:300000, fmt:v => v / 60000 + " min", help:"Maximum gap between two «poll()» calls. Exceed it and the consumer is considered **stuck**: it leaves the group and its partitions are reassigned (a rebalance).\n\nRaising it hides slow batches, but a **genuinely hung** consumer also keeps its partitions that long before anyone notices."},
+  {k:"s", label:"session.timeout.ms", opts:[10000,45000], def:10000, fmt:v => v / 1000 + " s", help:"How long the broker waits without **heartbeats** before declaring a consumer dead. Heartbeats come from a background thread, so this catches a **dead or frozen process**, not slow processing.\n\nToo low and short freezes (GC, CPU throttling) kick healthy consumers out. Default in modern clients: 45 s."},
+  {k:"a", label:"partition.assignment.strategy", opts:["range","cooperative-sticky"], def:"range", help:"**Eager** strategies (range, round-robin) are stop-the-world: on every rebalance **all** consumers drop **all** partitions, then get new ones. ~40 s pause here.\n\n**Cooperative-sticky** (incremental rebalancing) only moves the partitions that need to move; everyone else keeps consuming. ~3 s pause."}
+ ],
+ metrics:[
+  {k:"un", label:"Unplanned rebalances/hour", gl:"= 0", goal:v => v === 0},
+  {k:"pause", label:"Paused per hour", unit:" s", gl:"≤ 60 s", goal:v => v <= 60},
+  {k:"det", label:"Hung consumer detected in", unit:" min", gl:"≤ 5 min", goal:v => v <= 5}
+ ],
+ sim:v => {
+  const worst = v.r * 0.75, log = [], over = worst > v.i / 1000, kick = v.s < 15000;
+  log.push(`Worst batch: ${v.r} records × 0.75 s = **${worst} s** vs max.poll.interval **${v.i / 1000} s** → ${over ? "**exceeded**: the consumer is evicted as stuck" : "OK"}.`);
+  log.push(`Pods freeze for ~15 s; session timeout is **${v.s / 1000} s** → ${kick ? "**heartbeats missed**: healthy pods get kicked out" : "OK, the freeze is tolerated"}.`);
+  const un = (over ? 12 : 0) + (kick ? 6 : 0), all = un + 2, per = v.a === "range" ? 40 : 3;
+  log.push(`Rebalances: ${un} unplanned + 2 from autoscaling = **${all}/hour**, each pausing ${v.a === "range" ? "**every** consumer ~40 s (eager)" : "only moved partitions ~3 s (cooperative)"}.`);
+  if (v.i > 300000) log.push(`A truly hung consumer now keeps its partitions for **${v.i / 60000} minutes** before anyone takes over.`);
+  return {m:{un, pause:all * per, det:v.i / 60000}, log};
+ },
+ best:"**max.poll.records 100** (or 20), **max.poll.interval 5 min**, **session.timeout 45 s**, **cooperative-sticky**: no unplanned rebalances, the two planned ones cost ~6 s, and a hung consumer is still detected within 5 minutes.",
+ deep:[
+  {t:"Two different timeouts, two different failures", md:"| Setting | Detects | Mechanism |\n|---|---|---|\n| «session.timeout.ms» | A **dead/frozen process** | Background heartbeat thread stops |\n| «max.poll.interval.ms» | A **stuck/slow processing loop** | Time between «poll()» calls |\n\nSince KIP-62 (Kafka 0.10.1) heartbeats run on a separate thread, so slow processing no longer causes session timeouts; it causes **poll interval** violations instead. Fix slow batches with smaller «max.poll.records» or faster processing, not by inflating the interval."},
+  {t:"Eager vs cooperative rebalancing", md:"- **Eager** (range, roundrobin, sticky): every member revokes **all** partitions, the leader computes a new assignment, everyone resumes. Stop-the-world for the whole group.\n- **Cooperative** (cooperative-sticky, KIP-429): members keep their partitions; only the ones that must move are revoked, in a second round. Others never stop.\n- Switching strategy on a live group needs a **rolling bounce in two steps** (add cooperative-sticky alongside the old one, then remove the old).\n- Kafka 4.0's new **consumer group protocol** (KIP-848) moves assignment to the broker and removes the global sync barrier entirely."},
+  {t:"Static membership: no rebalance for a restart", md:"Set «group.instance.id» to a stable value per pod (e.g. the StatefulSet pod name). A restarting member that comes back **within session.timeout** gets its old partitions back with **no rebalance at all**. Great for rolling deploys, combined with a session timeout longer than a pod restart."}
+ ],
+ say:"Rebalance storms usually come from two places: batches that exceed max.poll.interval, which I fix with fewer records per poll, and short session timeouts that kick out pods during GC or CPU throttling. Then I switch to cooperative-sticky so planned rebalances don't stop the whole group, and use static membership for restarts."
+},
+{
+ type:"triage", title:"Monday 9 AM queue", three:"no more than 1 wrong call across all items",
+ brief:"You're the **Kafka platform on-call** this week. You open your laptop to six things waiting for you. Decide how urgent each one is and what you'd do first.\n\n- 🔴 **Drop everything**: customers or money affected now, or about to be\n- 🟠 **Today**: real risk, but there's time to plan\n- 🟡 **Backlog**: worth doing, not this week's emergency\n- ⚪ **Noise**: nothing to do",
+ items:[
+  {src:"PagerDuty", from:"alert · 08:52", t:"Consumer lag ledger-writer / payments.v2 p7: 412,000 and rising 1,100/s", body:"Other 11 partitions: lag < 200. Merchant balances on p7 are stale.", sev:"now", why:"Money-moving pipeline, customer-visible (stale balances), and **getting worse every second**. That's drop-everything.",
+   act:{o:["Check the consumer pod for p7: restarts and «--previous» logs","Reset p7's offset to latest so lag goes to zero","Add 12 more partitions to spread the load"], a:0, why:"One stuck partition = look at its consumer and its data first (a crash loop on a poison message is the classic cause). Resetting skips real payments; adding partitions doesn't move existing data and breaks key ordering."}},
+  {src:"Alert", from:"kafka-prod · 08:40", t:"UnderReplicatedPartitions = 18 (broker 3) for 12 minutes", body:"Topics: payments.v2, audit-log. RF=3, min.insync.replicas=2. Broker 3 CPU 98%.", sev:"now", why:"18 partitions are down to 2 in-sync replicas. With «min.insync.replicas=2», **one more broker problem and producers using acks=all start failing**. Sustained URPs on payment topics are urgent.",
+   act:{o:["Look at broker 3: disk, network, GC and what's eating CPU","Restart all brokers to clear it","Lower min.insync.replicas to 1 so producers never fail"], a:0, why:"Find why broker 3's replicas can't keep up (a full disk, a bad NIC, a runaway client, long GC). A blind rolling restart of everything risks more URPs; lowering min ISR trades the outage for possible **data loss**."}},
+  {src:"Email", from:"cert-bot · Sun 23:00", t:"TLS certificate for kafka.payu.internal expires in 9 days", body:"Clients connecting over SSL will fail after expiry.", sev:"today", why:"Not broken yet, but a hard deadline with total outage if missed. Get it **planned today** while there's slack.",
+   act:{o:["Open a change ticket and schedule the rotation this week, including client truststores","Ignore it: cert-bot always nags","Rotate it right now in production without a change window"], a:0, why:"Plan it: check which clients pin the cert or CA, roll the new cert to brokers one at a time, and verify. No need for a cowboy change on a Monday morning."}},
+  {src:"Alert", from:"kafka-prod · 07:15", t:"Broker 2 disk usage 71% (warning at 70%)", body:"Growth: ~1% per day over the last 30 days. Retention: 7 days on most topics.", sev:"later", why:"At 1%/day you have **weeks**, not hours. Worth a capacity ticket, not an interruption.",
+   act:{o:["Create a capacity ticket: review retention and the growth trend, plan storage","Delete old log segments by hand to get under 70%","Silence the alert permanently"], a:0, why:"Plan capacity calmly: which topics grew, whether retention fits the need, tiered storage, or more disk. Never delete segment files by hand, and don't silence a capacity alert."}},
+  {src:"Jira", from:"PAY-2291 · growth team", t:"Increase merchant-events partitions from 6 to 24 before the sale on the 28th", body:"\"Consumers can't keep up during peaks.\"", sev:"later", why:"A planned change for a date two weeks out. Important, but it needs design, not urgency.",
+   act:{o:["Ask whether consumers rely on per-key ordering, then plan the change","Do it now: it's a one-line command","Reject it: partitions can never be changed"], a:0, why:"Adding partitions changes which partition each key hashes to, so **per-key ordering breaks** for in-flight keys during the switch. Check the consumers, plan a quiet window, or create a new topic and migrate."}},
+  {src:"Slack", from:"#data-help · analyst", t:"\"Kafka UI shows clickstream-dev has had 0 messages since Friday. Is Kafka broken?\"", body:"«clickstream-dev» is a dev topic; the dev app is switched off at weekends.", sev:"noise", why:"A dev topic with no producer at the weekend is **expected**. Reply kindly and move on.",
+   act:{o:["Reply: it's a dev topic and the dev app is off at weekends","Open an incident for Kafka being broken","Restart the dev cluster just in case"], a:0, why:"A quick, kind explanation closes it. Maybe point them to the prod topic they actually wanted."}}
+ ],
+ deep:[
+  {t:"Severity = impact × urgency", md:"| | Getting worse fast | Stable / has a deadline |\n|---|---|---|\n| **Customers or money affected** | 🔴 Now | 🟠 Today |\n| **Risk, not yet impact** | 🟠 Today (or 🔴 if one more failure = outage) | 🟡 Backlog |\n| **No real impact** | 🟡 / ⚪ | ⚪ |\n\nAsk three questions: **who is affected**, **how badly**, and **is it getting worse**. Lag that's growing on a payment topic beats a disk at 71% growing 1% a day, even though both are \"warnings\"."},
+  {t:"Under-replicated partitions and min.insync.replicas", md:"- Each partition has a leader and followers; the **ISR** (in-sync replicas) is the set that's caught up.\n- A partition is **under-replicated** when ISR < replication factor.\n- With «acks=all», a write succeeds only if at least **min.insync.replicas** replicas have it. RF=3, min ISR=2 survives **one** broker loss without failing writes or losing data.\n- Persistent URPs mean you've already used that one-failure buffer. Common causes: a slow disk, network saturation, a broker overloaded by a client, or long GC pauses."},
+  {t:"Alert hygiene", md:"- Every page should be **actionable** and **urgent**. If the right response is \"look at it this week\", it's a ticket, not a page.\n- Alert on **symptoms users feel** (lag growing, error rates, freshness) more than causes (CPU).\n- Capacity alerts should predict time-to-full, not fire at a fixed percentage.\n- Every noisy alert you ignore trains you to ignore the next real one."}
+ ],
+ say:"I triage by impact times urgency: who is affected, how badly, and whether it's getting worse. A growing lag on a payments topic or sustained under-replicated partitions are page-worthy; a cert expiring in nine days is today's planned work; slow disk growth is a capacity ticket."
 }
 ]);

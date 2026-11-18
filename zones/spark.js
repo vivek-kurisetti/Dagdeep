@@ -691,6 +691,7 @@ QUEST.cases("spark", [
 {
  title:"The nightly job got 4× slower", icon:"🐢", sev:2, clock:"06:12", channel:"inc-2291-settlements-slow", svc:"settlements-daily · Spark on EMR", need:4,
  terms:[["SLA", "Service-level agreement: the time by which a job's output must be ready (here, 07:00 for Finance)."], ["Driver / executors", "The driver plans the job and hands out tasks; executors are the worker processes that run them."], ["Task", "The smallest unit of Spark work: roughly one task per input split. Each task has a fixed cost to schedule and start."], ["Small files", "Many files far smaller than ~128 MB. Each one costs a listing call, an S3 open and footer reads, whatever its size."], ["Listing", "Before reading, the driver asks S3 for every file under the path. Millions of files = minutes of listing."], ["Streaming trigger", "How often a Structured Streaming query runs a micro-batch. Each micro-batch writes new files."], ["Compaction", "Rewriting many small files into fewer large ones, without changing the data."]],
+ deep:[{"t": "What a small file really costs", "md": "Reading a file isn't just bytes. Per file Spark pays for:\n- an S3 **LIST** entry (1,000 keys per call), done by the driver;\n- an **open + GET** with ~20-50 ms latency to first byte;\n- reading the **Parquet footer** (schema, row-group stats);\n- usually its own **task** (unless packed by «maxPartitionBytes»/«openCostInBytes»).\n\nAt 33 KB per file that overhead is ~95% of the time. At 128 MB-1 GB per file it's noise. That's why the same 41 GiB took 24 minutes as 2,880 files and 100 minutes as 1.28M files."}, {"t": "Streaming sinks and compaction", "md": "Every micro-batch writes **at least one file per output partition per task**. Files per day ≈ batches/day × tasks writing.\n- 10 s trigger = 8,640 batches/day; × 48 tasks = 415k files.\n- Options: a longer trigger; fewer writing tasks («coalesce»); **compaction** after the fact (Iceberg «rewrite_data_files», Delta «OPTIMIZE», Hudi clustering); or a table format with **auto-compaction**.\n- Agree freshness per consumer: a dashboard may need 1-minute data, a nightly batch needs well-sized files."}],
  pager:`[r]FIRING[/r]  settlements_daily runtime > SLA
 cluster   emr-prod-etl (j-2QX8KD41)   10 × r5.2xlarge
 started   05:00 IST     status RUNNING (stage 2/7)
@@ -824,6 +825,7 @@ parsed = events.select(F.from_json(F.col("value").cast("string"), SCHEMA).alias(
 {
  title:"Executors keep getting killed", icon:"💥", sev:2, clock:"14:05", channel:"inc-2307-risk-features-oom", svc:"risk-features · Spark on EMR", need:4,
  terms:[["Exit 137", "The process got SIGKILL (128 + 9). On YARN that usually means the container went over its memory limit."], ["Container", "The memory box YARN gives an executor: heap + memoryOverhead. Go over it and YARN kills it."], ["JVM heap", "Memory managed by Java (spark.executor.memory): DataFrames, caching, shuffle buffers."], ["memoryOverhead", "Memory outside the heap: Python workers, Arrow buffers, native libs, thread stacks. Default max(384 MB, 10% of heap)."], ["pandas UDF", "A Python function Spark runs on Arrow batches in separate Python processes, outside the JVM."], ["Arrow batch", "A columnar chunk of rows Spark ships to Python; «maxRecordsPerBatch» sets its size."]],
+ deep:[{"t": "Container memory, step by step", "md": "On YARN (and Kubernetes) an executor container is: **heap** («spark.executor.memory») + **memoryOverhead** (default max(384 MB, 10%)) + «spark.executor.pyspark.memory» if set + off-heap memory if enabled.\n\nThe node manager polls the container's **resident memory (RSS)**. Over the limit → **SIGKILL** (exit 137) and the log line *\"Container killed by YARN for exceeding physical memory limits\"*. A Java **OutOfMemoryError** is different: that's the heap itself running out, exit code usually 52 or 1."}, {"t": "Python in Spark: where the memory goes", "md": "- Each running Python task has a **Python worker process** (forked from a daemon), so 5 cores = up to 5 Python processes per executor.\n- pandas UDFs hand data over in **Arrow record batches** («spark.sql.execution.arrow.maxRecordsPerBatch», default 10,000). Each batch exists in the JVM, in Arrow buffers and as pandas objects at the same time.\n- Loading a **model** inside the UDF body reloads it per batch; load it once per worker (module-level cache, or «mapInPandas» with an iterator that loads before the loop).\n- Size overhead deliberately: e.g. 2 GB + model size × concurrent workers."}],
  pager:`[r]FIRING[/r]  risk_features_hourly FAILED (attempt 4/4)
 error     Job aborted due to stage failure: Task 37 in stage 4.0 failed 4 times
           ExecutorLostFailure (executor 12 exited caused by one of the running tasks)
@@ -930,5 +932,135 @@ features = features.withColumn("device_emb", device_risk_embedding("device_finge
  },
  learned:["Exit 137 + \"exceeding physical memory limits\" = **container** overflow. Look **off-heap**, not at the heap.","Python UDFs, Arrow, PySpark workers and native libraries all live in **memoryOverhead**.","Bigger heap can make it **worse**: it steals room the off-heap side needs.","Prove the theory with two numbers: **heap used** vs **container RSS** at the moment of death."],
  cards:["memory"]
+}
+]);
+
+/* ===== Work simulator: Spark ===== */
+QUEST.work("spark", [
+{
+ type:"pr", title:"\"Make the daily job faster\"", three:"find all 4 problems with no false alarms",
+ brief:"Ankit, a new joiner, opened a PR on **daily_merchant_stats**, the job that powers the merchant app's daily numbers. He says it's faster and more accurate, and it passed on a one-day sample on his laptop.\n\nYou're the reviewer. It runs on **3 years of transactions (≈2 TB per day of history scanned if done wrong)** and **4.2M merchants**.",
+ repo:"payu/lake-jobs", pr:"#482 Daily merchant stats: accurate dates, tiers, Dynamo export", author:"ankit",
+ desc:"- Filter by the real **event date** instead of «dt» (more accurate)\n- Add a merchant **tier** column\n- Write stats to **DynamoDB** for the merchant app\n- Removed the broadcast hint: \"Spark is smart enough to decide\"\n\nTested locally on 1 day of data ✅",
+ reasons:["Breaks partition pruning: reads every partition","Python UDF where a built-in expression would do","Loses the broadcast join: forces a full shuffle of the big table","Pulls every row to the driver: OOM risk and no parallelism","Wrong date/time zone logic"],
+ files:[{path:"jobs/daily_merchant_stats.py", diff:`@@ -1,14 +1,24 @@
+ from pyspark.sql import functions as F
++from pyspark.sql.functions import udf
+ 
+ txns = spark.read.parquet("s3://payu-lake/curated/txns/")   # partitioned by dt
+-txns = txns.filter(F.col("dt") == run_date)
++txns = txns.filter(F.to_date("event_ts") == run_date)
+ merchants = spark.read.parquet("s3://payu-lake/dim/merchants/")   # ~40 MB
+ 
++@udf("string")
++def tier(gmv):
++    return "gold" if gmv > 1e7 else "silver" if gmv > 1e6 else "bronze"
++
+-stats = txns.join(F.broadcast(merchants), "merchant_id")
++stats = txns.join(merchants, "merchant_id")
+ stats = stats.groupBy("merchant_id", "city").agg(F.sum("amount").alias("gmv"))
++stats = stats.withColumn("tier", tier("gmv"))
++
++for row in stats.collect():
++    dynamo.put_item(Item=row.asDict())
+ stats.write.mode("overwrite").parquet(out_path)`}],
+ bugs:[
+  {f:0, at:"F.to_date(\"event_ts\") == run_date", a:0, why:"«dt» is the **partition column**: filtering on it lets Spark list only «dt=2026-11-18/». A filter on «to_date(event_ts)» is just a row filter, so Spark must **list and open every partition** (3 years) and throw most rows away. Keep the «dt» filter for pruning; add the event-date filter on top if you need it."},
+  {f:0, at:"def tier(gmv):", a:1, why:"A Python UDF ships every row to a Python worker and back, and Catalyst can't optimise inside it. «F.when(gmv > 1e7, 'gold').when(gmv > 1e6, 'silver').otherwise('bronze')» runs in the JVM with code generation, typically 5-20× faster."},
+  {f:0, at:"stats = txns.join(merchants, \"merchant_id\")", a:2, why:"«merchants» is ~40 MB, above the default «autoBroadcastJoinThreshold» (10 MB). Without the hint Spark picks a **sort-merge join**: both sides are shuffled, including the huge «txns». The broadcast hint ships the small table to every executor once, so «txns» never moves."},
+  {f:0, at:"for row in stats.collect():", a:3, why:"«collect()» pulls **all 4.2M rows** into the driver's memory, then writes to Dynamo **one row at a time from one machine**. Use «foreachPartition» with batched «batch_writer()» (or a Spark-Dynamo connector) so executors write in parallel."}
+ ],
+ notes:[{f:0, at:"groupBy(\"merchant_id\", \"city\")", note:"Grouping by two columns is fine here: each merchant has one city."},{f:0, at:"from pyspark.sql.functions import udf", note:"The import itself is harmless. Look at how it's used."},{f:0, at:"stats.write.mode(\"overwrite\")", note:"Unchanged line, and overwrite of a daily output path is fine."}],
+ shipped:"That night the job **listed and scanned 3 years of data** instead of one day, **shuffled ~2 TB** for the join, then the **driver died with OutOfMemoryError** during «collect()». The merchant app showed blank numbers until noon.",
+ deep:[
+  {t:"Partition pruning: why «dt» matters", md:"A table partitioned by «dt» is stored as folders: «txns/dt=2026-11-18/part-…parquet».\n\n- A filter on the **partition column** (dt = '2026-11-18') is applied **while listing**. Spark lists one folder, and the scan only sees those files.\n- A filter on an **expression of another column** («to_date(event_ts)») can't be mapped to folders. Every file is listed and opened; Parquet min/max stats may skip some row groups, but you still pay for listing and footers.\n- Check with «df.explain()»: look for «PartitionFilters: [isnotnull(dt), (dt = 2026-11-18)]». Empty «PartitionFilters» = full scan.\n- Late-arriving events? Read «dt IN (d-1, d, d+1)» (still pruned) and then filter on event_ts."},
+  {t:"Broadcast hash join vs sort-merge join", md:"| | Broadcast hash join | Sort-merge join |\n|---|---|---|\n| What moves | Small table copied to every executor | **Both** tables shuffled by key |\n| Good when | One side fits in memory (MBs to ~1 GB) | Both sides large |\n| Cost | One small transfer | Network + disk for the big side |\n\n- Spark broadcasts automatically below «spark.sql.autoBroadcastJoinThreshold» (10 MB) **if it knows the size**. File-based size estimates are often wrong after filters.\n- With **AQE** on, Spark can switch to broadcast at runtime when the shuffled side turns out small, but only *after* paying for a shuffle stage.\n- An explicit «F.broadcast()» hint is a fine, deliberate choice for a known-small dimension table."},
+  {t:"Python UDFs, pandas UDFs and built-ins", md:"- **Built-in functions** («F.when», «F.regexp_extract»…) run inside the JVM, get whole-stage code generation and are visible to the optimizer.\n- **Python UDF**: rows are serialized (pickle) to a Python worker process, processed one at a time, and serialized back. Opaque to Catalyst: no predicate pushdown through it.\n- **pandas UDF**: batches rows via **Arrow** (columnar), 10-100× faster than a plain Python UDF, but still a separate process using **memoryOverhead**.\n- Rule: built-in first, pandas UDF if you must, plain Python UDF last."},
+  {t:"Getting data out of Spark: collect vs foreachPartition", md:"- «collect()» = all rows to the driver. Fine for a handful of rows (a count, a top-10), dangerous for millions.\n- «toLocalIterator()» streams partition by partition, still through the driver.\n- «foreachPartition(fn)» runs «fn» **on executors**, in parallel; open one client per partition and write in batches (DynamoDB «batch_writer», 25 items per call).\n- Mind the sink's limits: 200 partitions × parallel writers can throttle DynamoDB. Size write capacity or use «repartition(n)» to control concurrency."}
+ ],
+ say:"When I review Spark code I check four things: filters on partition columns so pruning works, built-in functions instead of Python UDFs, the join strategy (broadcast the small side), and anything that pulls data to the driver like collect(). I confirm with explain(): PartitionFilters, BroadcastHashJoin and no Python eval step."
+},
+{
+ type:"logs", title:"Why did stage 7 fail?", three:"answer all 4 questions with at most 1 wrong tap",
+ brief:"The nightly **settlement_rollup** job failed at 02:41 after 2 retries. Your team lead pasted the driver and executor logs and asked: *\"Don't just tell me it failed. Tell me why.\"*\n\nUse the filter box (try «ERROR», «killed», «113») to cut through ~90 lines of noise.",
+ source:"driver + executor logs · application_1731900011_0207",
+ log:(() => { const L = []; let id = 1180;
+  const ts = (m, s) => `02:${String(m).padStart(2, "0")}:${String(s).padStart(2, "0")}`;
+  L.push(`${ts(31,2)} INFO  SparkContext: Running Spark version 3.5.1`, `${ts(31,2)} WARN  NativeCodeLoader: Unable to load native-hadoop library for your platform... using builtin-java classes`, `${ts(31,4)} INFO  ResourceProfile: Default executor: cores 5, memory 18g, memoryOverhead 2g`, `${ts(31,9)} WARN  SparkConf: The configuration key 'spark.yarn.executor.memoryOverhead' has been deprecated`, `${ts(31,40)} INFO  DAGScheduler: Submitting 400 missing tasks from ShuffleMapStage 6 (settlements ⋈ merchants)`);
+  for (let k = 0; k < 18; k++) L.push(`${ts(32 + (k >> 2), (k * 7) % 60)} INFO  TaskSetManager: Finished task ${k * 21}.0 in stage 6.0 (TID ${id++}) in ${9 + (k % 5)} s on exec ${1 + (k % 12)} (${(k + 1) * 22}/400)`);
+  L.push(`${ts(35,58)} INFO  DAGScheduler: ShuffleMapStage 6 finished in 258 s`, `${ts(36,1)} INFO  DAGScheduler: Submitting 200 missing tasks from ResultStage 7 (groupBy merchant_id)`);
+  for (let k = 0; k < 22; k++){ const t = k * 9 % 200; if (t === 113) continue; L.push(`${ts(36 + (k >> 3), (k * 11) % 60)} INFO  TaskSetManager: Finished task ${t}.0 in stage 7.0 (TID ${id++}) in ${6 + (k % 4)} s, shuffle read ${180 + (k * 13) % 40} MB (${k + 1}/200)`); }
+  L.push(`${ts(37,12)} INFO  GC: Pause Young (G1 Evacuation Pause) 412M->188M(18432M) 41.2ms`,
+   `${ts(37,40)} INFO  ShuffleBlockFetcherIterator: Task 113.0 in stage 7.0: fetching 400 blocks, total shuffle read [b]48.2 GB[/b] (stage median 190 MB)`,
+   `${ts(37,41)} INFO  KeyStats: partition 113 top keys: merchant_id=[r]NULL[/r] (61,204,113 rows), merchant_id=M-20391 (8,112 rows)`,
+   `${ts(38,5)} INFO  UnsafeExternalSorter: Thread 88 spilling sort data of 9.1 GB to disk (1 time so far)`,
+   `${ts(38,50)} INFO  UnsafeExternalSorter: Thread 88 spilling sort data of 9.0 GB to disk (2 times so far)`,
+   `${ts(39,20)} INFO  GC: Pause Full (G1 Compaction Pause) 17.9G->17.6G(18432M) 7841ms`,
+   `${ts(39,44)} WARN  HeartbeatReceiver: Removing executor 9 with no recent heartbeats: 132412 ms exceeds timeout 120000 ms`,
+   `${ts(39,44)} ERROR YarnScheduler: Lost executor 9 on ip-10-4-1-31: Container killed by YARN for exceeding physical memory limits. 20.4 GB of 20 GB physical memory used.`,
+   `${ts(39,45)} WARN  TaskSetManager: Lost task 113.0 in stage 7.0 (TID ${id++}): ExecutorLostFailure (executor 9 exited caused by one of the running tasks)`,
+   `${ts(39,46)} WARN  TaskSetManager: Lost task 140.0 in stage 7.0: FetchFailed(BlockManagerId(9, ip-10-4-1-31, 7337), shuffleId=3, mapIndex=212, reduceId=140)`,
+   `${ts(39,46)} ERROR TaskSetManager: org.apache.spark.shuffle.FetchFailedException: Failed to connect to ip-10-4-1-31:7337`,
+   `${ts(39,47)} INFO  DAGScheduler: Resubmitting ShuffleMapStage 6 and ResultStage 7 due to fetch failure`);
+  for (let k = 0; k < 8; k++) L.push(`${ts(40, k * 6)} INFO  TaskSetManager: Finished task ${k * 37 % 400}.1 in stage 6.1 (TID ${id++}) in ${10 + k % 3} s on exec ${2 + k}`);
+  L.push(`${ts(40,58)} INFO  ShuffleBlockFetcherIterator: Task 113.1 in stage 7.1: total shuffle read 48.2 GB`,
+   `${ts(41,30)} ERROR YarnScheduler: Lost executor 4 on ip-10-4-1-12: Container killed by YARN for exceeding physical memory limits. 20.2 GB of 20 GB physical memory used.`,
+   `${ts(41,31)} ERROR TaskSetManager: Task 113 in stage 7.1 failed 4 times; aborting job`,
+   `${ts(41,31)} ERROR FileFormatWriter: Aborting job 9c1e2f.`,
+   `${ts(41,32)} ERROR SparkSession: Job aborted due to stage failure: Task 113 in stage 7.1 failed 4 times, most recent failure: ExecutorLostFailure (executor 4 exited caused by one of the running tasks)`,
+   `${ts(41,33)} INFO  SparkContext: Successfully stopped SparkContext`);
+  return L.join("\n"); })(),
+ qs:[
+  {q:"Start at the end. Tap the line where Spark gives up on the job.", a:["Job aborted due to stage failure"], tip:"Filter for «aborted».", why:"**Job aborted due to stage failure: Task 113 … failed 4 times.** Spark retries a task up to «spark.task.maxFailures» (4). One task failing 4 times kills the whole job. Note it's always **task 113**: that's your thread to pull."},
+  {q:"You'll see a FetchFailedException. It's a symptom. Tap the line that shows **why** shuffle data on ip-10-4-1-31 disappeared.", a:["Lost executor 9 on ip-10-4-1-31: Container killed by YARN"], tip:"Filter for «killed».", why:"**Executor 9 was killed by YARN for exceeding its memory limit (20.4 of 20 GB).** Its shuffle files died with it, so other tasks that needed them got **FetchFailed**, and Spark had to re-run the earlier stage. FetchFailed is usually the *echo* of a lost executor, not the cause."},
+  {q:"Executors normally sit well under 20 GB. Tap the line that shows what made executor 9's task so heavy.", a:["total shuffle read [b]48.2 GB[/b]","total shuffle read 48.2 GB (stage median"], tip:"Filter for «113».", why:"**Task 113 had to read 48.2 GB of shuffle data, while the median task read 190 MB.** That's **~250× the median: data skew.** One task gets most of the data, spills repeatedly, spends seconds in full GC, misses heartbeats and finally blows the container."},
+  {q:"Last one: tap the line that tells you **which key** caused the skew.", a:["top keys: merchant_id="], why:"**61 million rows with merchant_id = NULL** all hash to the same partition. Nulls (or a default like 0 or 'unknown') are the most common skew source. Fixes: filter or handle nulls separately, **salt** the hot key, or let **AQE skew join** split the partition («spark.sql.adaptive.skewJoin.enabled»). More memory just moves the cliff."}
+ ],
+ notes:[["NativeCodeLoader","Harmless start-up warning on almost every cluster."],["deprecated","A deprecation warning. Old, harmless."],["GC: Pause Young","Young-generation GC pauses of ~40 ms are normal."],["Finished task","A normal, successful task."],["FetchFailed","That's the symptom: a task couldn't fetch shuffle data. Why was the data gone?"],["Pause Full","A 7.8 s full GC is a bad sign, but it's a consequence. What's filling the memory?"],["spilling","Spilling shows memory pressure. Look for what's causing it."],["Removing executor 9 with no recent heartbeats","Missed heartbeats happen during long GC pauses. It's part of the chain, not the start."],["Resubmitting","Spark recovering from the fetch failure: a consequence."]],
+ deep:[
+  {t:"Reading a Spark failure backwards", md:"1. **Find the final error** («Job aborted due to stage failure»). It names the task and stage.\n2. **Follow that task id** back through the log (filter on it).\n3. **Separate cause from echo**: «FetchFailedException», «ExecutorLostFailure» and resubmitted stages are almost always consequences of an executor dying.\n4. **Find why the executor died**: YARN kill (memory over container limit, exit 137/143), OOM in the JVM (heap), lost node (spot), or heartbeat timeout (long GC).\n5. **Find why that task was special**: shuffle read size vs median, record counts, the key."},
+  {t:"Data skew: detect it, then fix it", md:"**Detect**: in the Spark UI stage page compare **median vs max** for duration and shuffle read. Max ≫ 10× median = skew.\n\n**Fix, in order of preference:**\n- **Handle the bad key**: filter nulls before the join/groupBy and process them separately (they often shouldn't join at all).\n- **AQE skew join** («spark.sql.adaptive.skewJoin.enabled=true»): Spark splits oversized partitions of a sort-merge join at runtime. Note: it handles **joins**, not aggregations.\n- **Two-phase aggregation**: add a random salt (0-N) to the key, aggregate, then aggregate again without the salt.\n- **Salting joins**: explode the small side N times with salt values, add a random salt to the big side.\n- **Broadcast** the other side if it's small: no shuffle, no skew.\n\nMore executor memory only raises the cliff; the next spike falls off it again."},
+  {t:"Why a lost executor causes FetchFailed", md:"Shuffle output of a map stage is written to the **local disk of the executor** that ran the map task (served by its block manager or the external shuffle service). When that executor dies, its shuffle files are gone. Reducers that need them fail with **FetchFailed**, and Spark must **re-run the parent stage** to rebuild them. That's why one sick executor can make a job look like a cascade of failures. On YARN, the **external shuffle service** or Spark 3's **decommissioning/shuffle migration** can keep shuffle files available after an executor exits normally, but not after a crash of the node."}
+ ],
+ say:"I read Spark failures backwards: the abort message names the task, I follow that task id, treat FetchFailed and ExecutorLost as echoes, and find why the executor died. Here a 48 GB shuffle read against a 190 MB median showed skew on null merchant_id, so the fix was handling nulls separately or salting, not adding memory."
+},
+{
+ type:"tune", title:"Size the executors", three:"hit every goal in 2 runs or fewer",
+ brief:"**risk_rollup** shuffles about **2 TB** and calls one **pandas UDF**. You have a fixed EMR cluster: **20 nodes × r5.4xlarge**. After YARN's own reservations each node offers **15 vCPUs and 120 GB** to containers.\n\nThe current settings (one giant executor per node, 200 shuffle partitions) take **35 minutes**. Get it under **25 minutes** without failures and use the cluster's cores.",
+ knobs:[
+  {k:"c", label:"spark.executor.cores", opts:[1,2,5,8,15], def:15, help:"How many tasks one executor runs at the same time.\n\n- **Too many (8-15)**: tasks compete for the same JVM heap, GC pauses get long, and HDFS/S3 clients in one JVM become a bottleneck.\n- **Too few (1)**: lots of JVMs, each with its own overhead and copy of broadcast variables.\n- The common sweet spot is **~5 cores per executor**."},
+  {k:"m", label:"spark.executor.memory (heap)", opts:[8,16,32,40,64], def:64, fmt:v => v + " GB", help:"The JVM heap. About 60% of (heap − 300 MB) is **unified memory** for execution (shuffles, joins, sorts) and storage (cache), shared by all tasks in the executor.\n\nPer task you get roughly **(heap − 0.3) × 0.6 ÷ cores**. If a shuffle partition is much bigger than that, the task spills to disk (slow) or fails."},
+  {k:"o", label:"spark.executor.memoryOverhead", opts:["10%",4,8], def:"10%", fmt:v => v === "10%" ? "default (10%)" : v + " GB", help:"Memory **outside** the heap in the same container: thread stacks, NIO buffers, and here the **Python workers + Arrow batches** of the pandas UDF.\n\nDefault is max(384 MB, 10% of heap). This job's Python side needs about **1.5 GB + 0.3 GB per core**.\n\nContainer size = heap + overhead. It must fit the node's 120 GB, and YARN kills containers that exceed it."},
+  {k:"p", label:"spark.sql.shuffle.partitions", opts:[200,2000,8000], def:200, help:"How many partitions a shuffle produces. With 2 TB shuffled:\n\n| Partitions | Size each |\n|---|---|\n| 200 | ~10 GB |\n| 2,000 | ~1 GB |\n| 8,000 | ~256 MB |\n\nToo few = huge partitions that spill or OOM. Too many = scheduling overhead and tiny files. Aim for **~128 MB–1 GB** per partition, or let **AQE** coalesce them («spark.sql.adaptive.coalescePartitions.enabled»)."}
+ ],
+ metrics:[
+  {k:"status", label:"Result", gl:"no failures", goal:v => v === "OK"},
+  {k:"rt", label:"Runtime", unit:" min", gl:"≤ 25 min", goal:v => v > 0 && v <= 25},
+  {k:"cu", label:"Cores used", unit:"%", gl:"≥ 85%", goal:v => v >= 85}
+ ],
+ sim:v => {
+  const ov = v.o === "10%" ? Math.max(0.384, 0.1 * v.m) : v.o, box = v.m + ov, epn = Math.min(Math.floor(15 / v.c), Math.floor(120 / box)), log = [];
+  if (epn < 1) return {m:{status:"Doesn't fit", rt:0, cu:0}, log:[`A container needs **${box.toFixed(1)} GB** (heap ${v.m} + overhead ${ov.toFixed(1)}), but a node only offers 120 GB. YARN can't place a single executor.`]};
+  const ex = 20 * epn, slots = ex * v.c, cu = Math.round(epn * v.c / 15 * 100), need = 1.5 + 0.3 * v.c;
+  log.push(`**${epn} executor${epn > 1 ? "s" : ""} per node** (limited by ${Math.floor(15 / v.c) <= Math.floor(120 / box) ? "cores" : "memory"}) × 20 nodes = **${ex} executors**, **${slots} task slots**. Cores in use: ${epn * v.c}/15 per node.`);
+  if (ov < need){ log.push(`Python workers need ~**${need.toFixed(1)} GB** off-heap, but overhead is **${ov.toFixed(1)} GB**. YARN: *Container killed for exceeding physical memory limits* (exit 137).`); return {m:{status:"Killed", rt:0, cu}, log}; }
+  log.push(`Off-heap: Python needs ~${need.toFixed(1)} GB, overhead is ${ov.toFixed(1)} GB ✓`);
+  const part = 2048 / v.p, tm = (v.m - 0.3) * 0.6 / v.c, ratio = part / tm;
+  log.push(`Each shuffle partition is ~**${part >= 1 ? part.toFixed(1) + " GB" : Math.round(part * 1024) + " MB"}**; each task gets ~**${tm.toFixed(1)} GB** of execution memory.`);
+  if (ratio > 6){ log.push(`Partitions are ${ratio.toFixed(0)}× bigger than task memory: **java.lang.OutOfMemoryError** during the sort. Use more partitions or more memory per core.`); return {m:{status:"OOM", rt:0, cu}, log}; }
+  const spill = ratio > 1 ? 1.8 : 1, pen = v.c >= 8 ? 1.35 : v.c === 1 ? 1.2 : 1;
+  if (spill > 1) log.push(`Partitions don't fit in memory, so tasks **spill to disk** repeatedly (×1.8 time).`);
+  if (pen > 1) log.push(v.c >= 8 ? `${v.c} tasks share one JVM: long **GC pauses** and contended S3 clients (×1.35 time).` : `One core per executor: ${ex} JVMs each with its own overhead and broadcast copies (×1.2 time).`);
+  const rt = Math.round((250000 / slots * spill * pen + v.p * 0.004 + 60) / 60);
+  log.push(`Finished in **${rt} minutes**.`);
+  return {m:{status:"OK", rt, cu}, log};
+ },
+ best:"A classic answer: **5 cores, 32 GB heap (default overhead 3.2 GB), 2,000 partitions**: 3 executors per node, 300 slots, every core busy, ~1 GB partitions that fit in ~3.8 GB of task memory, enough off-heap for Python. ~15 minutes.",
+ deep:[
+  {t:"The executor sizing recipe", md:"1. **Usable per node**: vCPUs and memory YARN offers (here 15 cores, 120 GB).\n2. **Pick cores per executor**: ~5.\n3. **Executors per node** = floor(15 ÷ 5) = 3.\n4. **Memory per container** = 120 ÷ 3 = 40 GB. Split it: **overhead** (≥10%, more for Python/Arrow/native libs) + **heap** for the rest: e.g. 32 GB heap + 4-8 GB overhead.\n5. Leave one executor's worth for the **driver** if it runs on the cluster (client vs cluster mode).\n6. Check: **cores used = executors × cores** should be ~100% of what YARN offers. A config that leaves 7 of 15 cores idle wastes half the cluster you're paying for."},
+  {t:"How Spark memory inside an executor is split", md:"| Region | Size | Used for |\n|---|---|---|\n| Reserved | 300 MB | Spark internals |\n| **Unified** («spark.memory.fraction» 0.6) | 60% of the rest | Execution (shuffle, join, sort, agg) + Storage (cache), borrowing from each other |\n| User | 40% of the rest | Your objects, UDF data structures, metadata |\n| **Overhead** (outside heap) | memoryOverhead | Python workers, Arrow, netty buffers, thread stacks |\n\nAll **running tasks share** the unified region, so per-task execution memory ≈ unified ÷ cores. When a task's sort or hash map outgrows its share it **spills**; when even spilling can't help (one giant record group, a huge broadcast) you get **OOM**."},
+  {t:"Choosing shuffle partitions", md:"- Target **~128 MB–1 GB per partition** after the shuffle: «shuffle bytes ÷ target size».\n- Make it at least a few times the number of task slots so stragglers don't dominate (e.g. 300 slots → ≥ 900 partitions).\n- With **AQE** (Spark 3, default on) set a generous initial number and let «coalescePartitions» merge small ones, and «skewJoin» split oversized ones.\n- The default **200** was chosen for small data. On TB-scale shuffles it's almost always too low."}
+ ],
+ say:"I size executors from the node outward: about 5 cores per executor, divide the node's cores to get executors per node, split the memory per container into overhead and heap, with extra overhead for Python or Arrow, and then pick shuffle partitions so each is roughly 128 MB to 1 GB. Then I check that every core YARN offers is actually in use."
 }
 ]);

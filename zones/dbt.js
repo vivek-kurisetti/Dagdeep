@@ -143,6 +143,7 @@ QUEST.cases("dbt", [
 {
  title:"Revenue doubled overnight", icon:"📈", sev:1, clock:"08:50", channel:"inc-2344-revenue-mismatch", svc:"finance mart · dbt on Snowflake", need:4,
  terms:[["Model","A dbt SELECT statement that builds a table or view. «fct_payments» is the payments fact table."],["Incremental model","A model that only processes new or changed rows on each run instead of rebuilding everything."],["is_incremental()","A dbt macro that's true on incremental runs, so you can filter to just the new rows."],["unique_key","Tells dbt which column identifies a row, so re-processed rows are updated (merged) instead of appended."],["Incremental strategy","How new rows are written: «append» (insert only), «merge» (upsert on unique_key), «delete+insert»."],["Lookback window","Re-reading the last N days on each run to catch late-arriving data."],["dbt test","An assertion run after a build, like «unique» or «not_null» on a column."]],
+ deep:[{"t": "Incremental strategies compared", "md": "| Strategy | What dbt does | Use when |\n|---|---|---|\n| «append» | INSERT new rows | Immutable events, no reprocessing |\n| «merge» | MERGE on «unique_key» | Rows can change or be re-read (lookbacks) |\n| «delete+insert» | DELETE matching keys, then INSERT | Adapters without a good MERGE; batch replacements |\n| «insert_overwrite» | Replace whole partitions | Partitioned tables (BigQuery, Spark) |\n| «microbatch» (dbt 1.9+) | One query per time batch by «event_time» | Large time-series with backfills |\n\nA **lookback** only makes sense with a strategy that replaces or merges what it re-reads."}, {"t": "Catching wrong numbers before people do", "md": "- **Generic tests**: «unique», «not_null», «relationships», «accepted_values» on every key.\n- **Reconciliation**: compare totals with a trusted source (ledger) with a tolerance; make it **block** downstream exports.\n- **Anomaly checks**: day-over-day change beyond N% (dbt-expectations, Elementary, or a simple custom test).\n- **CI on PRs**: «dbt build --select state:modified+» against a staging copy, with row-count diffs (e.g. data-diff) on changed models."}],
  pager:`[r]FIRING[/r]  finance_recon: mart revenue vs ledger mismatch [r]+97.4%[/r]
 mart      fct_payments  Nov 15-17 GMV = [r]₹1,842 cr[/r]
 ledger    source of truth            = ₹933 cr
@@ -230,5 +231,56 @@ where updated_at >= (select dateadd(day, -3, max(updated_at)) from {{ this }})
   prevent:["Every incremental model with a lookback must have a unique_key and merge or delete+insert","«unique» tests on every primary key in marts","Reconciliation vs the ledger gates the CFO email","PR template question: \"what happens if this runs twice on the same data?\""]
  },
  learned:["Incremental + **lookback** needs **unique_key** + **merge**. Append-only re-reads mean duplicates.","First check for a too-good number: **count(*) vs count(distinct id)**.","Fix the model **and** clean up the data already written.","Tests on keys («unique», «not_null») plus reconciliation turn silent errors into loud ones."]
+}
+]);
+
+/* ===== Work simulator: dbt ===== */
+QUEST.work("dbt", [
+{
+ type:"pr", title:"\"Add merchant LTV model\"", three:"find all 3 problems with no false alarms",
+ brief:"The growth team wants **merchant lifetime value (LTV)** on the sales dashboard: total payment amount per merchant over the last 12 months, plus refund count. An analyst opened the PR. It runs and the numbers \"look big, which is good news\".\n\nThe model's grain must be **one row per merchant**.",
+ repo:"payu/analytics-dbt", pr:"#317 Add fct_merchant_ltv for the sales dashboard", author:"kavya",
+ desc:"New model «fct_merchant_ltv»: 12-month GMV and refund count per merchant.\n\nRan «dbt build -s fct_merchant_ltv» in prod schema ✅ (dev was missing some tables)",
+ reasons:["Hard-codes a table instead of using ref() / source()","Join fans out: amounts get multiplied","Nothing tests the model's grain (one row per merchant)","Time zone bug in the date filter","Materialization is wrong for this size"],
+ files:[
+  {path:"models/marts/fct_merchant_ltv.sql", diff:`@@ -0,0 +1,17 @@
++{{ config(materialized='table') }}
++
++select
++    p.merchant_id,
++    m.merchant_name,
++    sum(p.amount)            as gmv_12m,
++    count(r.refund_id)       as refunds_12m
++from analytics_prod.staging.stg_payments p
++join {{ ref('dim_merchants') }} m
++    on p.merchant_id = m.merchant_id
++left join {{ ref('stg_refunds') }} r
++    on p.merchant_id = r.merchant_id
++where p.created_at >= dateadd(month, -12, current_date)
++  and p.status = 'captured'
++group by 1, 2`},
+  {path:"models/marts/schema.yml", diff:`@@ -40,3 +40,9 @@
+   - name: fct_payments
+     columns:
+       - name: payment_id
++  - name: fct_merchant_ltv
++    columns:
++      - name: merchant_id
++        tests: [not_null]          # grain: one row per merchant
++      - name: gmv_12m
++        tests: [not_null]`}],
+ bugs:[
+  {f:0, at:"from analytics_prod.staging.stg_payments p", a:0, why:"Hard-coding «analytics_prod.staging…» bypasses dbt: the model **always reads prod** (even in dev and CI), dbt can't build it in the right order, and lineage/docs miss the dependency. It's also why \"dev was missing tables\". Use «{{ ref('stg_payments') }}»."},
+  {f:0, at:"on p.merchant_id = r.merchant_id", a:1, why:"Joining payments to refunds **on merchant_id alone** pairs every payment with every refund of that merchant. A merchant with 1,000 payments and 20 refunds becomes 20,000 rows, so «sum(p.amount)» is **×20** and «count(r.refund_id)» is ×1,000. Aggregate each side to the merchant grain first (two CTEs), then join."},
+  {f:1, at:"# grain: one row per merchant", a:2, why:"Nothing tests the model's **grain**. Today «group by» keeps one row per merchant, but if «dim_merchants» ever holds two rows for a merchant (a renamed merchant, a history table), every LTV silently doubles. A «unique» test on «merchant_id» catches that, and a **reconciliation** test (total GMV vs the source) would have caught *this* PR's fan-out before merge."}
+ ],
+ notes:[{f:0, at:"where p.created_at >= dateadd(month, -12, current_date)", note:"A rolling 12-month window on «created_at» is what was asked for. Fine for a daily-rebuilt table."},{f:0, at:"{{ config(materialized='table') }}", note:"A table is right: it's aggregated, read by a dashboard, and rebuilt daily."},{f:0, at:"join {{ ref('dim_merchants') }} m", note:"Merchants is one row per merchant: this join doesn't fan out."},{f:0, at:"and p.status = 'captured'", note:"Only counting captured payments is correct for GMV."},{f:1, at:"- name: gmv_12m", note:"Testing gmv for not_null is fine. What's missing is a test on the grain."}],
+ shipped:"The sales dashboard showed top merchants with **₹40 crore LTV** (real: ₹2 crore). Sales used it to prioritise accounts for a week before finance noticed.",
+ deep:[
+  {t:"Fan-out: the most common SQL bug in analytics", md:"A join multiplies rows whenever the join key isn't unique on **at least one side**.\n\n- payments (many per merchant) ⋈ refunds (many per merchant) on merchant_id = **many × many** rows per merchant.\n- Any «sum()» over the left side is then multiplied by the number of matches on the right.\n\n**Fix: aggregate before you join.**\n~~~\nwith pay as (select merchant_id, sum(amount) gmv_12m from {{ ref('stg_payments') }} where … group by 1),\n     ref as (select merchant_id, count(*) refunds_12m from {{ ref('stg_refunds') }} where … group by 1)\nselect m.merchant_id, m.merchant_name, coalesce(pay.gmv_12m, 0), coalesce(ref.refunds_12m, 0)\nfrom {{ ref('dim_merchants') }} m\nleft join pay using (merchant_id)\nleft join ref using (merchant_id)\n~~~\nQuick check: «count(*)» before and after each join should only go **down or stay equal** at the target grain."},
+  {t:"ref() and source(): why dbt needs them", md:"- «ref('model')» resolves to the right **database.schema** for the current target (dev, CI, prod), so dev builds read dev tables.\n- It builds the **DAG**: dbt knows to build «stg_payments» before «fct_merchant_ltv», and «dbt build -s +fct_merchant_ltv» includes upstream models.\n- It powers **lineage, docs and state-based CI** («--select state:modified+»).\n- Raw tables loaded by other tools go through «source('payments', 'raw_payments')», declared in a sources YAML, which also enables **freshness** checks."},
+  {t:"Test the grain, every time", md:"Every model has a **grain**: what one row represents. State it and test it:\n~~~\n- name: fct_merchant_ltv\n  columns:\n    - name: merchant_id\n      tests: [not_null, unique]\n~~~\nFor composite grains use «dbt_utils.unique_combination_of_columns». Add a **relationships** test to the parent («merchant_id» exists in dim_merchants) and, for money, a **reconciliation** test that compares totals with the source (e.g. total GMV within 0.5% of the ledger)."}
+ ],
+ say:"In analytics PRs I check three things first: every table goes through ref() or source(), joins can't fan out (aggregate each side to the target grain before joining), and the model's grain is tested with unique and not_null on its key."
 }
 ]);

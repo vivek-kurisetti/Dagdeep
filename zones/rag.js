@@ -466,6 +466,7 @@ QUEST.cases("rag", [
 {
  title:"The bot can't find the new policy", icon:"🤖", sev:2, clock:"11:30", channel:"inc-2324-assistant-retrieval", svc:"support-assistant · RAG (pgvector)", need:4,
  terms:[["RAG", "Retrieval-augmented generation: fetch relevant document chunks, then have the LLM answer from them."], ["Chunk", "A piece of a document (a few hundred tokens) that is embedded and stored for search."], ["Embedding", "A list of numbers that represents meaning. Similar texts get nearby vectors, but only within the same model."], ["Cosine similarity", "How close two vectors point (≈1 very similar, ≈0 unrelated). Retrieval ranks chunks by it."], ["recall@5", "Share of test questions where the correct chunk is in the top 5 results. Measures retrieval alone."], ["Faithfulness", "Whether the answer sticks to the retrieved context. Measures generation alone."], ["Blue/green re-index", "Build a complete new index next to the old one, test it, then switch traffic in one step."]],
+ deep:[{"t": "Why two embedding models don't mix", "md": "An embedding model maps text to a point in its own learned space. Two models, even with the same number of dimensions, have **unrelated axes**: dimension 17 means something different in each. Cosine similarity between a v2 query vector and a v3 document vector is like comparing GPS coordinates with postcodes: it returns a number, but the number means nothing. Vector databases can't detect this; only your **metadata** (model id per chunk) and **evals** can."}, {"t": "Embedding migrations done right", "md": "1. Version the index: «chunks_v3» next to «chunks_v2».\n2. **Backfill** every chunk with the new model (batch, rate-limited, resumable).\n3. Run the **eval suite** (recall@k, MRR) on both; compare cost and latency.\n4. Switch **query and ingestion together** via one config value (blue/green).\n5. Keep v2 for rollback for a few days, then delete.\n6. Carry over **all metadata**, especially ACLs and effective dates."}],
  pager:`[y]WARN[/y]  support-assistant  eval: retrieval recall@5 dropped [r]0.91 → 0.58[/r]
 online   "I couldn't find that in our policies" answers up [r]4.1×[/r] since Monday
 escal.   human handoffs +62% (support lead raised this)
@@ -597,5 +598,44 @@ generation:
  },
  learned:["Debug RAG in two halves: **retrieval** (did the right chunk come back?) then **generation** (did the model use it?).","Same dimensions ≠ same space. Query and document embeddings **must** come from the same model.","Flat **faithfulness** + falling **recall** = the model is fine; it's being fed the wrong context.","Embedding upgrades are **migrations**: re-embed everything, blue/green, eval gate, switch together."],
  cards:["embeddings","evals"]
+}
+]);
+
+/* ===== Work simulator: RAG ===== */
+QUEST.work("rag", [
+{
+ type:"tune", title:"Tune the retriever", three:"hit every goal in 2 runs or fewer",
+ brief:"The support assistant answers from **1,800 policy and FAQ documents**. Your eval set has 200 real questions with the correct source chunk marked. Right now it finds the right chunk only **74%** of the time.\n\nGet retrieval to **90%+**, keep each answer **cheap** and **fast**. Prices: ₹0.08 per 1,000 prompt tokens; the prompt template itself is ~800 tokens.",
+ knobs:[
+  {k:"cs", label:"Chunk size", opts:[128,512,2048], def:2048, fmt:v => v + " tokens", help:"How big each indexed piece of a document is.\n\n- **Small (128)**: precise embeddings, but answers that span two sentences get split, and context around a rule is lost.\n- **Large (2048)**: one embedding has to represent many topics, so it matches nothing strongly (diluted), and every retrieved chunk is expensive to send.\n- **~300-800 tokens**, split on headings or paragraphs, is a common sweet spot for policy docs."},
+  {k:"ov", label:"Overlap", opts:[0,15], def:0, fmt:v => v + "%", help:"How much consecutive chunks share. Overlap keeps a sentence that sits on a boundary complete in at least one chunk. 10-20% is typical; it costs a little more storage."},
+  {k:"hy", label:"Hybrid search (BM25 + vectors)", opts:["off","on"], def:"off", help:"Vector search finds **meaning** but is weak on exact tokens: error codes («ERR_4012»), product names, numbers. **BM25** keyword search is great at those. **Hybrid** runs both and merges the rankings (e.g. reciprocal rank fusion)."},
+  {k:"k", label:"top_k sent to the model", opts:[3,8,30], def:3, help:"How many chunks go into the prompt. More chunks raise recall but cost more tokens, add latency, and can **bury** the right chunk (models use the start and end of long contexts better than the middle)."},
+  {k:"rr", label:"Reranker", opts:["off","on"], def:"off", help:"A **cross-encoder** reads the question and each candidate together and re-scores them, much more accurately than vector similarity. Typical setup: retrieve ~50 candidates cheaply, rerank, keep the best top_k. Adds ~300-400 ms."}
+ ],
+ metrics:[
+  {k:"rec", label:"Recall (right chunk found)", unit:"%", gl:"≥ 90%", goal:v => v >= 90},
+  {k:"cost", label:"Cost per answer", gl:"≤ ₹0.40", goal:v => v <= 0.4, show:v => "₹" + v.toFixed(2)},
+  {k:"lat", label:"Latency p95", unit:" s", gl:"≤ 2.5 s", goal:v => v <= 2.5, show:v => v.toFixed(1)}
+ ],
+ sim:v => {
+  const log = []; let r = {128:0.70, 512:0.80, 2048:0.74}[v.cs];
+  log.push(`Chunk size ${v.cs}: base recall **${Math.round(r * 100)}%**${v.cs === 2048 ? " (big chunks dilute the embedding: each one is about many things)" : v.cs === 128 ? " (tiny chunks split rules from their conditions)" : ""}.`);
+  if (v.ov){ const g = v.cs === 2048 ? 0.01 : 0.04; r += g; log.push(`Overlap keeps boundary sentences whole: **+${Math.round(g * 100)}%**.`); }
+  if (v.hy === "on"){ r += 0.06; log.push(`Hybrid search finds exact codes and names («ERR_4012», «UPI Lite»): **+6%**.`); }
+  const kg = {3:0, 8:0.06, 30:0.10}[v.k]; if (kg){ r += kg; log.push(`top_k ${v.k}: more chances to include the right chunk: **+${Math.round(kg * 100)}%**.`); }
+  if (v.rr === "on"){ r += v.k === 30 ? 0.02 : 0.06; log.push(`Reranker picks the best of 50 candidates for the top ${v.k}: **+${v.k === 30 ? 2 : 6}%**${v.k === 30 ? " (less gain: you were already sending most candidates)" : ""}.`); }
+  const ctx = v.k * v.cs; if (ctx > 8000){ r -= 0.04; log.push(`${ctx.toLocaleString()} tokens of context: the right chunk gets **lost in the middle**, −4%.`); }
+  const rec = Math.round(Math.min(0.98, r) * 100), cost = (ctx + 800) / 1000 * 0.08, lat = 0.9 + ctx / 1000 * 0.25 + (v.rr === "on" ? 0.35 : 0) + (v.hy === "on" ? 0.1 : 0);
+  log.push(`Prompt ≈ ${(ctx + 800).toLocaleString()} tokens → **₹${cost.toFixed(2)}** per answer, **${lat.toFixed(1)} s** p95.`);
+  return {m:{rec, cost, lat}, log};
+ },
+ best:"A strong setup: **512-token chunks, 15% overlap, hybrid search on, reranker on, top_k 3**: ~96% recall, ~₹0.19 and ~1.7 s per answer. Retrieve wide and cheap, rerank, and send the model only a few excellent chunks.",
+ deep:[
+  {t:"Measure retrieval separately from generation", md:"- Build an eval set: real questions + the **gold chunk(s)** that contain the answer.\n- **Recall@k**: is a gold chunk in the top k? **MRR**: how high does it rank?\n- Only after retrieval is good, judge generation: **faithfulness** (does the answer stick to the context?) and **answer correctness**.\n- Tune one knob at a time and re-run the eval. Track cost and latency next to quality."},
+  {t:"Chunking that respects the document", md:"- Split on **structure** (headings, sections, list items) before falling back to token counts.\n- Prepend the **document title and section path** to each chunk («Refund policy › UPI › Timelines»). It improves embeddings and helps the model cite.\n- Keep tables whole; convert them to text rows if needed.\n- Store metadata (doc id, version, effective date, ACL) for **filtering** before similarity search."},
+  {t:"Retrieve → rerank → generate", md:"| Stage | Tool | Goal |\n|---|---|---|\n| Retrieve | Vector + BM25 (hybrid), metadata filters | **High recall**, cheap: ~50 candidates |\n| Rerank | Cross-encoder | **High precision**: best 3-5 |\n| Generate | LLM with citations | Faithful answer from few, relevant chunks |\n\nSending 30 chunks \"to be safe\" costs more, adds latency and often lowers accuracy (*lost in the middle*). A reranker usually beats a bigger top_k."}
+ ],
+ say:"I tune RAG retrieval with an eval set and recall@k: structure-aware chunks of a few hundred tokens with some overlap, hybrid BM25 plus vector search for exact terms, then a cross-encoder reranker so I can send the model only three to five strong chunks, which keeps cost and latency down."
 }
 ]);

@@ -216,6 +216,7 @@ QUEST.cases("debezium", [
 {
  title:"The lake is missing two days of orders", icon:"🕳️", sev:1, clock:"10:15", channel:"inc-2340-orders-cdc-gap", svc:"orders-cdc · Debezium MySQL connector", need:4, uiName:"Connect UI",
  terms:[["CDC","Change data capture: streaming every insert, update and delete from a database's log into Kafka."],["Binlog","MySQL's change log, stored in numbered files (binlog.000412…). Debezium reads it like a replica would."],["Binlog retention","How long MySQL keeps binlog files before purging them («binlog_expire_logs_seconds»)."],["Connector offset","Where Debezium last read: binlog file + position (or GTID). It resumes from there after a restart."],["Snapshot","Debezium's initial full read of the tables. «when_needed» re-snapshots if the offset is no longer usable."],["Incremental snapshot","A snapshot done in chunks while streaming continues, triggered by a signal. No downtime, no table locks."],["Secrets rotation","Regularly changing database passwords. Every client must get the new one."]],
+ deep:[{"t": "Debezium snapshot modes", "md": "| Mode | Behaviour |\n|---|---|\n| «initial» | Snapshot once if no offsets exist, then stream |\n| «when_needed» | Also re-snapshot if stored offsets are unusable (e.g. binlog purged) |\n| «no_data» / «schema_only» | Only capture schema, then stream (no historical rows) |\n| «never» | Never snapshot; just stream from where you are (risky) |\n\n**Incremental snapshots** (signal table or Kafka signal topic, «execute-snapshot») read tables in chunks by primary key **while streaming continues**, deduplicating against live changes using watermarks. They avoid long locks and can target one table."}, {"t": "Keeping CDC healthy", "md": "- Binlog/WAL retention ≥ the time to **detect and fix** an outage (often 3-7 days).\n- Alert on: connector/task state ≠ RUNNING, **MilliSecondsBehindSource**, events per second dropping to zero, lake freshness.\n- Use **GTIDs** (MySQL) so the connector can resume against a different replica after failover.\n- Treat credentials as a dependency: rotation runbooks must include CDC users."}],
  pager:`[r]FIRING[/r]  lake.orders freshness > 6h   (last change applied: [r]Mon 16 Nov 09:02[/r])
 connector  orders-cdc   state [r]FAILED[/r]
 task 0     io.debezium.DebeziumException: [y]The connector is trying to read binlog starting at
@@ -308,5 +309,33 @@ password   ******** ([y]version 6, updated 2026-08-12[/y])`, clue:"oldsecret"},
   prevent:["Alerts on Connect task state and on lake freshness per table","Binlog retention ≥ the time to detect and fix a stopped connector (7 days)","Rotation runbooks list every consumer of a credential, including CDC","Configure a signal table so incremental snapshots are always one command away"]
  },
  learned:["A CDC connector is only as safe as its **source log retention**. Stop longer than that and the position is gone.","Restarting doesn't fix a **purged offset**. You need a **snapshot** (ideally incremental).","Never skip ahead to \"latest\" in CDC. It turns an outage into **silent data loss**.","Alert on **task state** and **freshness**, not only on errors in logs."]
+}
+]);
+
+/* ===== Work simulator: Debezium ===== */
+QUEST.work("debezium", [
+{
+ type:"timeline", title:"Duplicate orders in the lake", three:"one mistake at most",
+ brief:"Finance reports that the lake's order count for Tuesday is **3% higher** than MySQL's. Nothing crashed and no alert fired. You traced it, fixed it, and now you're writing it up.",
+ events:[
+  {at:"March", kind:"cause", t:"The lake loader is built **append-only**: every change event becomes a new row, with no merge on the primary key."},
+  {at:"Tue 14:00", kind:"trigger", t:"A routine deploy restarts the Kafka Connect worker running «orders-cdc». It stops before flushing its latest offsets."},
+  {at:"Tue 14:01", kind:"symptom", t:"Debezium resumes from the last flushed binlog position and re-sends ~40,000 changes it had already published."},
+  {at:"Wed 09:00", kind:"symptom", t:"Finance's daily order count in the lake is 3% above MySQL."},
+  {at:"Wed 10:30", kind:"response", t:"On-call finds 40,000 order ids that appear twice with the **same binlog position**: exact re-deliveries."},
+  {at:"Wed 15:00", kind:"response", t:"The team dedupes with a MERGE keyed on order_id (latest binlog position wins) and switches the loader to upserts."}
+ ],
+ whys:[
+  {q:"Why was the lake's order count too high?", o:["40,000 orders were stored twice","MySQL lost 40,000 orders","Finance used the wrong date filter"], a:0},
+  {q:"Why were they stored twice?", o:["Debezium re-sent changes after the restart, and the loader appended them again","Kafka randomly duplicates messages","Two Debezium connectors read the same table"], a:0, why:"Kafka doesn't duplicate randomly. The re-send has a specific cause: resuming from an older offset."},
+  {q:"Why did Debezium re-send them?", o:["Its offsets are flushed periodically, so a restart resumes from slightly in the past: at-least-once by design","Debezium has a bug","The binlog was corrupted"], a:0, why:"This is documented, intended behaviour. CDC pipelines are at-least-once; it isn't a bug."},
+  {q:"Why did a normal, by-design re-send corrupt the data?", o:["The loader isn't idempotent: it appends instead of merging on the primary key","Deploys shouldn't restart Connect workers","Offsets should be flushed every millisecond"], a:0, why:"Restarts will always happen. The fix is making the consumer side safe to receive the same event twice."}
+ ],
+ deep:[
+  {t:"Why CDC is at-least-once", md:"- Debezium (as a Kafka Connect source) records its position (binlog file + pos, or GTID; or the Postgres LSN) in the **offsets topic**.\n- Offsets are committed **periodically** («offset.flush.interval.ms», default 60 s) and on clean shutdown. Records sent after the last flush aren't covered.\n- After a crash or an unclean stop, it resumes from the last flushed position and **re-emits** everything since. Duplicates, never gaps: that's at-least-once.\n- Kafka Connect supports **exactly-once source** connectors (KIP-618, Connect 3.3+) with transactional producers, but your downstream still has to read with «read_committed», and any non-Kafka sink still needs idempotency."},
+  {t:"Making the lake idempotent", md:"Every Debezium event carries what you need to dedupe and order:\n- the **primary key** (Kafka message key),\n- «source.file»/«source.pos» or «source.lsn», plus «source.ts_ms»,\n- «op» (c, u, d, r).\n\nLoad pattern (Iceberg, Delta, Snowflake, BigQuery all support MERGE):\n~~~\nMERGE INTO lake.orders t\nUSING (latest event per order_id in this batch, by binlog position) s\nON t.order_id = s.order_id\nWHEN MATCHED AND s.op = 'd' THEN DELETE\nWHEN MATCHED AND s.pos > t._pos THEN UPDATE SET *\nWHEN NOT MATCHED AND s.op <> 'd' THEN INSERT *\n~~~\nThe «s.pos > t._pos» guard also protects against **out-of-order** replays."},
+  {t:"Detecting this before finance does", md:"- **Row-count reconciliation** per table per day between source and lake (or between the Kafka topic's distinct keys and the lake).\n- A **uniqueness test** on the lake table's primary key.\n- An alert on Connect **restarts** combined with a spike in events per second right after them."}
+ ],
+ say:"CDC is at-least-once: Debezium flushes offsets periodically, so a restart replays recent changes. The consumer must be idempotent, so I load with MERGE keyed on the primary key and ordered by the binlog position or LSN, and test the lake table for uniqueness and reconcile counts with the source."
 }
 ]);

@@ -166,6 +166,7 @@ QUEST.cases("postgres", [
 {
  title:"Primary DB disk at 92% and climbing", icon:"💽", sev:1, clock:"16:20", channel:"inc-2320-orders-db-disk", svc:"orders-db · PostgreSQL 15 primary", need:4,
  terms:[["Primary", "The database server that accepts writes. If its disk fills, writes stop."], ["WAL", "Write-ahead log: every change is written here first (16 MB files in pg_wal) for crash recovery and replication."], ["Checkpoint", "A point where dirty pages are flushed to disk, after which old WAL can be recycled, if nobody else needs it."], ["Replication slot", "A bookmark that tells Postgres to keep WAL until a consumer (a standby or a CDC tool) has read it."], ["restart_lsn", "The oldest WAL position a slot still needs. Everything after it is kept."], ["Debezium", "A CDC (change data capture) tool that streams database changes into Kafka using a logical replication slot."], ["max_slot_wal_keep_size", "A cap on how much WAL any slot may hold. -1 means no limit."]],
+ deep:[{"t": "Logical decoding and slots in detail", "md": "- Debezium uses **logical replication**: a slot with an output plugin («pgoutput») decodes WAL into row changes.\n- The slot tracks «restart_lsn» (oldest WAL still needed) and «confirmed_flush_lsn» (what the consumer acknowledged).\n- Postgres keeps WAL from the oldest «restart_lsn» across **all** slots. An inactive slot also holds back «catalog_xmin», which can **block vacuum of system catalogs**.\n- Postgres 13+: «max_slot_wal_keep_size» invalidates slots that fall too far behind (column «wal_status» shows «lost»)."}, {"t": "Disk-full triage on a Postgres primary", "md": "1. «df -h» and «du -sh» on «base/» vs «pg_wal/» vs logs.\n2. pg_wal big → check **slots** («pg_replication_slots»), **archiving** («pg_stat_archiver», failed «archive_command» also retains WAL), and «wal_keep_size».\n3. base big → bloat («pgstattuple»), a runaway table, temp files («temp_files» in «pg_stat_database»).\n4. Buy time safely: extend the volume, remove *logs* (not WAL), never VACUUM FULL under pressure."}],
  pager:`[r]FIRING[/r]  orders-db-primary  disk /var/lib/postgresql  [r]92% used[/r]
 growth    ~38 GB/hour over the last 6h
 forecast  [r]FULL in ~1h 40m[/r]  → primary will stop accepting writes
@@ -273,5 +274,77 @@ host      pg-orders-1 (r6i.4xlarge, 2 TB gp3)`,
   ex:"~~~\nselect slot_name, active,\n  pg_size_pretty(pg_wal_lsn_diff(pg_current_wal_lsn(), restart_lsn)) retained\nfrom pg_replication_slots;\n\n-- guardrail\nalter system set max_slot_wal_keep_size = '200GB';\nselect pg_reload_conf();\n~~~",
   traps:["Pausing a Debezium connector doesn't release its slot. WAL keeps piling up.","Deleting WAL files by hand can corrupt the database. Let Postgres remove them.","Dropping a CDC slot frees space but forces a full resnapshot downstream.","Low-traffic databases can hit this too: WAL from checkpoints and other databases still accumulates."],
   say:"Logical replication slots make Postgres retain WAL from the consumer's restart_lsn onward, so if a CDC connector like Debezium stops (paused, crashed, or abandoned), WAL accumulates until the disk fills. I diagnose by comparing pg_wal size to table size and querying pg_replication_slots for inactive slots with large retained WAL. The fix is to resume the consumer; the guardrails are max_slot_wal_keep_size and alerts on per-slot retained WAL and inactive slots."}]
+}
+]);
+
+/* ===== Work simulator: PostgreSQL ===== */
+QUEST.work("postgres", [
+{
+ type:"timeline", title:"The checkout outage", three:"one mistake at most",
+ brief:"Last Wednesday checkout was down for **14 minutes**. The fix in the moment was simple: cancel one query. Your manager asks you to write the postmortem, and to find the cause **behind** the cause, without blaming anyone.\n\nThe raw notes from the incident channel are below, shuffled.",
+ events:[
+  {at:"2025", kind:"cause", t:"The migration tool runs DDL with no «lock_timeout», so a migration waits for its lock as long as it takes."},
+  {at:"09:40", kind:"cause", t:"An analyst starts a 25-minute report on the **primary**, reading «orders» (analytics isn't routed to a replica)."},
+  {at:"10:02", kind:"trigger", t:"A deploy runs «ALTER TABLE orders ADD COLUMN gift_note text»."},
+  {at:"10:03", kind:"symptom", t:"Checkout p99 jumps from 120 ms to 30 s and the app's connection pools run out."},
+  {at:"10:05", kind:"symptom", t:"Checkout 5xx rate hits 38% and PagerDuty fires."},
+  {at:"10:11", kind:"response", t:"On-call checks «pg_locks»: the ALTER waits on the report, and 340 queries wait on the ALTER."},
+  {at:"10:16", kind:"response", t:"The report is cancelled. The ALTER finishes in 40 ms and traffic recovers."}
+ ],
+ whys:[
+  {q:"Why did checkout fail?", o:["Every query touching «orders» was stuck waiting for a lock","The database ran out of CPU","The checkout service had a memory leak"], a:0, why:"CPU was idle during the outage: everything was *waiting*, not working."},
+  {q:"Why was every query on «orders» waiting?", o:["They queued behind the ALTER, which was waiting for an ACCESS EXCLUSIVE lock","Autovacuum had locked the table","The table had grown too big to query"], a:0, why:"Autovacuum takes a weak lock that never blocks normal reads and writes."},
+  {q:"Why did the ALTER wait so long?", o:["A 25-minute report held a conflicting lock, and the migration had no «lock_timeout»","ADD COLUMN always rewrites the whole table","Postgres was slow that day"], a:0, why:"Since Postgres 11, ADD COLUMN without a volatile default is metadata-only: it finished in 40 ms once it got the lock."},
+  {q:"Why could this happen during a normal deploy?", o:["Our migration tooling doesn't set «lock_timeout» with retries, and long analytics queries run on the primary","The analyst shouldn't have run a report","Deploys shouldn't happen on Wednesdays"], a:0, why:"Blameless: the analyst did a normal thing. Ask what in our *system* let a normal action take checkout down."}
+ ],
+ deep:[
+  {t:"The Postgres lock queue: how a 40 ms ALTER causes a 14-minute outage", md:"- Every query takes a table lock. A SELECT takes **ACCESS SHARE**; most ALTER TABLE forms need **ACCESS EXCLUSIVE**, which conflicts with **everything**.\n- Lock requests are granted **in order**. The ALTER can't get its lock while the report holds ACCESS SHARE, so it waits.\n- Here's the trap: **new** SELECTs and UPDATEs on «orders» conflict with the *waiting* ACCESS EXCLUSIVE request, so they queue **behind the ALTER**, even though they'd be compatible with the report.\n- Result: one long read + one DDL = the whole table frozen until the read finishes.\n\nDiagnose with «pg_locks» joined to «pg_stat_activity», or simply «select pid, pg_blocking_pids(pid), wait_event_type, query from pg_stat_activity where cardinality(pg_blocking_pids(pid)) > 0»."},
+  {t:"Safe migrations: lock_timeout + retry", md:"~~~\nSET lock_timeout = '2s';         -- give up fast instead of blocking everyone\nSET statement_timeout = '30s';\nALTER TABLE orders ADD COLUMN gift_note text;\n-- tooling retries a few times with backoff on 'lock timeout'\n~~~\n- Waiting 2 s and failing is invisible to users; waiting 14 minutes is an outage.\n- Other safe patterns: «CREATE INDEX CONCURRENTLY»; add constraints as «NOT VALID» then «VALIDATE CONSTRAINT» (weaker lock); add columns without volatile defaults, backfill in batches.\n- Route analytics to a **read replica**, and set «idle_in_transaction_session_timeout» and «statement_timeout» for ad-hoc roles."},
+  {t:"Writing a blameless postmortem", md:"- **Timeline** of facts with timestamps, including when contributing conditions were introduced.\n- Separate **trigger** (what set it off: often a normal action), **root causes** (weaknesses that let it become an incident), **symptoms** (what users and alerts saw) and **response**.\n- Ask **\"why?\"** until you reach something a **process or design change** can fix. \"Person X made a mistake\" is never the end: ask why the system let that mistake hurt.\n- Action items are specific, owned and dated: «lock_timeout in migration tool (owner, date)», not \"be more careful\"."}
+ ],
+ say:"The ALTER only needed 40 ms, but it queued for an ACCESS EXCLUSIVE lock behind a long report, and every new query queued behind it. The root causes were migrations without lock_timeout and analytics on the primary, so the actions were lock_timeout with retries in our tooling and routing reports to a replica."
+},
+{
+ type:"logs", title:"Who is blocking whom?", three:"answer all 4 questions with at most 1 wrong tap",
+ brief:"Payouts to merchants have been stuck for 45 minutes. The payout workers keep timing out, and the DB log is full of lock waits. Find the **deadlock**, find **who's holding everyone up**, and find **why**.\n\nThe log mixes Postgres server logs, a monitoring snapshot and the payout-worker's app log.",
+ source:"postgresql.log + pg_stat_activity snapshot + payout-worker log · 14:00–14:48",
+ log:(() => { const L = [];
+  L.push("14:00:01 LOG:  checkpoint starting: time", "14:00:09 LOG:  checkpoint complete: wrote 9121 buffers (1.1%); 0 WAL file(s) added, 0 removed, 12 recycled", "14:00:31 LOG:  connection authorized: user=payout_svc database=payments application_name=payout-worker",
+   "14:01:02 APP  INFO payout-worker[w3]: batch 88 claimed (412 payouts)", "14:01:02 APP  INFO payout-worker[w3]: BEGIN; UPDATE payouts SET status='processing' WHERE batch_id=88",
+   "14:01:03 APP  INFO payout-worker[w3]: calling bank API for batch 88 (inside the open transaction)",
+   "14:01:33 APP  ERROR payout-worker[w3]: bank API timeout after 30s for batch 88; returning to queue [y](exception handler returns without ROLLBACK; connection goes back to the pool)[/y]",
+   "14:02:10 LOG:  automatic vacuum of table \"payments.public.webhooks\": index scans: 1, pages: 0 removed, 18211 remain",
+   "14:03:12 LOG:  process 5120 still waiting for ShareLock on transaction 99812 after 1000.041 ms",
+   "14:03:12 DETAIL:  Process holding the lock: 4412. Wait queue: 5120.",
+   "14:03:12 STATEMENT:  UPDATE payouts SET status='processing' WHERE batch_id=88 AND status='queued'");
+  for (let k = 0; k < 6; k++) L.push(`14:${String(5 + k * 3).padStart(2, "0")}:12 LOG:  process ${5133 + k * 7} still waiting for ShareLock on transaction 99812 after 1000.0${k}3 ms`, `14:${String(5 + k * 3).padStart(2, "0")}:12 DETAIL:  Process holding the lock: 4412. Wait queue: 5120, ${5133 + k * 7}${k ? ", …" : ""}.`);
+  L.push("14:22:40 LOG:  process 6011 detected deadlock while waiting for ShareLock on transaction 99840 after 1000.112 ms",
+   "14:22:40 ERROR:  deadlock detected",
+   "14:22:40 DETAIL:  Process 6011 waits for ShareLock on transaction 99840; blocked by process 6020. Process 6020 waits for ShareLock on transaction 99838; blocked by process 6011.",
+   "14:22:40 HINT:  See server log for query details.",
+   "14:22:40 CONTEXT:  while updating tuple (412,7) in relation \"merchant_balances\"",
+   "14:22:40 STATEMENT:  UPDATE merchant_balances SET pending = pending - $1 WHERE merchant_id = $2",
+   "14:22:40 APP  WARN payout-worker[w5]: deadlock on merchant_balances, retrying batch 91 (worker updates merchants in input order)",
+   "14:30:00 LOG:  checkpoint starting: time", "14:30:07 LOG:  checkpoint complete: wrote 7012 buffers (0.9%)",
+   "14:44:00 MON  pg_stat_activity snapshot (top by xact_age):",
+   "14:44:00 MON    pid=4412 user=payout_svc state=[r]idle in transaction[/r] xact_age=00:42:58 wait_event=ClientRead query=UPDATE payouts SET status='processing' WHERE batch_id=88",
+   "14:44:00 MON    pid=5120 user=payout_svc state=active xact_age=00:41:02 wait_event=Lock:transactionid query=UPDATE payouts SET status='processing' WHERE batch_id=88 AND status='queued'",
+   "14:44:00 MON    pid=7790 user=metabase state=active xact_age=00:00:03 wait_event= query=SELECT count(*) FROM payouts WHERE status='paid'",
+   "14:45:10 LOG:  automatic analyze of table \"payments.public.payouts\"",
+   "14:47:55 APP  INFO payout-worker[w2]: batch 93 complete (388 payouts)");
+  return L.join("\n"); })(),
+ qs:[
+  {q:"There was a deadlock. Tap the line that shows the two processes waiting on each other.", a:["Process 6011 waits for ShareLock on transaction 99840; blocked by process 6020"], tip:"Filter for «deadlock».", why:"**6011 waits for 6020 and 6020 waits for 6011**: a cycle. Postgres checks for cycles after «deadlock_timeout» (1 s) and **kills one transaction** so the other can finish. The app log says why: workers update «merchant_balances» **in input order**, so two batches touching the same merchants in different orders can cross. Fix: **lock rows in a consistent order** (e.g. «ORDER BY merchant_id»). This one resolved itself, though; it's not why payouts are stuck."},
+  {q:"Most workers are stuck waiting. Tap the line that names the process **holding** the lock they're all waiting for.", a:["Process holding the lock: 4412"], tip:"Filter for «holding».", why:"Every wait names the same holder: **process 4412**. Unlike a deadlock, this is a plain **blocking chain**: Postgres won't kill anyone, because 4412 isn't waiting on anything. It's just holding row locks and doing nothing."},
+  {q:"What is process 4412 doing? Tap the line that shows its state.", a:["pid=4412 user=payout_svc state=[r]idle in transaction"], tip:"Filter for «4412».", why:"**idle in transaction for 43 minutes.** The session ran an UPDATE inside a transaction and then **never committed or rolled back**. Its row locks on batch 88 stay held until the transaction ends. «wait_event=ClientRead» means Postgres is waiting for the *client* to send something."},
+  {q:"Why did the app leave that transaction open? Tap the app log line.", a:["bank API timeout after 30s for batch 88"], tip:"Filter for «batch 88».", why:"The worker called the **bank API inside an open DB transaction**, and on timeout its exception handler **returned without ROLLBACK**. The connection went back to the pool still holding the transaction. Fixes: never make network calls inside a DB transaction; always «rollback» in «finally» (or use a context manager); set «idle_in_transaction_session_timeout» (e.g. 60 s) as a safety net."}
+ ],
+ notes:[["checkpoint","Routine checkpoints. Unrelated."],["automatic vacuum","Autovacuum doing its job. Its locks don't block UPDATEs."],["automatic analyze","Routine statistics refresh."],["connection authorized","A normal login."],["metabase","A short analytics query, 3 s old. Not holding anyone up."],["still waiting","A waiter. Who is it waiting for?"],["batch 93 complete","A different batch that didn't touch the locked rows."],["claimed","Normal start of a batch."]],
+ deep:[
+  {t:"Deadlock vs blocking chain", md:"| | Deadlock | Blocking chain |\n|---|---|---|\n| Shape | A cycle: A waits for B, B waits for A | A line: everyone waits for one holder |\n| Postgres reaction | Detects after «deadlock_timeout» (1 s), **aborts one** | **Nothing**: waits forever (or until a timeout) |\n| Typical cause | Rows locked in different orders | A long or abandoned transaction |\n| Fix | Consistent lock ordering, smaller transactions, retry on 40P01 | Short transactions, timeouts, find and end the holder |"},
+  {t:"Finding blockers live", md:"~~~\nselect pid, pg_blocking_pids(pid) as blocked_by, state,\n       now() - xact_start as xact_age, wait_event_type, left(query, 60)\nfrom pg_stat_activity\nwhere state <> 'idle'\norder by xact_start;\n~~~\n- Turn on «log_lock_waits = on» so any wait longer than «deadlock_timeout» is logged with the holder.\n- End a stuck session with «pg_cancel_backend(pid)» (cancels the current query) or «pg_terminate_backend(pid)» (ends the session, rolls back its transaction). For idle in transaction, you need **terminate**."},
+  {t:"Why network calls inside transactions are dangerous", md:"- A transaction holds its row locks (and its snapshot) **until commit or rollback**. Anything slow in the middle (HTTP, sleeps, user input) multiplies lock time.\n- Long transactions also block **VACUUM** from removing dead rows newer than their snapshot, causing bloat across the whole database.\n- Pattern: mark the batch as *claimed* in a short transaction, commit, call the external API, then record the result in another short transaction. Make each step idempotent so retries are safe.\n- Safety nets: «idle_in_transaction_session_timeout», «statement_timeout», and pool settings that reset connections returned mid-transaction."}
+ ],
+ say:"Deadlocks are cycles that Postgres resolves by aborting one transaction; blocking chains are a single holder everyone waits on, and Postgres won't break those. I find the holder with pg_blocking_pids, check if it's idle in transaction, and fix the app: no network calls inside DB transactions, rollback in finally, and idle_in_transaction_session_timeout as a backstop."
 }
 ]);

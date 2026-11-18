@@ -50,7 +50,7 @@ const CAST = {priya:["Priya","Tech lead",205], arjun:["Arjun","Finance",28], rav
 const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }, more(id, levels){ const Z = this.data[id]; if (Z) Z.levels.push(...levels); }};
 const ld = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k)) || {}); } catch(e){ return d; } };
 const raw = k => { try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } };
-const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, ach:{}, chest:{}});
+const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, wk:{}, ach:{}, chest:{}});
 const DEF_PR = () => ({xp:0, streak:0, last:null});
 let NS = "";
 const KQ = () => "dagdeep-quest-v1" + NS, KP = () => "dagdeep-profile-v1" + NS;
@@ -160,7 +160,8 @@ const ACH = [
   ["streak3","📅","On a roll","Play 3 days in a row"],
   ["fresh","🔄","Clean slate","Start fresh from scratch"],
   ["pager","📟","Pager hero","Resolve your first on-call incident"],
-  ["sherlock","🔎","Sherlock","Resolve an incident with no hints and no wrong calls"]
+  ["sherlock","🔎","Sherlock","Resolve an incident with no hints and no wrong calls"],
+  ["allround","💼","All-rounder","Finish one of every work-simulator type"]
 ];
 function unlock(k){
   if (!P.ach || P.ach[k]) return;
@@ -238,10 +239,7 @@ function mapView(){
       <div class="q-bar" title="${r.next ? (r.next[0] - PR.xp) + " XP to " + r.next[1] : ""}"><span style="width:${pct}%"></span></div>
     </section>
     ${nx ? `<a class="q-next" id="qNext" href="#mis-${nx.z}-${nx.i}"><span class="q-next-ic">${nx.M ? nx.M.icon : "🎬"}</span><div><small>${nx.i ? "Continue" : "Start here"} · ${esc(ZMAP[nx.z].title)} · mission ${nx.i + 1}</small><b>${nx.M ? esc(nx.M.title) : "Story mission"}</b>${nx.M ? `<p>${fm(nx.M.setup)}</p>` : ""}</div><span class="q-next-go">▶</span></a>` : ""}
-    <section class="q-desk-home"><div class="q-sec-row"><h2 class="q-sec-h">📟 On-call desk</h2><small>${CASES.filter(c => csStars(c.z, c.i)).length}/${CASES.length} resolved</small></div>
-      <p class="muted">You're on call. Get paged, dig through Slack, the terminal, dashboards and code, then find the root cause and ship the fix.</p>
-      ${(() => { const open = CASES.filter(c => !csStars(c.z, c.i)), top = (open.length ? open : CASES).slice(0, 3), rest = CASES.filter(c => !top.includes(c));
-        return caseList(top) + (rest.length ? `<details class="q-allcases"><summary>All ${CASES.length} incidents · 🗄️ data and 🤖 AI</summary>${caseList(rest)}</details>` : ""); })()}</section>
+    ${homeWork()}
     <h2 class="q-sec-h">🗺️ Zones</h2>
     <div class="q-tabs" role="tablist">${WORLDS.map(w => `<button role="tab" data-w="${w.id}" aria-selected="${worldTab === w.id}">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</button>`).join("")}</div>
     <div class="q-zones">${ZONES.filter(z => z.world === worldTab).map(tile).join("")}</div>
@@ -260,7 +258,7 @@ function zoneView(id, tab){
     document.title = `${z.title} · Dagdeep`;
     const tabs = [];
     if (Z.missions) tabs.push(["missions", "🎬 Missions"]);
-    if (Z.cases) tabs.push(["debug", "📟 Debug"]);
+    if (Z.cases || Z.work || ALLW().some(c => c.z === id)) tabs.push(["debug", "💼 Work"]);
     if (Z.interviews) tabs.push(["interview", "🎤 Interview"]);
     tabs.push(["drills", "🏋️ Drills"], ["cards", "🃏 Cards"]);
     if (!tabs.some(t => t[0] === tab)) tab = tabs[0][0];
@@ -281,7 +279,7 @@ function epList(id, list, kind){
       <span class="q-ep-go">${open ? (s ? "Replay" : "Play") : ""}</span></${open ? "a" : "div"}>`; }).join("")}</div>`;
 }
 function zonePanel(id, Z, tab, got){
-  if (tab === "debug") return `<p class="q-lead">Real incidents on a simulated workstation. Investigate with Slack, a terminal, dashboards and code, then ship the fix.</p>${caseList(CASES.filter(c => c.z === id))}`;
+  if (tab === "debug") return `<p class="q-lead">Real tasks from the job: incidents, PR reviews, log hunts, tuning, postmortems and triage.</p>${workList(ALLW().filter(c => c.z === id))}`;
   if (tab === "missions") return `<p class="q-lead">Real situations from a working day. Make the calls, watch the meters, collect detailed cards.</p>${epList(id, Z.missions, "ms")}`;
   if (tab === "interview"){
     const qa = [];
@@ -295,7 +293,7 @@ function zonePanel(id, Z, tab, got){
     <ol class="q-path">${Z.levels.map((L, li) => { const head = L.act && (li === 0 || Z.levels[li - 1].act !== L.act) ? `<li class="q-act"><span>${esc(L.act)}</span></li>` : ""; const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
       return head + `<li class="q-node ${kind} ${L.act ? "expert" : ""} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
         ${open ? `<a href="#lvl-${id}-${li}" class="q-dot">` : `<span class="q-dot">`}${L.boss ? "👑" : L.arcade ? "🕹" : li + 1}${open ? "</a>" : "</span>"}
-        <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${(L.rounds || []).some(r => r[0] === "learn") ? ` · <a class="q-readl" href="#learn-${id}-${li}">📖 Read</a>` : ""}${CASES.some(c => (c.study || []).includes(`${id}:${li}`)) ? ` · <a class="q-readl" href="#learn-${id}-${li}">📟 Incident</a>` : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>`;
+        <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${(L.rounds || []).some(r => r[0] === "learn") ? ` · <a class="q-readl" href="#learn-${id}-${li}">📖 Read</a>` : ""}${ALLW().some(c => (c.study || []).includes(`${id}:${li}`)) ? ` · <a class="q-readl" href="#learn-${id}-${li}">💼 At work</a>` : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>`;
   // cards
   const deck = [];
   Z.levels.forEach((L, li) => (L.rounds || []).forEach((r, ri) => { if (r[0] === "learn") deck.push({id:`${li}-${ri}`, li, t:r[1], b:r[2], d:r[5], L}); }));
@@ -862,7 +860,7 @@ const refList = (refs, mode) => `<div class="q-refs">${refs.map(refInfo).filter(
 const needZones = (ids, cb) => { const rest = ids.filter(x => ZMAP[x] && !Q.data[x]); if (!rest.length) return cb(); needZone(rest[0], () => needZones(ids, cb)); };
 const reg = (z, i) => CASES.find(c => c.z === z && c.i === i) || {};
 const refZones = refs => [...new Set((refs || []).map(r => r.split(/[:/]/)[0]))];
-const casesFor = ref => CASES.filter(c => (c.study || []).includes(ref));
+const casesFor = ref => ALLW().filter(c => (c.study || []).includes(ref));
 function studyView(id, li, key){
   const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
   needZone(id, () => {
@@ -876,7 +874,7 @@ function studyView(id, li, key){
       <p class="q-eyebrow">📚 Course · ${esc(z.title)} · ${esc(R.kind)}</p><h1>${fm(R.title)}</h1>
       ${body || `<p class="muted">This drill is hands-on practice. Play it to learn by doing.</p>`}
       <div class="q-res-b">${key ? `<a class="btn big" href="#zone-${id}/cards">All ${esc(z.title)} cards</a>` : unlocked(id, li) ? `<a class="btn big solid" href="#lvl-${id}-${li}">Practise this drill ▶</a>` : `<a class="btn big" href="#zone-${id}/drills">${esc(z.title)} drills</a>`}</div>
-      ${cs.length ? `<h2 class="q-sec-h">📟 See it break in production</h2><p class="muted">Incidents on the on-call desk that use this concept.</p>${caseList(cs)}` : ""}</div>`;
+      ${cs.length ? `<h2 class="q-sec-h">💼 Use it at work</h2><p class="muted">Work-simulator tasks that use this concept.</p>${workList(cs)}` : ""}</div>`;
   });
 }
 const termFmt = t => esc(t).replace(/\[(r|y|g|b|d|c)\]([\s\S]*?)\[\/\1\]/g, '<span class="t-$1">$2</span>');
@@ -914,18 +912,13 @@ function pagerView(id, ci, z, Z, C){
         <h1>${esc(C.title)}</h1>
         <pre class="q-pager-alert">${termFmt(C.pager)}</pre>
         <p class="q-pager-brief">${fm(C.brief || "")}</p>
-        <div class="q-pager-how">
-          <p class="q-pg-goal">🎯 <b>Your job:</b> find out <b>why</b> this is happening, prove it with evidence, and ship the fix that resolves it <b>without breaking anything else</b>.</p>
-          <b>Rules of the desk</b>
-          <ol><li><b>Investigate</b> with 💬 Slack, ⌨️ the terminal, 📈 dashboards${C.ui ? `, 🖥 ${esc(C.uiName || "console")}` : ""}${C.files ? " and 🧾 code" : ""}.</li>
-          <li><b>Flag evidence</b> 🚩 on anything that explains the alert. Real clues go to your notes; noise is called out.</li>
-          <li>With at least <b>${need} clues</b>, open 📝 <b>Notes</b>, pick the <b>root cause</b> and tick <b>every fix you'd ship</b>.</li>
-          <li>Wrong causes and harmful fixes <b>backfire in Slack</b> and cost you stars.</li></ol>
-          <p class="q-pg-score">⭐⭐⭐ no wrong calls, ≤1 hint, ≤3 noise flags · ⭐⭐ ≤1 wrong call, ≤2 hints · ⭐ resolved</p>
-          <p class="muted">Stuck? Tap <b>❓ Guide</b> on the desk any time for the full rules, what each tool is, the terms used, and the course pages for this incident.</p></div>
-        ${C.study.length ? `<div class="q-pg-study"><b>📚 Brush up first</b> <small>(optional · opens the course in a new tab)</small>${refList(C.study, "links")}</div>` : ""}
+        <ul class="q-pg-rules">
+          <li><b>Investigate</b> with the tools and 🚩 flag what explains the alert.</li>
+          <li>With <b>${need} clues</b>, open 📝 Notes: pick the root cause and every fix you'd ship.</li>
+          <li>Wrong calls backfire. ❓ Guide has the full rules and terms.</li></ul>
+        ${C.study.length ? `<details class="q-pg-study"><summary>📚 Brush up first <small>(${C.study.length} course pages)</small></summary>${refList(C.study, "links")}</details>` : ""}
         <button class="btn big solid q-ack">Acknowledge &amp; join the bridge</button>
-        <a class="q-back" href="#zone-${id}/debug">Not now</a></div></div>`;
+        <a class="q-back" href="#work/incident">Not now</a></div></div>`;
     const ackB = root().querySelector(".q-ack");
     ackB.onclick = () => desk(id, ci, z, Z, C);
     setKeys(e => { if (!document.body.contains(ackB)){ setKeys(null); return; } if (e.key === "Enter"){ e.preventDefault(); desk(id, ci, z, Z, C); } });
@@ -947,22 +940,21 @@ function desk(id, ci, z, Z, C){
   apps.push(["notes", "📝", "Notes"], ["guide", "❓", "Guide"]);
   const host = T.host || "prod-bastion", user = T.user || "you";
   root().innerHTML = `<div class="q-wrap q-desk" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
-    <div class="q-incbar"><a class="q-x" href="#zone-${id}/debug" aria-label="Leave">✕</a>
+    <div class="q-incbar"><a class="q-x" href="#work/incident" aria-label="Leave">✕</a>
       <span class="q-sev s${sev}">SEV-${sev}</span>
       <div class="q-inc-t"><b>${esc(C.title)}</b><small>#${esc(C.channel || "inc")} · ${esc(C.svc || z.title)}</small></div>
       <span class="q-inc-st"><span class="q-inc-clock" title="Time since you acknowledged">⏱ 00:00</span><span class="q-inc-clues" title="Clues found · ${need} needed to write up">🔎 0/${clueIds.length}</span></span></div>
-    <div class="q-stepper"><button data-go="slack" class="on"><i>1</i><span>Investigate <b class="q-st-n">0/${need} clues</b></span></button><button data-go="notes"><i>2</i><span>Root cause</span></button><button data-go="notes"><i>3</i><span>Ship the fix</span></button></div>
     <nav class="q-dock" role="tablist">${apps.map(([k, ic, l]) => `<button role="tab" data-app="${k}" aria-selected="${k === "slack"}"><span>${ic}</span><small>${l}</small><i class="q-badge-n" hidden></i></button>`).join("")}</nav>
     <div class="q-apps">
-      <section class="q-app" data-app="slack"><p class="q-app-tip">ℹ️ <b>Slack</b> is the team's incident channel. Teammates share what they know, suggest commands (tap ⌨️ to run one) and react to the fixes you ship. Stuck? Ask for a hint: it costs stars.</p><div class="q-slack-h"># ${esc(C.channel || "inc")}<small>${esc(C.svc || "")}</small></div><div class="q-slack"></div>
+      <section class="q-app" data-app="slack"><p class="q-app-tip">Your team. They share leads and react to what you ship.</p><div class="q-slack-h"># ${esc(C.channel || "inc")}</div><div class="q-slack"></div>
         <div class="q-slack-f"><button class="btn q-hint">💡 Ask for a hint <small>(${(C.hints || []).length} left)</small></button></div></section>
-      <section class="q-app" data-app="term" hidden><p class="q-app-tip">ℹ️ <b>Terminal</b>: a shell on the production box. Type a command and press Enter, or tap a suggestion below. If an output explains the alert, tap <b>🚩 Flag this output</b>. Built-ins: «help», «history», «clear»; ↑/↓ for history, Tab to complete.</p><div class="q-term"><div class="q-term-out"><p class="t-d">${termFmt(T.motd || `Connected to ${host}. Type «help» for ideas.`).replace(/«(.+?)»/g, "<b>$1</b>")}</p></div>
+      <section class="q-app" data-app="term" hidden><p class="q-app-tip">Type a command or tap a suggestion. 🚩 any output that explains the alert.</p><div class="q-term"><div class="q-term-out"><p class="t-d">${termFmt(T.motd || `Connected to ${host}. Type «help» for ideas.`).replace(/«(.+?)»/g, "<b>$1</b>")}</p></div>
         <form class="q-term-in" autocomplete="off"><span class="q-ps">${esc(user)}@${esc(host)}:~$</span><input aria-label="Terminal command" autocapitalize="off" autocorrect="off" spellcheck="false" enterkeyhint="go"></form></div>
         <div class="q-chips" aria-label="Suggested commands"></div></section>
-      ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">ℹ️ <b>Dashboards</b>: monitoring graphs (think Grafana or Datadog). Red dashed lines mark deploys and events. Flag the panels that <b>explain</b> the alert, not the ones that just look busy or show the symptom.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
-      ${C.ui ? `<section class="q-app" data-app="ui" hidden><p class="q-app-tip">ℹ️ <b>${esc(C.uiName || "Console")}</b>: the system's own UI. Same rule: flag what explains the alert.</p><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
-      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">ℹ️ <b>Code</b>: the repos involved in this incident. Tap a line to flag it if it's the bug or the change that caused it. Harmless lines count as noise.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
-      <section class="q-app" data-app="notes" hidden><p class="q-app-tip">ℹ️ <b>Notes</b>: your evidence and the incident write-up. Once you have enough clues, pick one root cause and tick every action you'd ship.</p><div class="q-notes"></div></section>
+      ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">Find what changed, and when. Red lines are deploys/events.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
+      ${C.ui ? `<section class="q-app" data-app="ui" hidden><p class="q-app-tip">The system's own UI. 🚩 what explains the alert.</p><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
+      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">Tap a line to flag it.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
+      <section class="q-app" data-app="notes" hidden><p class="q-app-tip">Your evidence, then the write-up.</p><div class="q-notes"></div></section>
       <section class="q-app" data-app="guide" hidden><div class="q-guide"></div></section>
     </div></div>`;
   const $ = s => root().querySelector(s), $$ = s => root().querySelectorAll(s);
@@ -981,6 +973,7 @@ function desk(id, ci, z, Z, C){
   $$(".q-dock button").forEach(b => b.onclick = () => show(b.dataset.app));
   $$(".q-stepper button").forEach(b => b.onclick = () => show(b.dataset.go));
   const stepper = () => {
+    if (!$(".q-stepper")) return;
     const n = Object.keys(st.found).length, sb = $$(".q-stepper button"), stage = n < need ? 0 : st.cause == null ? 1 : 2;
     sb.forEach((b, k) => { b.classList.toggle("on", k === stage); b.classList.toggle("done", k < stage); });
     const sn = $(".q-st-n"); if (sn) sn.textContent = `${Math.min(n, need)}/${need} clues`;
@@ -1192,6 +1185,7 @@ function desk(id, ci, z, Z, C){
           ${(() => { const skipped = C.fix.o.filter(o => o.kind === "good" && !sel.includes(o)); return skipped.length ? `<p class="muted">Also worth doing: ${skipped.map(o => fm(o.t)).join(" · ")}</p>` : ""; })()}</section>
         ${C.post && C.post.prevent ? `<section><h3>Action items · so it never happens again</h3><ul class="q-acts">${C.post.prevent.map(x => `<li>☐ ${fm(x)}</li>`).join("")}</ul></section>` : ""}
         <section><h3>Traps you avoided (or didn't)</h3><ul>${C.fix.o.filter(o => o.kind === "bad").map(o => `<li>❌ <b>${fm(o.t)}</b> — ${fm(o.why || "")}</li>`).join("")}${C.cause.o.filter(o => !o.ok && o.why).map(o => `<li>🪤 <b>${fm(o.t)}</b> — ${fm(o.why)}</li>`).join("")}</ul></section>
+        ${C.deep ? `<section><h3>🔬 Deep dive</h3>${C.deep.map((d, i) => `<details class="q-deepd" ${i ? "" : "open"}><summary>${fm(d.t)}</summary><div>${md(d.md)}</div></details>`).join("")}</section>` : ""}
         ${C.study.length ? `<section><h3>📚 Go deeper in the course</h3>${refList(C.study, "links")}</section>` : ""}
         ${C.learned ? `<section class="q-learned"><h3>🎤 Say this in an interview</h3><ul>${C.learned.map(x => `<li>${fm(x)}</li>`).join("")}</ul></section>` : ""}
       </article>
@@ -1203,6 +1197,290 @@ function desk(id, ci, z, Z, C){
   show("slack");
 }
 
+/* ================= Work simulator: unique challenge types ================= */
+// QUEST.work(zoneId, [...]) from a zone file. Every item: {type, title, brief, study?, deep:[{t, md}], ...type fields}
+//  pr:       {repo, pr, author, desc, reasons:[...], files:[{path, diff}], bugs:[{f, at, a, why}], notes:[{f, at, note}], shipped}
+//  logs:     {source, log, qs:[{q, a:[substr...], why, tip}], notes:[[substr, note]]}
+//  tune:     {knobs:[{k, label, opts, def, help}], metrics:[{k, label, unit, gl, goal(v)}], sim(v) → {m, log:[...]}, best}
+//  timeline: {events:[{t, kind:"trigger"|"cause"|"symptom"|"response"}] (in true order), whys:[{q, o, a, why}]}
+//  triage:   {items:[{src, from, t, body, sev:"now"|"today"|"later"|"noise", why, act:{o, a, why}}]}
+Q.work = function(id, list){ const Z = this.data[id]; if (Z) Z.work = list; };
+const WTYPES = {
+  incident:{ic:"📟", name:"Incident", line:"Get paged. Investigate. Fix prod."},
+  pr:{ic:"🔍", name:"PR review", line:"Catch the bug before it ships.", how:["Read the pull request like a reviewer.", "Tap any line you think is a problem, then say what's wrong with it.", "Submit your review: approve, or request changes."]},
+  logs:{ic:"🧾", name:"Log hunt", line:"Find the one line that matters.", how:["Answer one question at a time.", "Answer by tapping a log line. Filter by text or level to cut the noise.", "Wrong taps cost stars, so read before you tap."]},
+  tune:{ic:"🎛️", name:"Tune it", line:"Turn the knobs until it fits.", how:["Pick a value for every setting. Tap ? to learn what each one does.", "Press Run and read what happened.", "Hit every goal in as few runs as you can."]},
+  timeline:{ic:"🧭", name:"Postmortem", line:"Rebuild what happened, and why.", how:["Put the events in the order they happened.", "Label each one: trigger, root cause, symptom or response.", "Keep asking \"why?\" until you reach the real cause."]},
+  triage:{ic:"🚦", name:"Triage", line:"Sort the morning queue.", how:["Alerts and tickets arrive one at a time.", "Decide how urgent each one is.", "Pick the right first move."]}
+};
+const WORK = [
+  {type:"pr", z:"spark", i:0, icon:"🔍", title:"\"Make the daily job faster\"", sub:"A PySpark PR with three hidden problems", study:["spark:4","spark:6","spark/memory"]},
+  {type:"logs", z:"spark", i:1, icon:"🧾", title:"Why did stage 7 fail?", sub:"2,000 lines of executor logs, one real cause", study:["spark:5","spark/memory"]},
+  {type:"tune", z:"spark", i:2, icon:"🎛️", title:"Size the executors", sub:"Fit a 2 TB job on 20 nodes, under budget", study:["spark:12","spark:17"]},
+  {type:"pr", z:"kafka", i:0, icon:"🔍", title:"\"New payments consumer\"", sub:"Looks clean. Loses money.", study:["kafka:3","kafka:4","kafka/offsets"]},
+  {type:"tune", z:"kafka", i:1, icon:"🎛️", title:"Stop the rebalance storm", sub:"Consumers keep getting kicked out of the group", study:["kafka:4","kafka/groups"]},
+  {type:"triage", z:"kafka", i:2, icon:"🚦", title:"Monday 9 AM queue", sub:"7 alerts. Two matter.", study:["kafka:3","observability:2"]},
+  {type:"timeline", z:"postgres", i:0, icon:"🧭", title:"The checkout outage", sub:"A migration, a lock and a 14-minute outage", study:["postgres:3","postgres:5"]},
+  {type:"logs", z:"postgres", i:1, icon:"🧾", title:"Who is blocking whom?", sub:"Lock waits, deadlocks and one idle transaction", study:["postgres:3","postgres:5"]},
+  {type:"pr", z:"dbt", i:0, icon:"🔍", title:"\"Add merchant LTV model\"", sub:"An analytics PR that double-counts", study:["dbt:1","dbt:2","dbt:6"]},
+  {type:"timeline", z:"debezium", i:0, icon:"🧭", title:"Duplicate orders in the lake", sub:"A connector restart and at-least-once delivery", study:["debezium:6","kafka/offsets"]},
+  {type:"tune", z:"rag", i:0, icon:"🎛️", title:"Tune the retriever", sub:"Chunk size, overlap, top-k and reranking vs cost", study:["rag:1","rag:5","rag/evals"]},
+  {type:"triage", z:"aiattack", i:0, icon:"🚦", title:"AI security inbox", sub:"Six reports about the support bot", study:["aiattack:0","aiattack:2","aidefense:2"]},
+  {type:"logs", z:"agents", i:0, icon:"🧾", title:"Read the agent trace", sub:"Why did it refund the wrong order?", study:["agents:1","agents:7"]}
+];
+Q.WORK = WORK;
+const wkStars = (z, i) => ((P.wk || {})[z] || {})[i] || 0;
+const ALLW = () => CASES.map(c => Object.assign({type:"incident"}, c)).concat(WORK);
+const wStars = c => c.type === "incident" ? csStars(c.z, c.i) : wkStars(c.z, c.i);
+const wHref = c => c.type === "incident" ? `#case-${c.z}-${c.i}` : `#work-${c.z}-${c.i}`;
+const workList = list => `<div class="q-wlist">${list.map(c => { const s = wStars(c), T = WTYPES[c.type];
+  return `<a class="q-wrow" href="${wHref(c)}" style="--h:${ZMAP[c.z].hue}"><span class="q-wrow-ic">${c.icon || T.ic}</span><span class="q-wrow-t"><b>${esc(c.title)}</b><small>${T.ic} ${esc(T.name)} · ${esc(ZMAP[c.z].title)}${c.sub || c.svc ? " · " + esc(c.sub || c.svc) : ""}</small></span><span class="q-wrow-s">${s ? stars(s, "sm") : `<i>New</i>`}</span></a>`; }).join("")}</div>`;
+function workHub(filter){
+  const all = ALLW(), f = WTYPES[filter] ? filter : "all", list = f === "all" ? all : all.filter(c => c.type === f), done = all.filter(wStars).length;
+  document.title = "Work simulator · Dagdeep";
+  root().innerHTML = `<div class="q-wrap q-hub">
+    <a class="q-back" href="#play">← Home</a>
+    <h1>💼 Work simulator</h1>
+    <p class="muted">Real tasks from a data and AI engineer's week. Each type plays differently. ${done}/${all.length} done.</p>
+    <div class="q-wfilter" role="tablist"><button data-f="all" aria-selected="${f === "all"}">All <small>${all.length}</small></button>${Object.entries(WTYPES).map(([k, T]) => `<button data-f="${k}" aria-selected="${f === k}">${T.ic} ${T.name} <small>${all.filter(c => c.type === k).length}</small></button>`).join("")}</div>
+    ${f !== "all" ? `<p class="q-wline">${WTYPES[f].ic} <b>${WTYPES[f].name}:</b> ${WTYPES[f].line}</p>` : ""}
+    ${workList(list)}</div>`;
+  root().querySelectorAll(".q-wfilter button").forEach(b => b.onclick = () => { history.replaceState(null, "", b.dataset.f === "all" ? "#work" : "#work/" + b.dataset.f); workHub(b.dataset.f); });
+}
+const homeWork = () => { const all = ALLW(), nx = all.find(c => !wStars(c));
+  return `<section class="q-whome"><div class="q-sec-row"><h2 class="q-sec-h">💼 Work simulator</h2><a href="#work">See all ${all.length} →</a></div>
+    <div class="q-wtypes">${Object.entries(WTYPES).map(([k, T]) => { const l = all.filter(c => c.type === k); return `<a href="#work/${k}"><span>${T.ic}</span><b>${T.name}</b><small>${l.filter(wStars).length}/${l.length}</small></a>`; }).join("")}</div>
+    ${nx ? workList([nx]) : ""}</section>`; };
+
+function workView(id, wi){
+  const z = ZMAP[id]; if (!z){ location.hash = "#work"; return; }
+  needZone(id, () => {
+    const Z = Q.data[id], W = (Z.work || [])[wi], R = WORK.find(c => c.z === id && c.i === wi) || {};
+    if (!W){ location.hash = "#work"; return; }
+    W.study = W.study || R.study || [];
+    needZones(refZones(W.study), () => wkIntro({id, wi, z, Z, W, R, T:WTYPES[W.type]}));
+  });
+}
+const wkShell = (x, inner, prog) => `<div class="q-wrap q-wk" style="--h:${x.z.hue}; --hc:hsl(${x.z.hue} 70% 45%)">
+  <header class="q-wkh"><a class="q-x" href="#work/${x.W.type}" aria-label="Leave">✕</a><span class="q-wtag">${x.T.ic} ${x.T.name}</span><b>${esc(x.W.title)}</b><span class="q-wkp">${prog || ""}</span></header>
+  <div class="q-wkb">${inner}</div></div>`;
+function wkIntro(x){
+  P.last = x.id; save(); setKeys(null);
+  document.title = `${x.W.title} · ${x.T.name} · Dagdeep`;
+  root().innerHTML = `<div class="q-wrap q-wk" style="--h:${x.z.hue}; --hc:hsl(${x.z.hue} 70% 45%)"><div class="q-wkintro">
+    <a class="q-back" href="#work/${x.W.type}">← ${x.T.name}s</a>
+    <div class="q-wk-ic">${x.T.ic}</div><p class="q-eyebrow">${x.T.name} · ${esc(x.z.title)}</p><h1>${esc(x.W.title)}</h1>
+    <div class="q-wk-sit">${md(x.W.brief)}</div>
+    <h3>How to play</h3><ol class="q-wk-how">${x.T.how.map(h => `<li>${fm(h)}</li>`).join("")}</ol>
+    <p class="q-wk-score">⭐⭐⭐ ${esc(x.W.three || "almost no mistakes")} · fewer stars for each mistake</p>
+    ${x.W.study.length ? `<details class="q-pg-study"><summary>📚 Brush up first <small>(${x.W.study.length} course pages)</small></summary>${refList(x.W.study, "links")}</details>` : ""}
+    <button class="btn big solid q-wkgo">Start</button></div></div>`;
+  root().querySelector(".q-wkgo").onclick = () => WPLAY[x.W.type](x);
+}
+function wkDone(x, s, stats, review){
+  P.wk = P.wk || {}; P.wk[x.id] = P.wk[x.id] || {}; const prev = P.wk[x.id][x.wi] || 0;
+  if (s > prev) P.wk[x.id][x.wi] = s;
+  const gain = 40 + Math.max(0, s - prev) * 20; save(); addXP(gain);
+  if (s === 3) confetti();
+  const typesDone = new Set(ALLW().filter(wStars).map(c => c.type)); if (typesDone.size >= Object.keys(WTYPES).length) unlock("allround");
+  const all = ALLW(), k = all.findIndex(c => c.type === x.W.type && c.z === x.id && c.i === x.wi), nx = all.slice(k + 1).concat(all.slice(0, k)).find(c => !wStars(c));
+  root().innerHTML = wkShell(x, `<div class="q-res won"><h2>${s === 3 ? "Excellent work" : s === 2 ? "Good work" : "Done"}</h2>${stars(s, "big")}
+      <div class="q-res-stats">${stats.map(([l, v]) => `<span><small>${esc(l)}</small><b>${esc(String(v))}</b></span>`).join("")}<span><small>XP</small><b>+${gain}</b></span></div></div>
+    ${review ? `<section class="q-wsec">${review}</section>` : ""}
+    <section class="q-wsec"><h3>🔬 Deep dive</h3>${(x.W.deep || []).map((d, i) => `<details class="q-deepd" ${i ? "" : "open"}><summary>${fm(d.t)}</summary><div>${md(d.md)}</div></details>`).join("")}</section>
+    ${x.W.say ? `<section class="q-wsec q-learned"><h3>🎤 Say this in an interview</h3><p>${fm(x.W.say)}</p></section>` : ""}
+    ${x.W.study.length ? `<section class="q-wsec"><h3>📚 Go deeper in the course</h3>${refList(x.W.study, "links")}</section>` : ""}
+    <div class="q-res-b">${nx ? `<a class="btn big solid" href="${wHref(nx)}">Next: ${esc(nx.title)} →</a>` : ""}<button class="btn big q-again">Replay</button><a class="btn big" href="#work">All work</a></div>`, "");
+  root().querySelector(".q-again").onclick = () => wkIntro(x);
+  window.scrollTo(0, 0);
+}
+const starsBy = (m, a, b) => m <= a ? 3 : m <= b ? 2 : 1;
+const WPLAY = {};
+
+/* ---- PR review ---- */
+WPLAY.pr = x => {
+  const W = x.W, st = {found:new Set(), wrong:0, fp:0};
+  const lineOf = (f, at) => W.files[f].diff.split("\n").findIndex(l => l.includes(at));
+  const bugAt = {}; W.bugs.forEach((b, k) => { bugAt[b.f + ":" + lineOf(b.f, b.at)] = k; });
+  const noteAt = {}; (W.notes || []).forEach(n => { noteAt[n.f + ":" + lineOf(n.f, n.at)] = n.note; });
+  let add = 0, del = 0; W.files.forEach(F => F.diff.split("\n").forEach(l => { if (l[0] === "+") add++; if (l[0] === "-") del++; }));
+  const prog = () => `${st.found.size}/${W.bugs.length} found`;
+  root().innerHTML = wkShell(x, `<div class="q-pr">
+    <div class="q-prhead"><b>${esc(W.pr)}</b><small>${esc(W.author)} wants to merge into <code>main</code> · ${esc(W.repo)} · <span class="t-add">+${add}</span> <span class="t-del">−${del}</span></small><div class="q-prdesc">${md(W.desc)}</div></div>
+    ${W.files.map((F, f) => { let n = 0; return `<div class="q-prfile"><div class="q-prpath">${esc(F.path)}</div><div class="q-prdiff">${F.diff.split("\n").map((l, i) => { const k = l[0] === "@" ? "h" : l[0] === "+" ? "a" : l[0] === "-" ? "d" : "c"; if (k !== "h" && k !== "d") n++;
+      return k === "h" ? `<div class="q-prl h">${esc(l)}</div>` : `<button class="q-prl ${k}" data-f="${f}" data-i="${i}"><span>${k === "d" ? "" : n}</span><i>${k === "a" ? "+" : k === "d" ? "−" : ""}</i><code>${esc(l.slice(1)) || " "}</code></button>`; }).join("")}</div></div>`; }).join("")}
+    <div class="q-prbar"><span class="q-prcount">🔎 ${prog()}</span><button class="btn solid q-prsubmit">Submit review</button></div></div>`, prog());
+  const bar = () => { root().querySelector(".q-prcount").textContent = "🔎 " + prog(); root().querySelector(".q-wkp").textContent = prog(); };
+  const closeSheets = () => root().querySelectorAll(".q-prsheet").forEach(e => e.remove());
+  root().querySelectorAll("button.q-prl").forEach(b => b.onclick = () => {
+    const key = b.dataset.f + ":" + b.dataset.i, bk = bugAt[key];
+    const open = b.nextElementSibling && b.nextElementSibling.classList.contains("q-prsheet"); closeSheets(); if (open) return;
+    if (bk != null && st.found.has(bk)){ b.insertAdjacentHTML("afterend", `<div class="q-prsheet ok">✅ ${fm(W.bugs[bk].why)}</div>`); return; }
+    b.insertAdjacentHTML("afterend", `<div class="q-prsheet"><b>What's wrong with this line?</b><div class="q-prr">${W.reasons.map((r, k) => `<button data-k="${k}">${fm(r)}</button>`).join("")}<button data-k="-1" class="q-prfine">Nothing, it's fine</button></div><p class="q-prmsg"></p></div>`);
+    const sh = b.nextElementSibling, msg = sh.querySelector(".q-prmsg");
+    sh.querySelectorAll(".q-prr button").forEach(o => o.onclick = () => {
+      const k = +o.dataset.k;
+      if (k === -1){ sh.remove(); return; }
+      if (bk == null){ st.fp++; b.classList.add("fp"); msg.innerHTML = `⚪ <b>False alarm.</b> ${fm(noteAt[key] || "This line is fine as written.")}`; sh.querySelectorAll(".q-prr button").forEach(z => z.disabled = true); setTimeout(() => sh.remove(), 2600); return; }
+      if (k === W.bugs[bk].a){ st.found.add(bk); b.classList.add("bug"); sh.classList.add("ok"); sh.innerHTML = `✅ <b>Good catch.</b> ${fm(W.bugs[bk].why)}`; bar(); }
+      else { st.wrong++; o.disabled = true; o.classList.add("no"); msg.innerHTML = "❌ There <i>is</i> a problem on this line, but not that one. Try another reason."; }
+    });
+  });
+  root().querySelector(".q-prsubmit").onclick = () => {
+    closeSheets(); const old = root().querySelector(".q-prverdict"); if (old) old.remove();
+    root().querySelector(".q-prbar").insertAdjacentHTML("beforebegin", `<div class="q-prverdict"><b>Your review</b><button data-v="approve">✅ Approve</button><button data-v="comment">💬 Comment only</button><button data-v="changes">⛔ Request changes</button></div>`);
+    const vd = root().querySelector(".q-prverdict"); vd.scrollIntoView({block:"center", behavior:reduce() ? "auto" : "smooth"});
+    vd.querySelectorAll("button").forEach(v => v.onclick = () => {
+      const missed = W.bugs.filter((b, k) => !st.found.has(k)), ok = v.dataset.v === "changes";
+      const m = st.wrong + st.fp + missed.length * 2 + (ok ? 0 : 2);
+      const review = `<h3>${ok ? "⛔ Changes requested" : "😬 It shipped"}</h3>${ok ? "" : md(W.shipped)}
+        <ul class="q-prrev">${W.bugs.map((b, k) => `<li class="${st.found.has(k) ? "ok" : "miss"}">${st.found.has(k) ? "✅" : "❌ Missed:"} <code>${esc(b.at)}</code><div>${fm(b.why)}</div></li>`).join("")}</ul>`;
+      wkDone(x, starsBy(m, 1, 4), [["Found", `${st.found.size}/${W.bugs.length}`], ["Wrong reasons", st.wrong], ["False alarms", st.fp]], review);
+    });
+  };
+};
+
+/* ---- Log hunt ---- */
+WPLAY.logs = x => {
+  const W = x.W, L = W.log.trim().split("\n"), st = {q:0, miss:0, tips:0, lvl:"ALL", text:""};
+  const lvlOf = l => (l.match(/\b(ERROR|WARN|INFO|DEBUG|FATAL)\b/) || [, "INFO"])[1];
+  const prog = () => `Q${Math.min(st.q + 1, W.qs.length)}/${W.qs.length}`;
+  root().innerHTML = wkShell(x, `<div class="q-logs">
+    <div class="q-lq"></div>
+    <div class="q-ltools"><input class="q-lsearch" type="search" placeholder="Filter lines… (e.g. ERROR, killed)" aria-label="Filter log lines" autocapitalize="off" spellcheck="false">
+      <div class="q-llv">${["ALL", "ERROR", "WARN"].map(v => `<button data-l="${v}" aria-selected="${v === "ALL"}">${v}</button>`).join("")}</div></div>
+    <div class="q-lsrc">${esc(W.source)} · <span class="q-lcount"></span></div>
+    <div class="q-lview">${L.map((l, i) => `<button class="q-ll ${lvlOf(l).toLowerCase()}" data-i="${i}"><span>${i + 1}</span><code>${termFmt(l)}</code></button>`).join("")}</div></div>`, prog());
+  const qEl = root().querySelector(".q-lq"), rows = [...root().querySelectorAll(".q-ll")];
+  const filter = () => { let n = 0; rows.forEach((r, i) => { const l = L[i], v = (st.lvl === "ALL" || lvlOf(l) === st.lvl || (st.lvl === "ERROR" && lvlOf(l) === "FATAL")) && (!st.text || l.toLowerCase().includes(st.text)); r.hidden = !v; if (v) n++; }); root().querySelector(".q-lcount").textContent = `${n} of ${L.length} lines`; };
+  root().querySelector(".q-lsearch").oninput = e => { st.text = e.target.value.trim().toLowerCase(); filter(); };
+  root().querySelectorAll(".q-llv button").forEach(b => b.onclick = () => { st.lvl = b.dataset.l; root().querySelectorAll(".q-llv button").forEach(z => z.setAttribute("aria-selected", z === b)); filter(); });
+  const ask = () => {
+    root().querySelector(".q-wkp").textContent = prog();
+    const q = W.qs[st.q];
+    qEl.innerHTML = `<small>Question ${st.q + 1} of ${W.qs.length}</small><b>${fm(q.q)}</b><p class="q-lmsg">Tap the line that answers it.</p>${q.tip ? `<button class="q-ltip">💡 Tip</button>` : ""}`;
+    const tb = qEl.querySelector(".q-ltip"); if (tb) tb.onclick = () => { st.tips++; tb.outerHTML = `<p class="q-ltipt">💡 ${fm(q.tip)}</p>`; };
+  };
+  rows.forEach((r, i) => r.onclick = () => {
+    const q = W.qs[st.q]; if (!q) return;
+    const msg = qEl.querySelector(".q-lmsg");
+    if (q.a.some(a => L[i].includes(a))){
+      r.classList.add("hit");
+      qEl.innerHTML = `<small>Question ${st.q + 1} of ${W.qs.length} · ✅ line ${i + 1}</small><b>${fm(q.q)}</b><div class="q-lwhy">${md(q.why)}</div><button class="btn solid q-lnext">${st.q + 1 < W.qs.length ? "Next question →" : "Finish"}</button>`;
+      qEl.querySelector(".q-lnext").onclick = () => { st.q++; if (st.q < W.qs.length){ ask(); qEl.scrollIntoView({block:"nearest"}); } else wkDone(x, starsBy(st.miss + st.tips, 1, 4), [["Wrong taps", st.miss], ["Tips used", st.tips]], ""); };
+      qEl.scrollIntoView({block:"nearest", behavior:reduce() ? "auto" : "smooth"});
+    } else {
+      st.miss++; r.classList.add("miss"); setTimeout(() => r.classList.remove("miss"), 700);
+      const note = (W.notes || []).find(([s]) => L[i].includes(s));
+      msg.innerHTML = `❌ Line ${i + 1}: ${note ? fm(note[1]) : "not this one."}`;
+    }
+  });
+  filter(); ask();
+};
+
+/* ---- Tune it ---- */
+WPLAY.tune = x => {
+  const W = x.W, v = {}, st = {runs:0, hist:[]};
+  W.knobs.forEach(k => v[k.k] = k.def);
+  const fmtV = (k, o) => k.fmt ? k.fmt(o) : String(o);
+  root().innerHTML = wkShell(x, `<div class="q-tune">
+    <div class="q-goals"><b>Goals</b>${W.metrics.map(m => `<span>${esc(m.label)} ${esc(m.gl)}</span>`).join("")}</div>
+    <div class="q-knobs">${W.knobs.map(k => `<div class="q-knob"><div class="q-knob-h"><b>${esc(k.label)}</b><button class="q-kq" aria-label="What is ${esc(k.label)}?">?</button></div>
+      <div class="q-khelp" hidden>${md(k.help)}</div>
+      <div class="q-kopts">${k.opts.map(o => `<button data-k="${k.k}" data-v="${esc(JSON.stringify(o))}" aria-pressed="${o === k.def}">${esc(fmtV(k, o))}</button>`).join("")}</div></div>`).join("")}</div>
+    <button class="btn big solid q-run">▶ Run</button>
+    <div class="q-tout"></div></div>`, "0 runs");
+  root().querySelectorAll(".q-kq").forEach(b => b.onclick = () => { const h = b.closest(".q-knob").querySelector(".q-khelp"); h.hidden = !h.hidden; });
+  root().querySelectorAll(".q-kopts button").forEach(b => b.onclick = () => { v[b.dataset.k] = JSON.parse(b.dataset.v); b.parentElement.querySelectorAll("button").forEach(z => z.setAttribute("aria-pressed", z === b)); });
+  root().querySelector(".q-run").onclick = () => {
+    st.runs++; const r = W.sim(Object.assign({}, v)), ok = W.metrics.map(m => m.goal(r.m[m.k]));
+    st.hist.push({v:Object.assign({}, v), ok:ok.every(Boolean)});
+    root().querySelector(".q-wkp").textContent = `${st.runs} run${st.runs > 1 ? "s" : ""}`;
+    const out = root().querySelector(".q-tout");
+    out.innerHTML = `<div class="q-trun"><small>Run ${st.runs}</small><div class="q-tmet">${W.metrics.map((m, k) => `<span class="${ok[k] ? "ok" : "no"}"><small>${esc(m.label)}</small><b>${esc(m.show ? m.show(r.m[m.k]) : String(r.m[m.k]))}${esc(m.unit || "")}</b><i>${ok[k] ? "✓" : "✗"} ${esc(m.gl)}</i></span>`).join("")}</div>
+      <ul class="q-tlog">${r.log.map(l => `<li>${fm(l)}</li>`).join("")}</ul>
+      ${ok.every(Boolean) ? `<button class="btn big solid q-tdone">All goals met · finish →</button>` : `<p class="muted">Change a setting and run again.</p>`}</div>`;
+    out.scrollIntoView({block:"nearest", behavior:reduce() ? "auto" : "smooth"});
+    const d = out.querySelector(".q-tdone");
+    if (d) d.onclick = () => wkDone(x, starsBy(st.runs, 2, 4), [["Runs", st.runs]], `<h3>Your winning settings</h3><div class="q-tw"><table><tbody>${W.knobs.map(k => `<tr><td>${esc(k.label)}</td><td><b>${esc(fmtV(k, v[k.k]))}</b></td></tr>`).join("")}</tbody></table></div>${W.best ? `<p>${fm(W.best)}</p>` : ""}`);
+  };
+};
+
+/* ---- Postmortem timeline ---- */
+WPLAY.timeline = x => {
+  const W = x.W, n = W.events.length, st = {m:0, placed:[], pool:shuffle(W.events.map((e, i) => i)), step:1, lab:{}, why:0};
+  const KINDS = [["trigger", "Trigger"], ["cause", "Root cause"], ["symptom", "Symptom"], ["response", "Response"]];
+  const draw = () => {
+    const step = st.step, body = root().querySelector(".q-tlbody");
+    root().querySelector(".q-wkp").textContent = `Step ${step}/3`;
+    if (step === 1){
+      body.innerHTML = `<div class="q-tlstep"><b>1 · Put the events in order</b><small>Tap events in the order they happened. Tap a placed event to take it back.</small></div>
+        <ol class="q-tlord">${st.placed.map((e, k) => `<li><button data-p="${k}">${fm(W.events[e].t)}</button></li>`).join("") || `<li class="q-tlempty">First event goes here</li>`}</ol>
+        <div class="q-tlpool">${st.pool.map(e => `<button data-e="${e}">${fm(W.events[e].t)}</button>`).join("")}</div>
+        ${st.placed.length === n ? `<button class="btn big solid q-tlchk">Check order</button>` : ""}<p class="q-tlmsg"></p>`;
+      body.querySelectorAll(".q-tlpool button").forEach(b => b.onclick = () => { st.pool = st.pool.filter(e => e !== +b.dataset.e); st.placed.push(+b.dataset.e); draw(); });
+      body.querySelectorAll(".q-tlord button").forEach(b => b.onclick = () => { const e = st.placed.splice(+b.dataset.p, 1)[0]; st.pool.push(e); draw(); });
+      const c = body.querySelector(".q-tlchk"); if (c) c.onclick = () => {
+        const bad = st.placed.map((e, k) => e !== k);
+        if (!bad.some(Boolean)){ st.step = 2; draw(); return; }
+        st.m++; const keep = []; st.placed.forEach((e, k) => { if (!bad[k] && keep.length === k) keep.push(e); else st.pool.push(e); });
+        st.placed = keep; draw(); body.querySelector(".q-tlmsg").innerHTML = `❌ Not quite. The first ${keep.length} ${keep.length === 1 ? "is" : "are"} right; the rest went back. Think about what had to happen before what.`;
+      };
+    } else if (step === 2){
+      body.innerHTML = `<div class="q-tlstep"><b>2 · Label each event</b><small>Trigger = what set it off. Root cause = the underlying weakness. Symptom = what people noticed. Response = what the team did.</small></div>
+        <ol class="q-tllab">${W.events.map((e, i) => `<li><p>${fm(e.t)}</p><div>${KINDS.map(([k, l]) => `<button data-i="${i}" data-k="${k}" aria-pressed="${st.lab[i] === k}">${l}</button>`).join("")}</div></li>`).join("")}</ol>
+        <button class="btn big solid q-tlchk">Check labels</button><p class="q-tlmsg"></p>`;
+      body.querySelectorAll(".q-tllab button").forEach(b => b.onclick = () => { st.lab[b.dataset.i] = b.dataset.k; b.parentElement.querySelectorAll("button").forEach(z => z.setAttribute("aria-pressed", z === b)); });
+      body.querySelector(".q-tlchk").onclick = () => {
+        if (Object.keys(st.lab).length < n){ body.querySelector(".q-tlmsg").textContent = "Label every event first."; return; }
+        const bad = W.events.map((e, i) => st.lab[i] !== e.kind);
+        if (!bad.some(Boolean)){ st.step = 3; draw(); return; }
+        st.m++; body.querySelectorAll(".q-tllab li").forEach((li, i) => li.classList.toggle("bad", bad[i]));
+        body.querySelector(".q-tlmsg").innerHTML = `❌ ${bad.filter(Boolean).length} label${bad.filter(Boolean).length > 1 ? "s are" : " is"} wrong (marked red). Tip: a trigger is often innocent on its own; the root cause is the weakness it exposed.`;
+      };
+    } else {
+      const done = W.whys.slice(0, st.why), q = W.whys[st.why];
+      body.innerHTML = `<div class="q-tlstep"><b>3 · Ask "why?"</b><small>Each answer becomes the next question. Stop at a cause you can fix with a process or design change.</small></div>
+        <ol class="q-whys">${done.map(w => `<li><small>${fm(w.q)}</small><b>${fm(w.o[w.a])}</b></li>`).join("")}</ol>
+        ${q ? `<div class="q-whyq"><b>${fm(q.q)}</b>${q.o.map((o, k) => `<button data-k="${k}">${fm(o)}</button>`).join("")}<p class="q-tlmsg"></p></div>` : `<button class="btn big solid q-tlfin">Finish the postmortem →</button>`}`;
+      body.querySelectorAll(".q-whyq button").forEach(b => b.onclick = () => {
+        if (+b.dataset.k === q.a){ st.why++; draw(); }
+        else { st.m++; b.disabled = true; b.classList.add("no"); body.querySelector(".q-tlmsg").innerHTML = `❌ ${fm(q.why || "That's true, but it doesn't answer this why.")}`; }
+      });
+      const f = body.querySelector(".q-tlfin"); if (f) f.onclick = () => wkDone(x, starsBy(st.m, 1, 3), [["Mistakes", st.m]],
+        `<h3>The timeline</h3><ol class="q-tlfinal">${W.events.map(e => `<li>${e.at ? `<time>${esc(e.at)}</time>` : ""}<span class="q-tk ${e.kind}">${KINDS.find(k => k[0] === e.kind)[1]}</span>${fm(e.t)}</li>`).join("")}</ol>`);
+    }
+  };
+  root().innerHTML = wkShell(x, `<div class="q-tl2"><div class="q-tlbody"></div></div>`, "Step 1/3");
+  draw();
+};
+
+/* ---- Triage ---- */
+WPLAY.triage = x => {
+  const W = x.W, st = {i:0, m:0, sev:null};
+  const SEV = [["now", "🔴 Drop everything"], ["today", "🟠 Today"], ["later", "🟡 Backlog"], ["noise", "⚪ Noise"]];
+  const card = () => {
+    const it = W.items[st.i]; st.sev = null;
+    root().querySelector(".q-wkp").textContent = `${st.i + 1}/${W.items.length}`;
+    root().querySelector(".q-trg").innerHTML = `<div class="q-trcard"><div class="q-trsrc"><span>${esc(it.src)}</span><small>${esc(it.from)}</small></div><b>${fm(it.t)}</b><div class="q-trbody">${md(it.body)}</div></div>
+      <div class="q-trq"><b>How urgent is this?</b><div class="q-trsev">${SEV.map(([k, l]) => `<button data-s="${k}">${l}</button>`).join("")}</div><div class="q-trfb"></div></div>`;
+    root().querySelectorAll(".q-trsev button").forEach(b => b.onclick = () => {
+      const ok = b.dataset.s === it.sev, fb = root().querySelector(".q-trfb");
+      if (!ok){ st.m++; b.disabled = true; b.classList.add("no"); fb.innerHTML = `<p>❌ Not quite. Look again: who is affected, how badly, and is it getting worse?</p>`; return; }
+      root().querySelectorAll(".q-trsev button").forEach(z => z.disabled = true); b.classList.add("yes");
+      fb.innerHTML = `<p>✅ ${fm(it.why)}</p>` + (it.act ? `<b>What's your first move?</b><div class="q-tract">${it.act.o.map((o, k) => `<button data-k="${k}">${fm(o)}</button>`).join("")}</div><p class="q-tramsg"></p>` : `<button class="btn solid q-trnext">Next →</button>`);
+      const nextB = () => { const nb = fb.querySelector(".q-trnext"); nb.onclick = () => { st.i++; if (st.i < W.items.length) card(); else wkDone(x, starsBy(st.m, 1, 3), [["Mistakes", st.m], ["Items", W.items.length]], ""); }; };
+      if (!it.act) return nextB();
+      fb.querySelectorAll(".q-tract button").forEach(a => a.onclick = () => {
+        if (+a.dataset.k === it.act.a){ fb.querySelectorAll(".q-tract button").forEach(z => z.disabled = true); a.classList.add("yes"); fb.querySelector(".q-tramsg").outerHTML = `<p>✅ ${fm(it.act.why)}</p><button class="btn solid q-trnext">${st.i + 1 < W.items.length ? "Next item →" : "Finish"}</button>`; nextB(); }
+        else { st.m++; a.disabled = true; a.classList.add("no"); fb.querySelector(".q-tramsg").textContent = "❌ Not the best first move. Try again."; }
+      });
+    });
+  };
+  root().innerHTML = wkShell(x, `<div class="q-trg"></div>`, `1/${W.items.length}`);
+  card();
+};
+
 window.loadQuest = function(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null); drawAcct();
@@ -1212,6 +1490,8 @@ window.loadQuest = function(h){
   else if ((m = h.match(/^mis-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "ms");
   else if ((m = h.match(/^iv-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "iv");
   else if ((m = h.match(/^case-([a-z]+)-(\d+)$/))) caseView(m[1], +m[2]);
+  else if ((m = h.match(/^work-([a-z]+)-(\d+)$/))) workView(m[1], +m[2]);
+  else if ((m = h.match(/^work(?:\/([a-z]+))?$/))) workHub(m[1]);
   else if ((m = h.match(/^learn-([a-z]+)-(\d+)$/))) studyView(m[1], +m[2]);
   else if ((m = h.match(/^card-([a-z]+)-(\w+)$/))) studyView(m[1], 0, m[2]);
   else if ((m = h.match(/^zone-([a-z]+)(?:\/([a-z]+))?/))) zoneView(m[1], m[2]);

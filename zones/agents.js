@@ -152,6 +152,7 @@ QUEST.cases("agents", [
 {
  title:"An agent burned ₹4 lakh overnight", icon:"🔁", sev:1, clock:"07:30", channel:"inc-2355-agent-cost", svc:"refund-agent · LangGraph on Claude", need:4, uiName:"LangSmith",
  terms:[["Agent loop","The model decides an action, a tool runs, the result goes back to the model, and it repeats until the model says it's done."],["Tool call","The model asks the app to run a function (here «get_order_status», «issue_refund»)."],["recursion_limit","LangGraph's cap on how many steps one run may take before it stops with an error."],["Context growth","Each step adds the tool result to the conversation, so every later call re-sends a longer prompt. Cost grows roughly quadratically."],["HTTP 429","\"Too many requests\": a rate limit. The right response is to wait and retry with backoff, then give up."],["Circuit breaker","A guard that stops calling a failing dependency for a while instead of hammering it."],["Budget guard","A hard limit on tokens or money per run, user or day."]],
+ deep:[{"t": "Why agent cost grows quadratically", "md": "Each step re-sends the **whole conversation so far** (system prompt + every previous thought, call and result). If each step adds ~400 tokens, step *n* sends ~400·n tokens, so total input for *N* steps ≈ 400·N²/2.\n- 10 steps → ~20k tokens. 100 steps → ~2M. 1,840 steps → ~680M.\n- Mitigations: step and token limits, **summarising** or truncating old tool results, prompt caching for the static prefix, and returning **compact** tool outputs."}, {"t": "Designing tools for agents", "md": "- **Retries inside the tool** with exponential backoff and a cap; respect «Retry-After».\n- **Structured, final errors**: «{\"error\":\"orders_unavailable\",\"retryable\":false,\"next\":\"escalate\"}» so the model knows to stop.\n- **Circuit breaker**: after N failures, fail fast for a cool-down period.\n- **Idempotency keys** for actions (refunds!) so a retry can't double-act.\n- Small, specific tools with clear descriptions beat one big generic tool."}],
  pager:`[r]FIRING[/r]  LLM spend  refund-agent  [r]₹4.1 lakh[/r] in 9h (daily budget ₹30k)
 top run    conv_88a1f   [r]1,840 steps[/r]   3.9M input tokens
 runs > 50 steps: [r]212[/r] (normal: 0)
@@ -255,5 +256,50 @@ def handle(ticket):
   prevent:["Hard step limit + per-run budget with a human handoff, enforced in the graph","Tools own their retries (backoff, max attempts) and return structured terminal errors","Circuit breakers on downstream APIs","Cost/steps alerts and a 'failing tool' eval in CI"]
  },
  learned:["Agents need **hard stops**: max steps, max tokens/₹ per run, then hand off to a human.","**Retries belong in the tool** (with backoff), not in the model's reasoning.","Cost per step grows with the **context**. Long loops get expensive fast.","Migrations can silently drop safety defaults (max_iterations=15 → 10,000)."]
+}
+]);
+
+/* ===== Work simulator: Agentic AI ===== */
+QUEST.work("agents", [
+{
+ type:"logs", title:"Read the agent trace", three:"answer all 4 questions with at most 1 wrong tap",
+ brief:"A customer (Rahul, customer «C-1201») asked the refund agent for a refund. The agent refunded **₹18,400 for an order that belongs to someone else** (his sister, who shares the family phone number). Nobody was hacked: the agent just did what its design allowed.\n\nRead the trace and find each decision that went wrong.",
+ source:"LangSmith trace · refund-agent · run r_55120 · 41 events",
+ log:[
+  "11:02:01 INFO  run start  session_customer=C-1201 channel=app model=claude-sonnet",
+  "11:02:01 INFO  system     prompt v14 loaded (refund policy, 6 tools)",
+  "11:02:01 DEBUG memory     loaded 3 past messages for C-1201",
+  "11:02:02 INFO  user       \"I want a refund for my order from yesterday, it never arrived\"",
+  "11:02:03 INFO  llm        thought: I need to find the customer's orders from yesterday.",
+  "11:02:03 INFO  tool_call  search_orders(phone=\"98xxxx4410\", date=\"2026-11-17\")",
+  "11:02:03 DEBUG tool       search_orders using phone number lookup (shared across family accounts)",
+  "11:02:04 INFO  tool_out   search_orders → [y]3 results[/y]: O-55120 (₹18,400, customer C-8812, electronics), O-55077 (₹640, customer C-1201, groceries), O-55091 (₹1,210, customer C-1201, pharmacy)",
+  "11:02:05 INFO  llm        thought: [y]The most expensive order is probably the one they care about.[/y] I'll check O-55120.",
+  "11:02:05 INFO  tool_call  get_order_status(order_id=\"O-55120\")",
+  "11:02:06 INFO  tool_out   O-55120: status=IN_TRANSIT, eta=2026-11-19, carrier=BlueDart",
+  "11:02:06 DEBUG latency    llm=812ms tool=94ms",
+  "11:02:07 INFO  llm        thought: It hasn't arrived and the customer wants a refund. Policy allows refunds for undelivered orders.",
+  "11:02:07 WARN  policy     refund policy says IN_TRANSIT orders should wait for ETA; model judged eligible anyway",
+  "11:02:08 INFO  tool_call  issue_refund(order_id=\"O-55120\", amount=18400, reason=\"not delivered\")",
+  "11:02:09 INFO  tool_out   issue_refund → OK refund_id=RF-77120 [r](no check that order.customer_id == session_customer)[/r]",
+  "11:02:09 INFO  llm        \"Done! I've refunded ₹18,400 for your order O-55120. It'll reach you in 3-5 days.\"",
+  "11:02:10 INFO  user       \"wait what? my order was ₹640 groceries\"",
+  "11:02:11 INFO  llm        \"I'm sorry for the confusion! Let me look again.\"",
+  "11:02:11 DEBUG tokens     in=6,212 out=388 cost=₹0.61",
+  "11:02:12 INFO  run end    status=success steps=7"
+ ].join("\n"),
+ qs:[
+  {q:"Which tool result gave the agent **more than one** possible order?", a:["search_orders → [y]3 results"], why:"«search_orders» by **phone number** returned 3 orders, and one belongs to **another customer (C-8812)**. The tool searched by a weak identifier (a family-shared phone) instead of the **authenticated session's customer id**. Tools should be scoped to the logged-in user by design, not by whatever the model passes in."},
+  {q:"Where did the agent **guess** instead of asking the customer?", a:["The most expensive order is probably the one they care about"], why:"With 3 candidates, the right move is to **ask** (\"Is it the ₹640 groceries order or the ₹1,210 pharmacy order?\"). Agents should be told, and tested, to clarify ambiguity before taking actions, especially irreversible ones."},
+  {q:"Which line shows the agent's action went against **policy**?", a:["refund policy says IN_TRANSIT orders should wait for ETA"], tip:"Filter for «policy».", why:"The order was **in transit** with an ETA tomorrow; policy says wait. The model's judgment overrode the rule. Business rules like eligibility belong **in the tool's code** («issue_refund» should reject IN_TRANSIT orders), not only in the prompt."},
+  {q:"Which line shows the missing **safety check** that made the bad refund possible?", a:["(no check that order.customer_id == session_customer)"], why:"«issue_refund» accepted **any** order id. One line of authorization in the tool, «order.customer_id == session.customer_id», would have blocked this no matter what the model decided. For money-moving tools also add: an amount limit for auto-approval, and human approval above it."}
+ ],
+ notes:[["run start","Normal start. Note the session already knows the customer: C-1201."],["prompt v14","Loading the system prompt. Normal."],["memory","Loading conversation memory. Normal."],["latency","Timing info. Fine."],["tokens","Cost info. ₹0.61 is normal for 7 steps."],["get_order_status","Checking status was reasonable. The problem was *which* order."],["run end","«status=success» means the run didn't crash, not that it did the right thing."],["wait what","The customer noticing: the symptom, after the damage."],["I'm sorry","The agent apologising: after the refund already went out."]],
+ deep:[
+  {t:"Reading an agent trace", md:"An agent run is a loop of **thought → tool call → tool output → thought**. For each step ask:\n1. **Did the tool return what the agent needed?** (Right scope, unambiguous, complete.)\n2. **Did the model interpret it correctly?** Watch for guesses (\"probably\", \"I'll assume\").\n3. **Should a guardrail have stopped this step?** Policy, authorization, amount limits, human approval.\n\nTools like LangSmith, Langfuse or Phoenix show each step with inputs, outputs, latency and tokens. «status=success» only means nothing crashed."},
+  {t:"Put authority in tools, not prompts", md:"- **Scope by identity**: tools read the authenticated user from the session, never trust a user/model-supplied identifier like a phone number.\n- **Enforce rules in code**: eligibility, ownership, amount limits. The prompt can explain the policy; the tool must enforce it.\n- **Human-in-the-loop** for irreversible or high-value actions (refunds above ₹X, emails to new recipients).\n- **Return useful errors**: \"order belongs to a different customer; ask the user which order\" lets the model recover."},
+  {t:"Teaching agents to ask", md:"- Prompt: \"If more than one item matches, list them and ask the user to choose. Never pick on their behalf.\"\n- Tool design: return candidates with distinguishing details so a question is easy.\n- Evals: build cases with **ambiguous** inputs and assert the agent asks before acting. Track an \"acted on ambiguity\" rate in production traces."}
+ ],
+ say:"When an agent does the wrong thing I read the trace step by step: was the tool output scoped and unambiguous, did the model guess, and which guardrail should have stopped the action. Here the fixes were scoping search to the session customer, asking when several orders match, and enforcing ownership and eligibility inside the refund tool."
 }
 ]);
