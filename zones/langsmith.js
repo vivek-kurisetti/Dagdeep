@@ -36,3 +36,90 @@ levels:[
  ["pick","Traces contain card numbers. Fix?",["Mask/hide sensitive inputs and outputs before sending","Delete the project weekly","Disable evals","Use a bigger model"],0,"Never log PII you don't need."]
 ]}
 ]});
+
+QUEST.more("langsmith", [
+{act:"Expert", t:"The trace data model", sub:"Runs, sampling, distributed tracing", rounds:[
+ ["learn","Runs, traces and ordering","Each **run** has an id, «run_type» (chain, llm, tool, retriever, embedding, prompt, parser), parent run, start/end times, inputs/outputs, error, tokens/cost, tags and metadata. All runs in one request share a **trace_id**; a «dotted_order» field encodes position in the tree for fast ordering.",null,null,`### How tracing stays off the hot path
+SDKs send runs **asynchronously in batches** from a background thread. In serverless functions, flush before the function exits («wait_for_all_tracers()» / client flush), or traces are lost.
+
+### Sampling
+Set a sampling rate («LANGSMITH_SAMPLING_RATE» / tracing sampling env) to send only a fraction of traces for very high-volume endpoints. Keep 100% for low-volume or critical flows, and consider always tracing errors.
+
+### Distributed tracing
+When a request crosses services (API → retrieval service → agent worker), propagate trace context via headers (LangSmith's «langsmith-trace» and «baggage» headers from the run tree) so all spans join one trace. OpenTelemetry-based export/ingestion is supported too.
+
+### Attaching data
+- **Metadata** (model, prompt version, tenant, feature flag) for filtering.
+- **Feedback** (scores/comments) attached to a run by id — from users, evaluators or annotators.
+- **Threads**: group traces of one conversation with a «session_id»/«thread_id» metadata key for conversation-level views.`],
+ ["match","Field",[["run_type","Kind of step: llm, tool, retriever, chain…"],["trace_id","Shared by all runs in one request"],["dotted_order","Encodes order and nesting in the tree"],["Feedback","Score/comment attached to a run"],["thread metadata","Groups traces into a conversation"]],"The vocabulary of every trace."],
+ ["pick","Traces from a Lambda function randomly go missing. Most likely?",["Background batches not flushed before the function exits","Sampling bug","Wrong project name","Too many tags"],0,"Flush tracers at the end of the handler."],
+ ["num","An endpoint does 2,000,000 requests/day; you sample traces at 5%. Traces per day?",100000,0,"traces","2,000,000 × 0.05 = 100,000."],
+ ["tf","Tracing truths",[["Tracing blocks each request until runs are uploaded.",false,"Uploads are async and batched."],["Trace context can be propagated across services with headers.",true,"Distributed tracing."]]]
+]},
+{act:"Expert", t:"Evaluator design", sub:"Judges, bias, calibration", rounds:[
+ ["learn","Evaluators you can trust","An evaluator takes the run (outputs) and the example (inputs, reference) and returns a **key** and **score**. **Summary evaluators** compute dataset-level metrics (precision, recall, F1). **Pairwise** evaluators compare two experiments' outputs.",null,null,`### LLM-as-judge pitfalls
+- **Position bias**: in pairwise comparisons, judges favour the first (or second) answer. Run both orders and average, or randomize.
+- **Verbosity bias**: longer answers look better. Put length expectations in the rubric.
+- **Self-preference**: judges may favour outputs from their own model family.
+- **Vague rubrics**: "is it good?" → noise. Use specific, binary or few-level criteria ("Does every claim appear in the context? yes/no").
+
+### Calibration
+Label 50–100 examples by humans, run the judge, and measure **agreement** (and Cohen's kappa for chance-corrected agreement). Iterate the rubric/judge prompt until agreement is acceptable, then trust it at scale — and re-check periodically.
+
+### Variance
+LLM apps are stochastic. Run each example several times (**repetitions**) to see variance; a 2-point difference between versions on 80 examples may be noise.
+
+### Cheap first
+Use code evaluators (JSON validity, exact match on labels, regex for citations, latency/cost thresholds) wherever possible; reserve LLM judges for semantic criteria.`],
+ ["num","A judge agrees with human labels on 170 of 200 examples. Agreement rate (%)?",85,0,"%","170 / 200 = 85%. Check kappa too: high raw agreement can be inflated if one label dominates."],
+ ["sort","Mitigates judge bias?",{"Mitigates":["Swap answer order in pairwise and average","Specific yes/no rubric criteria","Calibrate against human labels"],"Doesn't":["Ask the judge to 'be fair'","Use the longest answer as reference","Run once and trust it"]},"Design out the bias."],
+ ["pick","Pairwise eval says v2 wins 70% — but only when v2 is shown first. What's happening?",["Position bias","v2 is better","Dataset too large","Temperature"],0,"Evaluate both orders."],
+ ["tf","Evaluator truths",[["Summary evaluators compute metrics across the whole dataset.",true,"E.g. F1 for classification."],["Repetitions help measure run-to-run variance.",true,"Stochastic outputs need them."]]]
+]},
+{act:"Expert", t:"Experiments in CI", sub:"Thresholds, testing integrations", rounds:[
+ ["learn","Gate releases on evals","Treat evals like tests: a dataset version + evaluators + thresholds. Run on every prompt/model/code change, compare with the baseline experiment, and **fail CI** on regressions in key metrics.",null,null,`### Practical setup
+- Pin a **dataset version/tag** so comparisons are apples to apples.
+- Use LangSmith's **pytest / Vitest / Jest** integrations to log test cases as experiments while asserting thresholds in code.
+- Keep fast **smoke evals** (20–50 critical examples) on every PR and a fuller suite nightly.
+- Track **cost and latency** per experiment alongside quality: a 1-point quality gain for 3× cost may not ship.
+
+### Reading comparisons
+Look at per-example diffs: which examples **regressed**, not just the average. A new prompt can fix 10 easy cases and break 3 critical ones.
+
+### Significance (rough)
+With n examples and accuracy around 80%, the standard error is about √(0.8 × 0.2 / n). For n = 100 that's 4 points: differences smaller than ~8 points (2 SE) may be noise. Use more examples, repetitions, or paired comparisons on the same examples.`],
+ ["num","Accuracy ≈ 80% on n = 100 examples. Standard error in percentage points (√(0.8×0.2/100) × 100)?",4,0.1,"points","√(0.16 / 100) = 0.04 → 4 points. A 3-point improvement is within noise."],
+ ["order","A PR that changes the system prompt",["CI runs smoke evals on the pinned dataset","Compare with the main-branch baseline experiment","Inspect per-example regressions","Fail if key metrics drop beyond thresholds","Merge; nightly full suite confirms"],"Evals as tests."],
+ ["pick","Average correctness rose 2 points but two critical refund cases now fail. Ship?",["No — review per-example regressions on critical cases","Yes, average improved","Only on Fridays","Re-run until it passes"],0,"Critical regressions matter more than averages."],
+ ["tf","CI truths",[["Comparing experiments on different dataset versions is fine.",false,"Pin the version."],["Cost and latency should be tracked with quality.",true,"Trade-offs need all three."]]]
+]},
+{act:"Expert", t:"Production monitoring & prompts", sub:"Rules, queues, Prompt Hub", rounds:[
+ ["learn","Automations close the loop","**Automation rules** run on traces matching a filter with a sampling rate: add to a dataset, send to an **annotation queue**, run an **online evaluator**, or call a webhook. **Dashboards** chart latency, cost, error rates and feedback by metadata.",null,null,`### Useful rules
+- Thumbs-down feedback → annotation queue with a rubric for reviewers.
+- Online evaluator flags low faithfulness → add to "regressions" dataset.
+- Errors in the refund tool → webhook to alerting.
+- 5% sample of all traffic → online correctness judge for trend lines.
+
+### Annotation queues
+Reviewers see the trace, a rubric (feedback keys with allowed values) and can correct outputs, which become reference answers for datasets.
+
+### Prompt management
+The **Prompt Hub** versions prompts as commits; tag a commit «prod» or «staging» and pull by tag at runtime, so changing a prompt doesn't need a deploy. Record the prompt commit in trace metadata to connect quality changes to prompt versions. The **Playground** lets you run prompts against dataset examples before committing.
+
+### Retention and privacy
+Trace retention tiers differ (short base retention vs extended for traces you keep, e.g. those with feedback). Mask or hide inputs/outputs containing PII at the SDK level before upload.`],
+ ["match","Rule → action",[["Negative user feedback","Send to annotation queue"],["Low faithfulness online score","Add to regression dataset"],["Tool error spike","Webhook to alerting"],["Random 5% of traffic","Online evaluator for trends"]],"Automate triage."],
+ ["fill","Pull the production prompt by tag",'from langsmith import Client\nclient = Client()\nprompt = client.___("support-answer:___")\nchain = prompt | llm',["pull_prompt","prod"],["get","latest_commit","push_prompt"],"Change prompts without redeploying code."],
+ ["tf","Monitoring truths",[["Annotation queue corrections can become dataset references.",true,"Human labels improve evals."],["Prompt versions should be recorded in trace metadata.",true,"Links quality to versions."]]]
+]},
+{act:"Expert", t:"Expert boss: Quality operations", boss:true, time:45, rounds:[
+ ["pick","Serverless traces disappear. Fix?",["Flush tracers before exit","Disable batching globally","More tags","Increase sampling"],0,"Async uploads need a flush."],
+ ["pick","Pairwise judge favors whichever answer is first. Fix?",["Evaluate both orders and average","Use a bigger judge only","Longer rubric","Ignore"],0,"Position bias."],
+ ["pick","v2 beats v1 by 3 points on 100 examples. Conclusion?",["Possibly noise; add examples/repetitions or paired analysis","Ship immediately","v1 is broken","Judge is broken"],0,"SE ≈ 4 points."],
+ ["pick","Every thumbs-down should be reviewed by a domain expert. Set up…",["Automation rule → annotation queue with rubric","Email export","Manual search daily","More dashboards"],0,"Automated triage."],
+ ["pick","A prompt change needs to go live without deploying code. Use…",["Prompt Hub tag pulled at runtime","Hardcode prompt","Env var with full prompt","Restart service"],0,"Versioned prompts."],
+ ["pick","Judge scores and human scores disagree a lot. Before trusting the judge…",["Calibrate: refine rubric until agreement is acceptable","Use more judges blindly","Average them","Drop humans"],0,"Calibration."],
+ ["pick","Trace spans from the retrieval microservice show as separate traces. Fix?",["Propagate trace headers between services","Same project name","Bigger sampling","Different run_type"],0,"Distributed tracing."]
+]}
+]);
