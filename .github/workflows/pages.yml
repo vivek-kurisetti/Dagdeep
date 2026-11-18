@@ -23,6 +23,7 @@ jobs:
           mkdir _site
           cp index.html *.js *.css _site/
           cp -r zones _site/zones
+          cp -r img _site/img
       - uses: actions/configure-pages@v5
       - uses: actions/upload-pages-artifact@v3
         with:

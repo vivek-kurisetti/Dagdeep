@@ -335,3 +335,128 @@ QUEST.missions("rag", [
  ],
  learned:["Permissions belong in retrieval code, never in the prompt.","Ingestion must delete what the source deleted.","Measure (recall, MRR, faithfulness) and gate releases on it."]}
 ]);
+
+// ---- Story extras: under-the-hood explanations + mock interview ----
+(function(){
+  const M = QUEST.data.rag.missions;
+  const D = {
+"0.1":`### Why LLMs invent things
+A language model is trained to produce the **most plausible continuation** of text. When the true answer isn't in its weights or its context, the most plausible-sounding text is still produced — fluent, confident, and wrong. Training also often rewards answering over abstaining.
+
+### Signals you're seeing a knowledge gap
+- Answers are generic ("instant", "within 24 hours") rather than your specific policy wording.
+- Different phrasings of the same question give different numbers.
+- The model can't cite where the fact came from.`,
+"0.2":`### What changes with RAG
+The prompt now contains the actual policy text, so the most plausible continuation **is** the policy. Adding "answer only from the context, cite the section, otherwise say you don't know" turns it into an open-book task with a way out.
+
+### Why not fine-tuning for facts
+- Weights blend knowledge statistically; exact numbers ("5–7 working days") aren't reliably memorised.
+- Every policy change would need retraining.
+- No citations → nobody can verify the answer.
+- No per-user permissions: everything trained in is visible to everyone.
+Fine-tuning shines for **behaviour** (tone, format, classification), often combined with RAG.`,
+"0.6":`### Good chunking in practice
+1. Parse documents with structure (headings, lists, tables) — use a layout-aware PDF parser instead of raw text extraction.
+2. Split at section boundaries; cap size (~300–800 tokens); allow small overlap for prose.
+3. Never split tables, code blocks or numbered procedures mid-way; very large tables → one chunk per row group with the header repeated.
+4. Prepend a **context header**: document title, section path, version/date.
+5. Store metadata separately (doc id, section, version, tenant, language) for filters and citations.
+
+### Contextual retrieval
+Going further, an LLM can write a one-sentence summary of where each chunk sits in its document; prepending it before embedding (and to the BM25 index) noticeably reduces retrieval failures in published experiments.`,
+"0.8":`### Implementing abstention
+- In the prompt: "If the context doesn't contain the answer, reply exactly: I don't have that information — would you like me to connect you to support?"
+- In code: if top retrieval scores are below a threshold or the reranker scores are low, skip generation and go straight to the fallback.
+- In evals: include **unanswerable** questions and score whether the bot abstains.
+
+Abstaining feels like a failure in demos but builds trust in production — wrong answers cost far more than "let me check".`,
+"1.1":`### What an embedding captures
+An embedding model compresses text into a vector (e.g. 768–3,072 numbers) that captures **meaning**: "refund timeline" and "how long until money comes back" end up close. Rare tokens like «ERR_4012» have little influence on the vector — the query vector is dominated by "payout problem", so every payout page looks similar.
+
+### Keyword search's strength
+BM25 scores documents by how often query terms appear, weighted by how **rare** they are across the corpus (IDF). «ERR_4012» appears in one document → enormous weight → that document ranks first.`,
+"1.3":`### Reciprocal Rank Fusion
+For each document: score = Σ over retrievers of 1 / (k + rank), with k = 60. It uses **ranks**, not raw scores, so you don't need to calibrate BM25 scores against cosine similarities.
+
+### Practical setup
+- Retrieve top 50 from each retriever in parallel.
+- Fuse with RRF (or weighted RRF if one retriever is clearly better for your traffic).
+- Rerank the fused top 50 with a cross-encoder, keep 5–8.
+Many vector databases (OpenSearch, Elasticsearch, Weaviate, Qdrant, pgvector + full-text) support hybrid search natively.`,
+"1.6":`### Bi-encoder vs cross-encoder
+- **Bi-encoder** (embeddings): query and document are encoded **separately**; similarity is a dot product. Fast, pre-computable, but it can't model fine interactions between query words and document words.
+- **Cross-encoder** (reranker): reads query and document **together** through a transformer and outputs a relevance score. Much more accurate, but must run at query time for every candidate — so only on a shortlist.
+
+### Budget
+Reranking 50 chunks of ~300 tokens typically costs 100–400 ms on a GPU or a hosted rerank API. Measure recall@5 before/after to justify it.`,
+"2.1":`### Where to enforce permissions
+1. **At ingestion**: attach tenant id / ACL groups to every chunk's metadata.
+2. **At query time**: build the filter from the **authenticated session** (never from the user's message or the model's output) and apply it **inside** the vector search (pre-filtering or filter-aware ANN), so top-k is computed only over allowed chunks.
+3. **Strong isolation** for high-risk data: separate index/namespace per tenant.
+4. **Caches** keyed by tenant and permission set.
+
+### Why prompts can't be the control
+The model already received the other tenant's text — a prompt injection, a paraphrase or a summary can leak it. Security must make it impossible for the data to reach the model.`,
+"2.4":`### Delete-aware ingestion
+- Give each chunk a **stable id**: «doc_id + section_path + content_hash».
+- On a document change: re-chunk, **upsert** new/changed chunk ids, and **delete** ids that existed for that document before but not now.
+- Keep a record manager table (doc id → chunk ids, hashes, version) to compute the diff.
+- Store «version» and «effective_date» in metadata; optionally filter to the latest version at query time.
+
+LangChain's indexing API with a RecordManager, or a CDC pipeline from the document store, implements exactly this.`,
+"2.8":`### A minimal RAG eval harness
+- **Golden set**: 100–300 real questions with the passages that answer them and reference answers; include unanswerable and tenant-sensitive questions.
+- **Retrieval**: recall@5, recall@50, MRR.
+- **Generation**: faithfulness (LLM judge checks every claim against retrieved context), correctness vs reference, citation accuracy, abstention rate on unanswerables.
+- **CI gate**: fail the build if faithfulness or recall drops more than a threshold vs the main branch; review per-example regressions.
+- **Production**: sample live traffic for online faithfulness checks; route thumbs-down to review and add to the golden set.`,
+"0.4":`Indexing is offline and repeatable; queries are online and latency-sensitive. Keep them separate: ingestion jobs (with retries and versioning) write to the index; the query service only reads.`,
+"1.4":`RRF rewards documents that **both** retrievers like. A document ranked 1st by one retriever and absent from the other scores 1/61 ≈ 0.0164; one ranked 3rd and 5th by both scores 1/63 + 1/65 ≈ 0.0313 — consensus wins.`,
+"2.5":`Verification step: query a few known questions after ingestion and assert the cited version matches the latest document — a cheap automated smoke test.`,
+"2.7":`MRR only looks at the **first** relevant result. Use recall@k when several chunks are needed, and nDCG when relevance is graded (some chunks are more useful than others).`
+  };
+  for (const k in D){ const [mi, si] = k.split(".").map(Number), S = M[mi].steps[si]; const tgt = S.options ? S.options.find(o => o.ok === true) : S; tgt.more = D[k]; }
+})();
+
+QUEST.interviews("rag", [
+{title:"AI engineering round: RAG systems", icon:"🎤", place:"60-minute design + debugging round", setup:"Rohit leads the AI platform team. He'll ask you to design, debug and evaluate a production RAG system.",
+ meters:{signal:{label:"Hire signal", value:40, unit:"%", goal:80, better:"high", max:100, cap:100}, depth:{label:"Depth", value:30, unit:"%", goal:75, better:"high", max:100, cap:100}, flags:{label:"Red flags", value:0, unit:"", goal:0, better:"low", max:5}},
+ steps:[
+  {say:[["rohit","Let's design something real: a support assistant over 40,000 internal documents for our merchants."]]},
+  {choose:"“Walk me through your RAG architecture.”", model:`**Ingestion (offline):** connectors/CDC from doc sources → layout-aware parsing → structure-aware chunking with context headers → embeddings → vector + BM25 index with metadata (doc, section, version, tenant, ACL). Delete-aware updates with stable chunk ids.
+**Query (online):** auth → query rewriting for follow-ups → hybrid retrieval (BM25 + vectors, RRF) **filtered by tenant/ACL** → cross-encoder rerank to top 5–8 → prompt with instructions to answer only from context, cite sections, abstain otherwise → stream answer.
+**Quality & ops:** golden-set evals (recall@k, MRR, faithfulness) in CI, online sampling, tracing, latency/cost budgets, prompt caching, guardrails against injection in documents.`, options:[
+   {t:"Ingestion with structure-aware chunking and metadata; hybrid retrieval filtered by tenant; reranking; grounded prompt with citations and abstention; evals in CI plus tracing and monitoring in production.", ok:true, fx:{signal:6, depth:7}, why:"End-to-end with security, quality and operations — the three things a design round checks."},
+   {t:"Embed the documents into a vector database and send the top results to the LLM.", ok:"partial", fx:{signal:-2}, why:"The demo version. Missing chunking strategy, hybrid search, permissions, evaluation and operations."},
+   {t:"Fine-tune an LLM on all 40,000 documents.", ok:false, fx:{signal:-8, flags:1}, why:"Doesn't handle changing facts, permissions or citations."}]},
+  {choose:"“Retrieval looks fine — the right chunk is in the context — but answers are still wrong. What do you check?”", model:`1. **Faithfulness**: does the answer contradict or go beyond the context? (judge or manual check)
+2. **Context quality**: too many chunks / long context → lost in the middle; conflicting chunks (old vs new versions); missing table headers.
+3. **Prompt**: clear instruction to answer only from context, cite, and abstain; relevant chunk placed near the question; no instructions buried in documents (injection).
+4. **Model**: too small for multi-step reasoning over tables → try a stronger model for those queries (routing).
+5. Measure with the golden set before/after each change.`, options:[
+   {t:"Check faithfulness, context length and ordering (lost in the middle), conflicting versions, prompt instructions and citations, possible injections in docs, and whether the model is strong enough — measured on a golden set.", ok:true, fx:{signal:6, depth:7}, why:"You separated retrieval from generation and listed the real failure modes."},
+   {t:"Retrieve more chunks so it has more information.", ok:false, fx:{signal:-6, flags:1}, why:"More context often makes it worse (noise, lost in the middle, cost)."},
+   {t:"Lower the temperature.", ok:"partial", fx:{signal:-2}, why:"Can reduce variability, rarely fixes wrong answers."}]},
+  {task:["num","Rohit: “Five test questions; the first relevant chunk is at ranks 1, 1, 2, 5 and not found. What's the MRR?” (2 decimals; not found counts as 0)",0.54,0.01,"","(1 + 1 + 0.5 + 0.2 + 0) / 5 = 0.54."], label:"Metric maths", ok:{signal:4, depth:4}, bad:{signal:-4}},
+  {choose:"“How do you evaluate this system before and after launch?”", model:`**Before launch:** a golden set (real questions, labelled passages, reference answers, unanswerable and tenant-sensitive cases). Retrieval: recall@5/@50, MRR. Generation: faithfulness, correctness, citation accuracy, abstention. LLM-as-judge with a clear rubric, **calibrated against human labels**. Run in CI and block regressions.
+**After launch:** trace every request; sample traffic for online faithfulness; collect thumbs-down and escalations; route failures to annotation and add them to the golden set; dashboards for latency, cost and quality by segment.`, options:[
+   {t:"A golden set with retrieval metrics (recall@k, MRR) and generation metrics (faithfulness, correctness, abstention) via a calibrated LLM judge in CI; in production, tracing, sampled online evals and feedback loops into the golden set.", ok:true, fx:{signal:6, depth:7}, why:"Offline + online, retrieval + generation, and judge calibration — complete."},
+   {t:"We'll ask a few users to try it and give feedback.", ok:"partial", fx:{signal:-2}, why:"Useful, but not repeatable or comparable across versions."},
+   {t:"If it answers in a demo, it works.", ok:false, fx:{signal:-8, flags:1}, why:"Demo-driven development is the top RAG anti-pattern."}]},
+  {choose:"“How do you make sure merchants only see their own documents?”", model:`Permissions belong in **retrieval code**, not prompts: every chunk carries tenant id and ACL metadata at ingestion; at query time the filter comes from the **authenticated session** and is applied inside the search (pre-filter / filter-aware ANN) so other tenants' chunks never reach the model. For sensitive tenants, separate indexes. Caches keyed by tenant. Re-sync ACL changes quickly, and test with cross-tenant queries in the eval set.`, options:[
+   {t:"Tenant and ACL metadata on every chunk, a filter built from the authenticated session applied inside the search, per-tenant indexes for sensitive data, tenant-keyed caches, and cross-tenant tests in evals.", ok:true, fx:{signal:6, depth:7}, why:"Defence in code at the right layer, plus testing."},
+   {t:"Tell the model in the system prompt not to reveal other merchants' data.", ok:false, fx:{signal:-8, flags:1}, why:"Security can't depend on model obedience; the data has already leaked into the prompt."},
+   {t:"Filter the LLM's answer for other merchants' names.", ok:"partial", fx:{signal:-2}, why:"An output filter is a weak last line of defence; leaks can be paraphrased."}]},
+  {choose:"“Latency is 4 seconds and cost is too high. Where do you start?”", model:`Trace a request and fix the **largest span** first. Typical levers: run BM25 and vector retrieval **in parallel**; cap rerank candidates (e.g. 50 → 30); send fewer, better chunks (5–8, not 20); **prompt caching** for the stable system prompt and tools; **stream** tokens to cut perceived latency; route easy questions to a smaller model; cache answers for frequent questions (keyed by tenant); trim conversation history.`, options:[
+   {t:"Trace it and fix the biggest span: parallel retrieval, smaller rerank set, fewer chunks, prompt caching, streaming, routing easy questions to a smaller model, and tenant-aware answer caching.", ok:true, fx:{signal:6, depth:7}, why:"Measurement-first with concrete levers on both latency and cost."},
+   {t:"Switch to the cheapest model.", ok:"partial", fx:{signal:-2}, why:"May cut cost but hurts quality; you haven't looked where the time goes."},
+   {t:"Remove the reranker and retrieval to save time.", ok:false, fx:{signal:-6, flags:1}, why:"Removes the grounding that makes answers correct."}]},
+  {choose:"“RAG or fine-tuning for this support assistant?”", model:`**RAG** for knowledge: policies change, answers need citations, and access differs per merchant. **Fine-tuning** only if needed for behaviour: consistent tone/format, classification/routing, or distilling a big model into a cheaper one for high volume — usually **on top of** RAG. Start with prompting + RAG, measure, and fine-tune only for the gaps the evals reveal.`, options:[
+   {t:"RAG for changing, permissioned knowledge with citations; fine-tuning only for behaviour or cost (tone, format, routing, distillation), usually on top of RAG and only where evals show a gap.", ok:true, fx:{signal:6, depth:7}, why:"Clear decision rule tied to evidence."},
+   {t:"Fine-tuning is always better because the model learns our data.", ok:false, fx:{signal:-8, flags:1}, why:"Ignores freshness, citations and permissions."},
+   {t:"Whichever is cheaper.", ok:"partial", fx:{signal:-2}, why:"Cost matters, but the deciding factors are the requirements."}]},
+  {say:[["rohit","Great — you designed for correctness, security and operations, and you'd measure everything. That's the bar for this team."]]}
+ ],
+ learned:["Design answers = ingestion + retrieval + generation + security + evals + operations.","Separate retrieval failures from generation failures when debugging.","Permissions in code, never in prompts.","Evidence decides RAG vs fine-tuning."]}
+]);

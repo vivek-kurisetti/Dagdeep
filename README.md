@@ -6,6 +6,10 @@ Live site: https://vivek0803.github.io/Dagdeep/
 
 ## How it plays
 
+- **🎤 Interview mode** (Spark, Kafka, RAG): mock interviews where you pick the answer you'd give, the interviewer reacts, and a model answer is shown; plus a cheat sheet of model answers per zone.
+- **Surprises**: plot-twist bonus questions mid-mission, a mystery chest after each first clear, and secret trophies.
+- **Real Spark UI screenshots** in the Spark story, captured from real Spark 4 jobs replaying each scenario (`img/`).
+
 - **🎬 Story missions** (Spark, Kafka, RAG so far): each mission is a real situation — a late nightly job, a broker crash, a data leak — played as a live incident with teammates' messages, Spark UI / log screens, decisions with consequences on meters (runtime, cost, trust…), hands-on tasks, and an everyday-life analogy for every concept. Missions unlock **detailed concept cards**: real-life analogy, how it works step by step, worked example, gotchas and an interview answer.
 
 - **World map** with two worlds and 26 zones. Rank, XP, day streak and collected cards show on the map.
@@ -34,6 +38,39 @@ Progress is saved in the visitor's browser.
 | `quest.css` | Styles for the game |
 | `zones/<id>.js` | One file per zone, loaded on demand |
 | `game-kit.js`, `course-spark-games.js` | Arcade framework and the Spark arcade levels |
+
+## Accounts: Google sign-in (optional)
+
+Without setup, everyone plays as a guest and progress is saved in their browser. **🔄 Start fresh** in the account menu clears progress at any time.
+
+To give every user their own progress, synced across devices:
+
+1. Create a project at https://console.firebase.google.com (free Spark plan is enough).
+2. **Build → Authentication → Get started → Sign-in method → Google → Enable.**
+3. **Authentication → Settings → Authorized domains → Add domain:** `vivek0803.github.io` (and `localhost` for testing).
+4. **Build → Firestore Database → Create database** (production mode, a region near your users, e.g. `asia-south1`).
+5. **Firestore → Rules**, paste and publish:
+
+```
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+    match /users/{uid} {
+      allow read, write: if request.auth != null && request.auth.uid == uid;
+    }
+  }
+}
+```
+
+6. **Project settings → Your apps → Web app (</>)**, register it, copy the config object into `firebase-config.js`:
+
+```js
+window.DAGDEEP_FIREBASE = {
+  apiKey: "…", authDomain: "your-project.firebaseapp.com", projectId: "your-project", appId: "…"
+};
+```
+
+7. Commit and push. The web config isn't a secret; the rules above ensure each signed-in user can only read and write their own document (`users/{uid}`). Guest progress is moved into the account on first sign-in.
 
 ## Story missions
 

@@ -346,3 +346,135 @@ QUEST.missions("kafka", [
  ],
  learned:["Keep poll loops under max.poll.interval.ms (max.poll.records × time per record).","Static membership + cooperative-sticky = calm rolling deploys.","Commit after processing and make sinks idempotent."]}
 ]);
+
+// ---- Story extras: under-the-hood explanations + mock interview ----
+(function(){
+  const M = QUEST.data.kafka.missions;
+  const D = {
+"0.1":`### What a partition really is
+A partition is a directory of **segment files** on a broker. Records are appended to the active segment and get monotonically increasing **offsets**. A consumer reads a partition sequentially by offset, so order inside a partition is physical, not logical — it's the order of appends.
+
+### Why there's no cross-partition order
+Each partition is consumed by a different consumer (or thread), at its own speed, possibly on another machine. There's no global clock or sequence across partitions. Event timestamps from different producers can't be trusted for ordering either (clock skew, retries).`,
+"0.3":`### How the default partitioner works
+- **Key present**: «murmur2(keyBytes) % numPartitions» (positive-masked). Deterministic: same key, same partition, as long as the partition count doesn't change.
+- **No key**: the **sticky partitioner** fills a batch for one partition, then switches — good batching, no ordering.
+
+### Choosing the key
+Key by the entity whose events must stay ordered relative to each other: payment_id for payment lifecycle events, customer_id if you need per-customer order across payments. High cardinality spreads load; a key like "status" or "country" creates hot partitions.
+
+### Producer-side ordering
+With retries and multiple in-flight requests, ordering within a partition is safe only with «enable.idempotence=true» (sequence numbers) — the default in modern clients.`,
+"0.7":`### Partition count = parallelism ceiling
+A consumer group can have at most one active consumer per partition. Throughput per partition is bounded by what one consumer thread can process.
+
+### Sizing formula
+partitions ≥ max(target throughput ÷ per-partition producer throughput, target throughput ÷ per-consumer throughput). Example: 600 MB/s target, one consumer handles 25 MB/s → at least 24 partitions; add headroom (×2) for growth because **re-partitioning keyed topics remaps keys**.
+
+### Costs of too many partitions
+More open files and replication fetchers per broker, longer leader elections (mitigated by KRaft), more memory in producers (one batch per partition) and longer rebalances.`,
+"1.1":`### The timeline of the loss
+1. Producer sends batch to leader (broker-3) with «acks=1».
+2. Leader appends to its log (page cache) and acks → API tells customer "success".
+3. Followers fetch every few ms; they hadn't fetched those records yet.
+4. broker-3's disk dies. Controller elects a new leader from the ISR (or worse, any replica with unclean election).
+5. The new leader never had the records → they're gone, and followers truncate to match the new leader.
+
+Note: Kafka acks after writing to the **page cache**, not fsync; durability comes from **replication**, not disk flushes.`,
+"1.3":`### How acks=all + min.insync.replicas work together
+- «acks=all»: the leader responds only after **every replica currently in the ISR** has the record.
+- The ISR can shrink when followers lag (> «replica.lag.time.max.ms», 30 s). Without a floor, acks=all could degrade to "only the leader".
+- «min.insync.replicas=2» is that floor: if the ISR has fewer than 2 members, writes fail with NotEnoughReplicas instead of silently becoming unsafe.
+
+### The high watermark
+Consumers only read up to the **high watermark** — the highest offset replicated to all ISR members — so they never see records that could be lost in a leader change.
+
+### Trade-off
+Latency rises (one extra replication round trip) — typically a few ms within a region.`,
+"1.6":`### Idempotence mechanics
+- On start, the producer gets a **producer id (PID)** and **epoch** from the broker.
+- Each batch carries the PID and a **base sequence number** per partition.
+- The broker keeps the last 5 batch sequences per producer per partition. A batch with a sequence it has already written is acknowledged but **not re-appended**; an out-of-order sequence is rejected.
+- This is why up to 5 in-flight requests keep ordering with retries.
+
+### Limits
+A new producer instance gets a new PID, so restarts can still duplicate unless you use **transactions** («transactional.id» keeps identity across restarts and fences zombies).`,
+"2.2":`### The two liveness timers
+- **Heartbeats** (background thread, every «heartbeat.interval.ms») prove the process is alive; missing them for «session.timeout.ms» (45 s) gets you removed.
+- **poll() calls** prove the processing loop is alive; if the gap between polls exceeds «max.poll.interval.ms» (5 min), the client proactively leaves the group.
+
+### Why big batches kill you
+«max.poll.records» × processing time per record must stay well under «max.poll.interval.ms». 500 × 0.8 s = 400 s → kicked out every loop → rebalance → re-delivery of uncommitted records → more lag. Options: fewer records per poll, faster processing (batch DB writes, async I/O), or a larger interval if processing is legitimately slow.`,
+"2.4":`### Eager vs cooperative
+- **Eager**: every member revokes all partitions, the leader computes a new assignment, everyone gets new partitions. Total stop of consumption during each rebalance.
+- **Cooperative-sticky**: members keep partitions that don't need to move; only moved partitions are revoked, in a second round. Consumption continues for most partitions.
+
+### Static membership
+With «group.instance.id», the coordinator recognises a restarted pod as the **same member**. If it returns within «session.timeout.ms», no rebalance happens and it gets its partitions back. Set session.timeout a bit above your pod restart time.
+
+### KIP-848 (Kafka 4.0)
+The new consumer group protocol («group.protocol=consumer») moves assignment to the broker and makes rebalances incremental by design.`,
+"2.8":`### What Kafka transactions guarantee
+A transactional producer writes to several partitions **and** commits consumer offsets atomically. Consumers with «isolation.level=read_committed» only see committed data (up to the **last stable offset**). That gives exactly-once for **consume → process → produce within Kafka** (Kafka Streams uses it with «exactly_once_v2»).
+
+### Why Postgres is outside it
+The database isn't a participant in Kafka's transaction protocol. Options:
+- **Idempotent upsert** keyed by a business id (simplest, most common).
+- Store the consumed **offset in the same DB transaction** as the data; on startup, seek to the stored offset (exactly-once by design).
+- Transactional outbox / Kafka Connect sink with upsert mode.`,
+"0.5":`Idle consumers aren't wasted entirely: they're hot standbys that take over partitions when an active consumer fails. But for throughput, consumers beyond the partition count add nothing.`,
+"1.4":`Generalised: with replication factor R and «min.insync.replicas» = m, you can lose **R − m** replicas and keep writing with acks=all, and lose up to **R − 1** without losing acknowledged data (as long as unclean election is off). RF=3, m=2 is the common balance of safety and availability.`,
+"2.1":`Rule of thumb: keep the worst-case loop under half of «max.poll.interval.ms». If one record can occasionally take minutes (e.g. a slow external API), move that work off the poll thread (bounded queue + worker pool) and pause/resume partitions to apply back-pressure.`,
+"2.6":`### Making sinks idempotent
+~~~
+INSERT INTO settlements (settlement_id, amount, status, kafka_offset)
+VALUES (%s, %s, %s, %s)
+ON CONFLICT (settlement_id) DO UPDATE
+SET amount = EXCLUDED.amount, status = EXCLUDED.status, kafka_offset = EXCLUDED.kafka_offset
+WHERE settlements.kafka_offset < EXCLUDED.kafka_offset;   -- ignore older replays
+~~~
+The «WHERE» guard keeps an older replayed event from overwriting newer state.`
+  };
+  for (const k in D){ const [mi, si] = k.split(".").map(Number), S = M[mi].steps[si]; const tgt = S.options ? S.options.find(o => o.ok === true) : S; tgt.more = D[k]; }
+})();
+
+QUEST.interviews("kafka", [
+{title:"Kafka round: streaming systems", icon:"🎤", place:"45-minute system design + internals round", setup:"Farah, a Principal Engineer, is hiring for the real-time payments platform. Expect follow-ups on every answer.",
+ meters:{signal:{label:"Hire signal", value:40, unit:"%", goal:80, better:"high", max:100, cap:100}, depth:{label:"Depth", value:30, unit:"%", goal:75, better:"high", max:100, cap:100}, flags:{label:"Red flags", value:0, unit:"", goal:0, better:"low", max:5}},
+ steps:[
+  {say:[["farah","Let's talk about Kafka in production. I care about how you reason, not memorised configs."]]},
+  {choose:"“How does Kafka guarantee ordering, and how would you design keys for payment events?”", model:`Kafka orders records **within a partition** only; consumers read a partition sequentially by offset. Across partitions there's no order.
+So I key by the entity whose events must stay ordered — «payment_id» for a payment's lifecycle (created → captured → refunded), or «customer_id» if per-customer order matters. The default partitioner hashes the key, so the same key always lands on the same partition **as long as the partition count doesn't change**. I'd check key cardinality to avoid hot partitions, keep idempotence on so retries don't reorder, and size partitions up front because adding partitions remaps keys.`, options:[
+   {t:"Order is per partition only. I'd key by payment_id (or customer_id if needed) so related events share a partition, watch for hot keys, keep idempotence on for retries, and size partitions up front since adding them remaps keys.", ok:true, fx:{signal:6, depth:7}, why:"Scope of the guarantee, key design, and the two classic gotchas (hot keys, repartitioning)."},
+   {t:"Kafka keeps all messages in order by timestamp.", ok:false, fx:{signal:-8, flags:1}, why:"Wrong scope: order is per partition, by offset, not by timestamp."},
+   {t:"Use a single partition to keep everything ordered.", ok:"partial", fx:{signal:-2}, why:"Correct for ordering, but kills throughput and consumer parallelism. Interviewers expect the keyed design."}]},
+  {choose:"“How do you make sure an acknowledged payment is never lost?”", model:`Producer: «acks=all», «enable.idempotence=true», retries with a sensible «delivery.timeout.ms». Topic: «replication.factor=3», «min.insync.replicas=2», «unclean.leader.election.enable=false». Then an ack means at least two brokers have it; one broker can fail with zero loss; two failures stop writes instead of losing data. Consumers only read below the high watermark. Durability comes from **replication**, not fsync. Spread replicas across racks/AZs («broker.rack»). Test it: kill a broker under load.`, options:[
+   {t:"acks=all with min.insync.replicas=2 on RF=3, idempotent producer, unclean leader election off, replicas spread across AZs — and I'd chaos-test by killing a broker under load.", ok:true, fx:{signal:6, depth:7}, why:"Complete durability chain plus verification. Mentioning rack awareness and testing is a senior signal."},
+   {t:"Set acks=all.", ok:"partial", fx:{signal:-2}, why:"Necessary but not sufficient: without min.insync.replicas, acks=all can degrade to one replica."},
+   {t:"Kafka stores everything on disk, so nothing is lost.", ok:false, fx:{signal:-8, flags:1}, why:"Acks happen after the page cache write; a single disk failure with acks=1 loses data."}]},
+  {task:["num","Farah: “Target is 600 MB/s. One consumer instance processes about 25 MB/s. Minimum partitions for consumer parallelism?”",24,0,"partitions","600 ÷ 25 = 24. In practice add headroom (e.g. 48) because increasing later remaps keys."], label:"Partition sizing", ok:{signal:4, depth:4}, bad:{signal:-4}},
+  {choose:"“What does exactly-once mean in Kafka — and where does it stop?”", model:`Two pieces: the **idempotent producer** removes duplicates from retries within a producer session; **transactions** («transactional.id») make writes to multiple partitions plus **consumer offset commits** atomic, and «read_committed» consumers only see committed data. Together: exactly-once for **read → process → write within Kafka** (Kafka Streams «exactly_once_v2»).
+It **stops at external systems**: a database or API isn't in the transaction. There I use idempotent upserts keyed by a business id, or store offsets in the same DB transaction.`, options:[
+   {t:"Idempotent producer + transactions + read_committed give exactly-once for consume-process-produce inside Kafka. For external sinks I rely on idempotent upserts or storing offsets in the same DB transaction.", ok:true, fx:{signal:6, depth:7}, why:"You defined the guarantee precisely and stated its boundary — the most common follow-up trap."},
+   {t:"Turn on exactly-once and every system downstream gets each message once.", ok:false, fx:{signal:-8, flags:1}, why:"Over-claiming the guarantee is a classic red flag."},
+   {t:"It means the consumer commits offsets after processing.", ok:"partial", fx:{signal:-2}, why:"That's at-least-once with commit-after-processing, not exactly-once."}]},
+  {choose:"“Consumer lag is growing fast. How do you investigate?”", model:`1. Look at lag **per partition**: one partition → hot key or a poison/slow record; all partitions → capacity problem.
+2. Check consumer metrics: records/sec, processing time per record, poll interval, **rebalance rate** (rebalance storms stall consumption), errors/retries.
+3. Check downstream: DB/API latency, connection pool saturation.
+4. Fix: scale consumers up to the partition count, increase partitions (with key remapping caveats), batch downstream writes, move slow work off the poll thread, fix hot keys, tune max.poll.records.`, options:[
+   {t:"Add more consumers.", ok:false, fx:{signal:-6, flags:1}, why:"Doesn't help beyond the partition count, and ignores whether it's one hot partition or downstream latency."},
+   {t:"Check lag per partition (hot key vs capacity), processing time, rebalance rate and downstream latency; then scale up to the partition count, add partitions, batch sink writes, or fix hot keys.", ok:true, fx:{signal:6, depth:7}, why:"Systematic diagnosis that distinguishes skew, capacity, rebalances and downstream bottlenecks."},
+   {t:"Increase retention so we don't lose data while catching up.", ok:"partial", fx:{signal:-1}, why:"A sensible safety step, but it doesn't diagnose or fix the lag."}]},
+  {choose:"“What triggers rebalances, and how do you reduce their impact?”", model:`Triggers: a member joins/leaves, misses heartbeats for «session.timeout.ms», exceeds «max.poll.interval.ms» between polls, or subscription/partition changes.
+Reduce impact: keep poll loops short (tune «max.poll.records», move slow work off-thread), **cooperative-sticky** assignor (only moved partitions pause), **static membership** («group.instance.id») so rolling restarts don't rebalance, and the new **KIP-848** protocol (broker-side, incremental).`, options:[
+   {t:"Rebalances happen randomly; you can't control them.", ok:false, fx:{signal:-8, flags:1}, why:"They have specific, controllable triggers."},
+   {t:"Members joining/leaving, missed heartbeats, or slow polls past max.poll.interval.ms. I keep poll loops short, use cooperative-sticky assignment and static membership, and consider the new KIP-848 protocol.", ok:true, fx:{signal:6, depth:7}, why:"Triggers and three concrete mitigations."},
+   {t:"Lower session.timeout.ms so failures are detected sooner.", ok:"partial", fx:{signal:-2}, why:"That usually increases false detections and rebalances."}]},
+  {choose:"“When would you use a compacted topic instead of time-based retention?”", model:`Use **compaction** when consumers need the **latest value per key** rather than full history: changelogs (Kafka Streams state), CDC topics feeding a materialized view, config/state topics, «__consumer_offsets». A null value (**tombstone**) deletes a key after «delete.retention.ms». Use **time/size retention** for event streams where every event matters for a window (clickstream, logs). «cleanup.policy=compact,delete» combines both. Mention «min.compaction.lag.ms» / «max.compaction.lag.ms» for guarantees and GDPR-style deletes.`, options:[
+   {t:"When consumers need the latest state per key — changelogs, CDC, config — with tombstones for deletes; retention for event streams where every event matters. compact,delete combines both.", ok:true, fx:{signal:6, depth:7}, why:"Use cases, tombstones and the combined policy — complete."},
+   {t:"Compaction compresses messages to save disk.", ok:false, fx:{signal:-8, flags:1}, why:"That's compression («compression.type»), a different feature."},
+   {t:"When the topic is very large.", ok:"partial", fx:{signal:-2}, why:"Size isn't the criterion; semantics (latest value per key) is."}]},
+  {say:[["farah","Good conversation. You knew where each guarantee stops — that's what separates people who've run Kafka in production."]]}
+ ],
+ learned:["State the **scope** of every guarantee (ordering per partition, exactly-once inside Kafka).","Durability = acks=all + min.insync.replicas + RF + no unclean election + testing.","Diagnose lag per partition before scaling.","Know rebalance triggers and the modern mitigations."]}
+]);
