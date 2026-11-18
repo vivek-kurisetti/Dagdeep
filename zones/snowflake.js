@@ -39,3 +39,110 @@ levels:[
  ["pick","A task runs every minute even when no data arrived. Fix?",["WHEN SYSTEM$STREAM_HAS_DATA","Bigger warehouse","Snowpark","Result cache"],0,"Skip empty runs."]
 ]}
 ]});
+
+QUEST.more("snowflake", [
+{act:"Expert", t:"Query engine internals", sub:"Pruning, spilling, profile", rounds:[
+ ["learn","Reading the query profile","Snowflake executes queries as a DAG of **operators** on the warehouse's nodes. The **query profile** shows time per operator, partitions scanned vs total, bytes spilled, and the biggest offenders.",null,null,`### Signals that matter
+- **Partitions scanned / total**: pruning effectiveness. 4,980 / 5,000 on a date filter means the data isn't clustered by date.
+- **Bytes spilled to local storage**: memory overflow to the warehouse's SSD — slower. **Bytes spilled to remote storage**: overflow to cloud storage — much slower. Remote spilling usually means **scale up** or reduce the data per operator.
+- **Exploding joins**: output rows ≫ input rows (missing or non-unique join keys).
+- **Inefficient pruning in joins**: Snowflake can prune the probe side at runtime using the build side's values (join filter / bloom), shown as a JoinFilter operator.
+- **Percentage of time in remote disk I/O** vs processing: I/O-bound scans benefit from better pruning, CPU-bound ones from a bigger warehouse.
+
+### Micro-partition metadata
+For each micro-partition and column: min/max, distinct count, null count. That's what pruning, «COUNT(*)», «MIN/MAX» answers and the optimizer use — no indexes in the traditional sense.
+
+### Search Optimization Service
+For highly selective **point lookups** (e.g. «WHERE payment_id = 'p_9'» on a huge table) or substring/semi-structured searches, the **search optimization service** builds a persistent search access path. It costs storage and maintenance credits; enable it per column for lookup-heavy tables.`],
+ ["match","Profile symptom → action",[["Bytes spilled to remote storage","Scale up the warehouse or reduce rows per operator"],["Partitions scanned ≈ total on a date filter","Clustering key / load order by date"],["Join output 50× its inputs","Fix join keys / duplicates"],["Point lookups by id on 40 TB","Search optimization service"]],"Profile first, then pay."],
+ ["pick","Which is the worse spill?",["Spilled to local storage","Spilled to remote storage","Both are free","Neither affects performance"],1,"Remote spill means even local SSD overflowed."],
+ ["learn","Clustering depth","**Clustering depth** is the average number of micro-partitions that overlap for a given value of the clustering key. Depth near 1 = perfectly clustered; high depth = poor pruning.",null,null,`«SYSTEM$CLUSTERING_INFORMATION('payments', '(event_date)')» returns average depth, overlaps and a histogram. «SYSTEM$CLUSTERING_DEPTH» gives just the depth.
+
+### When to define a clustering key
+- Tables in the **multi-terabyte** range.
+- Queries consistently filter or join on the key.
+- The natural load order doesn't match the filter (e.g. loaded by ingestion time, filtered by merchant).
+
+### Choosing the key
+- Low to moderate cardinality works best; for a timestamp, cluster on «TO_DATE(ts)» rather than the raw timestamp.
+- Up to 3–4 columns, lowest cardinality first.
+- Avoid frequently updated columns: changes trigger reclustering credits.
+
+### Costs
+Automatic Clustering runs serverless and bills credits for reclustering; heavy DML on a clustered table means continuous reclustering. Monitor with «AUTOMATIC_CLUSTERING_HISTORY».`],
+ ["num","A table has 5,000 micro-partitions. A date filter scans 4,800 before clustering and 60 after. By what factor did scanned partitions drop?",80,1,"×","4,800 ÷ 60 = 80× fewer partitions scanned."],
+ ["tf","Engine truths",[["Snowflake uses B-tree indexes for pruning.",false,"Micro-partition metadata (min/max) plus optional search optimization."],["Clustering on TO_DATE(ts) usually beats clustering on raw ts.",true,"Lower cardinality, better grouping."],["Automatic clustering is free.",false,"It consumes serverless credits."]]]
+]},
+{act:"Expert", t:"Warehouses & cost engineering", sub:"Sizing, multi-cluster, Gen2", rounds:[
+ ["learn","Sizing is a speed vs cost trade","Each size up **doubles** compute and credits/hour. For queries that parallelize well, a 2× bigger warehouse runs ~2× faster for the **same credits**. When the query can't use the extra nodes, you just pay more.",null,null,`### Multi-cluster warehouses
+- Min/max clusters with **Standard** scaling (start clusters quickly to avoid queuing) or **Economy** (start only if there's enough load to keep a new cluster busy for ~6 minutes; tolerates some queuing to save credits).
+- Use for concurrency, not for single big queries.
+
+### Query acceleration service
+Offloads parts of eligible large scans to serverless compute, with a scale factor cap. Good for occasional outlier queries on a small warehouse.
+
+### Control spend
+- **Resource monitors**: credit quotas per warehouse/account with notify, suspend (after running queries finish) or suspend immediately.
+- «STATEMENT_TIMEOUT_IN_SECONDS» and «STATEMENT_QUEUED_TIMEOUT_IN_SECONDS» per warehouse.
+- Separate warehouses per workload (ELT, BI, data science) so you can size and attribute costs.
+- «WAREHOUSE_METERING_HISTORY» and «QUERY_ATTRIBUTION_HISTORY» to see who spends what.
+
+### Auto-suspend trade-off
+Suspending clears the **local disk cache**. For BI warehouses with bursts every few minutes, a slightly longer auto-suspend (e.g. 5–10 minutes) can be cheaper overall than cold re-reading from remote storage on every burst.`],
+ ["num","A query takes 16 minutes on a Medium (4 credits/h). It parallelizes perfectly. Credits on a Large (8 credits/h)?",1.07,0.02,"credits","Medium: 4 × 16/60 = 1.07 credits. Large runs in 8 minutes: 8 × 8/60 = 1.07 credits. Same cost, half the time."],
+ ["sort","Standard or Economy scaling policy?",{"Standard":["Customer-facing dashboards where queuing is unacceptable"],"Economy":["Internal batch reporting that can wait a little","Cost-sensitive analyst sandbox"]},"Economy trades some queuing for fewer cluster-minutes."],
+ ["match","Control → effect",[["Resource monitor with SUSPEND","Stop a warehouse at its monthly credit quota"],["STATEMENT_TIMEOUT_IN_SECONDS","Kill runaway queries"],["Separate warehouse per workload","Isolate and attribute cost"],["Query acceleration service","Offload big scans for outlier queries"]],"Governance is part of performance."],
+ ["tf","Cost truths",[["A bigger warehouse always costs more per query.",false,"For well-parallelized queries the credits stay similar."],["Multi-cluster helps a single huge query run faster.",false,"It helps concurrency."],["A very short auto-suspend can increase cost for bursty BI.",true,"Cache is lost each time."]]]
+]},
+{act:"Expert", t:"Data protection & sharing", sub:"Time Travel costs, clones, sharing", rounds:[
+ ["learn","What Time Travel really stores","Micro-partitions are **immutable**. An UPDATE writes new micro-partitions; the old ones are kept for the **Time Travel** retention and then **Fail-safe**. You pay storage for all of them.",null,null,`### Storage bill breakdown
+«TABLE_STORAGE_METRICS» splits each table into **ACTIVE_BYTES**, **TIME_TRAVEL_BYTES**, **FAILSAFE_BYTES** and **RETAINED_FOR_CLONE_BYTES**. A table rewritten daily with 90-day Time Travel can hold ~90 copies of changed data.
+
+### Table types
+| Type | Time Travel | Fail-safe | Use |
+|---|---|---|---|
+| Permanent | 0–90 days (Enterprise) | 7 days | Production data |
+| Transient | 0–1 day | None | Staging, easily rebuilt data |
+| Temporary | 0–1 day | None, session-scoped | Session scratch |
+
+Use **transient** tables for staging and intermediate ELT outputs that are rebuilt daily.
+
+### Clones
+A clone shares micro-partitions with its source. Storage is only charged when either side changes data. Dropping the source keeps shared partitions alive (as RETAINED_FOR_CLONE_BYTES) while the clone exists.
+
+### Secure data sharing
+Providers share databases with consumer accounts — **no data copy**; consumers pay for their own compute. Reader accounts serve consumers without Snowflake accounts. Cross-region/cloud sharing uses replication. Marketplace listings build on the same mechanism.`],
+ ["pick","A 2 TB staging table is fully reloaded daily with 30-day Time Travel. Storage is ~60 TB. Best fix?",["Make it a transient table with 0–1 day Time Travel","Cluster it","Bigger warehouse","Use COPY"],0,"Staging doesn't need Time Travel or Fail-safe."],
+ ["num","A permanent table changes 100 GB of micro-partitions per day with 14-day Time Travel. Roughly how much Time Travel + Fail-safe storage is held (GB)?",2100,100,"GB","~14 days × 100 GB in Time Travel + 7 days × 100 GB in Fail-safe ≈ 2,100 GB."],
+ ["match","Table type",[["Permanent","Time Travel up to 90 days + 7-day Fail-safe"],["Transient","Up to 1 day Time Travel, no Fail-safe"],["Temporary","Session-only, no Fail-safe"],["Clone","Shares micro-partitions with its source"]],"Pick the cheapest type that's safe."],
+ ["tf","Protection truths",[["Fail-safe data can be restored with UNDROP.",false,"Only Snowflake support can recover from Fail-safe."],["Shared data is copied into the consumer account.",false,"Live, zero-copy access."]]]
+]},
+{act:"Expert", t:"Pipelines deep", sub:"Streams, dynamic tables, Snowpark", rounds:[
+ ["learn","How streams track changes","A **stream** stores an **offset** (a point in the table's version history), not data. Querying it returns rows changed since the offset with «METADATA$ACTION», «METADATA$ISUPDATE» and «METADATA$ROW_ID». The offset advances only when the stream is consumed in a **DML transaction that commits**.",null,null,`### Stream types
+- **Standard**: inserts, updates (as DELETE + INSERT pairs with ISUPDATE = TRUE) and deletes — net changes since the offset.
+- **Append-only**: inserts only; cheaper, ideal for raw ingestion tables.
+- **Insert-only** for external tables / Iceberg.
+
+### Staleness
+A stream becomes **stale** if not consumed within the table's data retention (Time Travel + up to 14 days of extension via «MAX_DATA_EXTENSION_TIME_IN_DAYS»). A stale stream must be recreated, losing unconsumed changes. Monitor «STALE_AFTER» in SHOW STREAMS.
+
+### Dynamic tables
+Declare the query and a **TARGET_LAG** («'5 minutes'» or «DOWNSTREAM»). Snowflake schedules refreshes, choosing **incremental** refresh when the query supports it, otherwise full. Chains of dynamic tables form a DAG with consistent snapshots.
+
+### Snowpark and tasks
+**Snowpark** runs Python/Java/Scala DataFrame code inside Snowflake; Python UDFs/UDTFs and stored procedures execute in a secure sandbox on the warehouse. **Serverless tasks** let Snowflake size compute per task run; task graphs (DAGs) have a root task, child tasks, finalizer tasks and retry settings.`],
+ ["order","A stream-based incremental load",["Raw table receives new rows via Snowpipe","Append-only stream records the change offset","Task runs MERGE from the stream into the curated table","Transaction commits; the stream offset advances","Next run sees only newer rows"],"If the MERGE fails, the offset doesn't move."],
+ ["pick","A stream wasn't consumed for 3 weeks on a table with 1-day retention. What happens?",["It still works","It goes stale; recreate it and backfill","Snowflake emails you the data","It converts to append-only"],1,"Watch STALE_AFTER."],
+ ["sort","Dynamic table or stream + task?",{"Dynamic table":["Declarative aggregate within 10 minutes","Chain of SQL transformations with lag targets"],"Stream + task":["Custom procedural logic per batch","Calling an external function per change","Precise control over MERGE conditions"]},"Declarative when possible, procedural when needed."],
+ ["tf","Pipeline truths",[["Selecting from a stream outside DML advances its offset.",false,"Only a committed DML consuming it does."],["An update appears in a standard stream as DELETE + INSERT with ISUPDATE = TRUE.",true,"Net changes."],["TARGET_LAG = DOWNSTREAM refreshes only when a dependent table needs it.",true,"Lag driven by consumers."]]]
+]},
+{act:"Expert", t:"Expert boss: Snowflake FinOps review", boss:true, time:45, rounds:[
+ ["pick","Large ELT query spills 2 TB to remote storage on a Medium. Fix?",["Scale up for that job (separate warehouse)","Multi-cluster","Longer auto-suspend","Search optimization"],0,"Memory-bound operator."],
+ ["pick","Lookup of one payment_id on 40 TB scans thousands of partitions. Fix?",["Search optimization on payment_id","Clustering on amount","Bigger warehouse","Result cache"],0,"Point lookups need a search access path."],
+ ["pick","Staging tables dominate storage via TIME_TRAVEL and FAILSAFE bytes. Fix?",["Transient tables with minimal retention","Clone them","Cluster them","Bigger warehouse"],0,"No Fail-safe for rebuildable data."],
+ ["pick","A stream went stale over a holiday. Prevent?",["Monitor STALE_AFTER / consume regularly / extend retention","Use a bigger warehouse","Append-only always","Clone the table"],0,"Consume within retention."],
+ ["pick","BI warehouse wakes every 2 minutes; auto-suspend 60 s; queries are slow and credits high. Try…",["Longer auto-suspend to keep cache warm","Shorter auto-suspend","Economy scaling","Bigger warehouse"],0,"Cache reuse can save credits."],
+ ["pick","A 16-minute Medium job must finish in 8 minutes at similar cost. Do…",["Run it on a Large","Multi-cluster x2","Economy policy","Search optimization"],0,"Parallel queries scale with size."],
+ ["pick","Clustering credits are huge on a table updated all day by a frequently changing status column. Fix?",["Cluster on a stable column (e.g. date), not status","Increase reclustering","Bigger warehouse","Remove pruning"],0,"Volatile keys trigger constant reclustering."]
+]}
+]);
