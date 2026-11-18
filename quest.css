@@ -723,3 +723,5 @@ button.q-prl:hover{outline:1px solid var(--hc); outline-offset:-1px}
 .q-wkh{flex-direction:row !important; text-align:left; justify-content:flex-start}
 .q-wkh .q-x{flex:none}
 @media (max-width:640px){ .q-wkh{padding:8px 10px; gap:8px} .q-wkh b{font-size:.88rem} }
+.q-ivhome{display:flex; align-items:center; gap:12px; padding:14px; border-radius:16px; background:var(--surface); border:1px solid var(--line); text-decoration:none; color:var(--ink); margin:8px 0 16px}
+.q-ivhome:hover{border-color:var(--accent)} .q-ivhome > span:first-child{font-size:1.6rem} .q-ivhome div{flex:1} .q-ivhome b{display:block} .q-ivhome small{color:var(--muted)}

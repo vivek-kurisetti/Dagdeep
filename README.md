@@ -72,6 +72,10 @@ window.DAGDEEP_FIREBASE = {
 
 7. Commit and push. The web config isn't a secret; the rules above ensure each signed-in user can only read and write their own document (`users/{uid}`). Guest progress is moved into the account on first sign-in.
 
+## Story missions and mock interviews everywhere
+
+Every one of the 26 zones has at least one story mission (🎬) and one mock interview round (🎤). New ones are written compactly with `QUEST.story(zoneId, {...})` and `QUEST.mock(zoneId, {...})` (formats documented next to `Q.story` in `quest-engine.js`). `#interview` lists every round. Answer options in missions, interviews, incidents and work tasks are shuffled on every play.
+
 ## Work simulator
 
 `#work` is a hub of real tasks from a data/AI engineer's week, in six different formats, each with its own clean layout:

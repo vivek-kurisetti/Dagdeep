@@ -110,6 +110,8 @@ const md = t => {
   return out.join("");
 };
 const shuffle = a => { a = a.slice(); for (let i = a.length - 1; i > 0; i--){ const j = Math.floor(Math.random() * (i + 1)); [a[i], a[j]] = [a[j], a[i]]; } return a; };
+// shuffle a list of options in place; returns the new index of the answer at old index a
+const mix = (arr, a) => { const o = shuffle(arr.map((x, i) => i)), copy = arr.slice(); o.forEach((j, k) => arr[k] = copy[j]); return a == null ? null : o.indexOf(a); };
 const reduce = () => matchMedia("(prefers-reduced-motion: reduce)").matches;
 const root = () => document.getElementById("cRoot");
 const rank = xp => { let r = RANKS[0], nx = null; for (let i = 0; i < RANKS.length; i++){ if (xp >= RANKS[i][0]){ r = RANKS[i]; nx = RANKS[i + 1] || null; } } return {name:r[1], at:r[0], next:nx}; };
@@ -240,6 +242,7 @@ function mapView(){
     </section>
     ${nx ? `<a class="q-next" id="qNext" href="#mis-${nx.z}-${nx.i}"><span class="q-next-ic">${nx.M ? nx.M.icon : "🎬"}</span><div><small>${nx.i ? "Continue" : "Start here"} · ${esc(ZMAP[nx.z].title)} · mission ${nx.i + 1}</small><b>${nx.M ? esc(nx.M.title) : "Story mission"}</b>${nx.M ? `<p>${fm(nx.M.setup)}</p>` : ""}</div><span class="q-next-go">▶</span></a>` : ""}
     ${homeWork()}
+    <a class="q-ivhome" href="#interview"><span>🎤</span><div><b>Mock interviews</b><small>A full round for every topic, with model answers and a hire verdict</small></div><span class="q-next-go">▶</span></a>
     <h2 class="q-sec-h">🗺️ Zones</h2>
     <div class="q-tabs" role="tablist">${WORLDS.map(w => `<button role="tab" data-w="${w.id}" aria-selected="${worldTab === w.id}">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</button>`).join("")}</div>
     <div class="q-zones">${ZONES.filter(z => z.world === worldTab).map(tile).join("")}</div>
@@ -593,8 +596,35 @@ Q.ROUND = ROUND;
 // Card: {t, one, life, how:[...], ex (markdown), traps:[...], say}
 Q.missions = function(id, list){ if (this.data[id]) this.data[id].missions = list; };
 Q.interviews = function(id, list){ if (this.data[id]) this.data[id].interviews = list; };
+// Compact authoring for story missions and mock interviews.
+// QUEST.story(id, {title, icon, place, setup, meters:[[key, label, unit, value, goal, "high"|"low", max]],
+//   beats:[[who, text] | ["ui", text] | ["q", question, [[text, 1|0.5|0, why, life, fx]]]], learned:[...]})
+const okOf = v => v === 1 ? true : v === 0 ? false : "partial";
+Q.story = function(id, d){
+  const Z = this.data[id]; if (!Z) return;
+  const meters = {}; d.meters.forEach(([k, label, unit, value, goal, better, max]) => meters[k] = {label, unit, value, goal, better, max, cap:better === "high" && unit === "%" ? 100 : undefined});
+  const steps = []; let say = [];
+  const flush = () => { if (say.length){ steps.push({say}); say = []; } };
+  d.beats.forEach(b => { if (b[0] === "q"){ flush(); steps.push({choose:b[1], options:b[2].map(([t, ok, why, life, fx]) => ({t, ok:okOf(ok), why, life, fx}))}); } else say.push([b[0], b[1]]); });
+  flush();
+  (Z.missions = Z.missions || []).push({title:d.title, icon:d.icon || "🎬", place:d.place, setup:d.setup, meters, steps, learned:d.learned});
+};
+// QUEST.mock(id, {title, who, place, setup, intro, qs:[[question, modelAnswer, [[text, 1|0.5|0, why]]]], learned})
+Q.mock = function(id, d){
+  const Z = this.data[id]; if (!Z) return;
+  const fx = ok => ok === 1 ? {signal:8, depth:9} : ok === 0 ? {signal:-8, flags:1} : {signal:-2, depth:1};
+  const steps = [{say:[[d.who || "farah", d.intro]]}].concat(d.qs.map(([q, model, opts]) => ({choose:`“${q}”`, model, options:opts.map(([t, ok, why]) => ({t, ok:okOf(ok), why, fx:fx(ok)}))})));
+  (Z.interviews = Z.interviews || []).push({title:d.title, icon:"🎤", place:d.place || "45-minute technical round", setup:d.setup, meters:{signal:{label:"Hire signal", value:40, unit:"%", goal:80, better:"high", max:100, cap:100}, depth:{label:"Depth", value:30, unit:"%", goal:75, better:"high", max:100, cap:100}, flags:{label:"Red flags", value:0, unit:"", goal:0, better:"low", max:5}}, steps, learned:d.learned});
+};
+function ivHub(){
+  document.title = "Mock interviews · Dagdeep";
+  const row = (z) => { const s = (P.iv[z.id] || {})[0] || 0; return `<a class="q-wrow" href="#iv-${z.id}-0" style="--h:${z.hue}"><span class="q-wrow-ic">🎤</span><span class="q-wrow-t"><b>${esc(z.title)} round</b><small>${esc(z.short)}</small></span><span class="q-wrow-s">${s ? stars(s, "sm") : `<i>New</i>`}</span></a>`; };
+  root().innerHTML = `<div class="q-wrap q-hub"><a class="q-back" href="#play">← Home</a><h1>🎤 Mock interviews</h1>
+    <p class="muted">An interviewer asks real questions. Pick the answer you'd give, and see a model answer after each one. Each round ends with a hire / no-hire verdict.</p>
+    ${WORLDS.map(w => `<h2 class="q-sec-h">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</h2><div class="q-wlist">${ZONES.filter(z => z.world === w.id).map(row).join("")}</div>`).join("")}</div>`;
+}
 Q.cards = function(id, map){ if (this.data[id]) this.data[id].cardBook = map; };
-const STORY = new Set(["spark", "kafka", "rag"]);
+const STORY = new Set(ZONES.map(z => z.id));
 const msOpen = (id, i) => i === 0 || ((P.ms[id] || {})[i - 1] || 0) > 0;
 const sleep = ms => new Promise(r => setTimeout(r, reduce() ? 0 : ms));
 const shot = (src, cap) => `<figure class="q-shot"><a href="${esc(src)}" target="_blank" rel="noopener"><img src="${esc(src)}" alt="${esc(cap || "Screenshot")}" loading="lazy"></a>${cap ? `<figcaption>${fm(cap)}</figcaption>` : ""}</figure>`;
@@ -624,6 +654,7 @@ function missionView(id, mi, kind){
     const Z = Q.data[id], list = kind === "iv" ? Z.interviews : Z.missions, M = (list || [])[mi], IV = kind === "iv";
     if (!M){ location.hash = "#zone-" + id; return; }
     if (!IV && !msOpen(id, mi)){ location.hash = "#zone-" + id; toast("Finish the previous mission first"); return; }
+    M.steps.forEach(S => { if (S.options) mix(S.options); });
     P.last = id; save();
     document.title = `${M.title} · ${z.title} · Dagdeep`;
     const meters = JSON.parse(JSON.stringify(M.meters || {}));
@@ -753,7 +784,8 @@ function missionView(id, mi, kind){
           if (roll < 0.1){ addXP(200); unlock("lucky"); confetti(); h = `<span>🌟</span><b>Rare drop! +200 XP</b><small>One chest in ten has this.</small>`; }
           else if (roll < 0.55){ const x = 30 + Math.floor(Math.random() * 6) * 10; addXP(x); h = `<span>💰</span><b>+${x} bonus XP</b><small>Spend it on bragging rights.</small>`; }
           else if (roll < 0.8 && Z.cardBook){ const cs = Object.values(Z.cardBook), C = cs[Math.floor(Math.random() * cs.length)]; h = `<span>💎</span><b>Interview gem: ${fm(C.t)}</b><small>${fm(C.say || C.one)}</small>`; }
-          else { const f = FACTS[id] || FACTS.spark; h = `<span>🧠</span><b>Did you know?</b><small>${fm(f[Math.floor(Math.random() * f.length)])}</small>`; }
+          else if (FACTS[id]){ const f = FACTS[id]; h = `<span>🧠</span><b>Did you know?</b><small>${fm(f[Math.floor(Math.random() * f.length)])}</small>`; }
+          else { const f = M.learned && M.learned.length ? M.learned : ["Keep playing to unlock more."]; h = `<span>📌</span><b>Remember this</b><small>${fm(f[Math.floor(Math.random() * f.length)])}</small>`; }
           save(); box.innerHTML = `<div class="q-chestout">${h}</div>`;
         }, reduce() ? 0 : 900);
       };
@@ -925,7 +957,7 @@ function pagerView(id, ci, z, Z, C){
   }
 }
 function desk(id, ci, z, Z, C){
-  setKeys(null);
+  setKeys(null); mix(C.cause.o); mix(C.fix.o);
   const sev = C.sev || 2, T = C.term || {}, clueIds = Object.keys(C.clues), need = C.need || Math.max(1, clueIds.length - 1);
   const st = {t0:Date.now(), found:{}, order:[], log:[], hints:0, wrong:0, noise:0, cmds:0, unread:0, app:"slack", fired:new Set(), chips:(T.suggest || []).slice(), hist:[], hp:0, cause:null, fix:new Set(), done:false};
   const base = (C.clock || "03:12").split(":").map(Number);
@@ -1266,6 +1298,10 @@ const wkShell = (x, inner, prog) => `<div class="q-wrap q-wk" style="--h:${x.z.h
   <div class="q-wkb">${inner}</div></div>`;
 function wkIntro(x){
   P.last = x.id; save(); setKeys(null);
+  const W = x.W;
+  if (W.type === "pr"){ const o = shuffle(W.reasons.map((r, i) => i)), copy = W.reasons.slice(); o.forEach((j, k) => W.reasons[k] = copy[j]); W.bugs.forEach(b => b.a = o.indexOf(b.a)); }
+  if (W.type === "triage") W.items.forEach(it => { if (it.act) it.act.a = mix(it.act.o, it.act.a); });
+  if (W.type === "timeline") W.whys.forEach(q => { q.a = mix(q.o, q.a); });
   document.title = `${x.W.title} · ${x.T.name} · Dagdeep`;
   root().innerHTML = `<div class="q-wrap q-wk" style="--h:${x.z.hue}; --hc:hsl(${x.z.hue} 70% 45%)"><div class="q-wkintro">
     <a class="q-back" href="#work/${x.W.type}">← ${x.T.name}s</a>
@@ -1491,6 +1527,7 @@ window.loadQuest = function(h){
   else if ((m = h.match(/^iv-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2], "iv");
   else if ((m = h.match(/^case-([a-z]+)-(\d+)$/))) caseView(m[1], +m[2]);
   else if ((m = h.match(/^work-([a-z]+)-(\d+)$/))) workView(m[1], +m[2]);
+  else if (h === "interview") ivHub();
   else if ((m = h.match(/^work(?:\/([a-z]+))?$/))) workHub(m[1]);
   else if ((m = h.match(/^learn-([a-z]+)-(\d+)$/))) studyView(m[1], +m[2]);
   else if ((m = h.match(/^card-([a-z]+)-(\w+)$/))) studyView(m[1], 0, m[2]);
