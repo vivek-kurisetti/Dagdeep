@@ -123,8 +123,8 @@ function mapView(){
     <section class="q-hero">
       <div class="q-hero-txt"><p class="q-eyebrow">Dagdeep · learn by playing</p>
         <h1>Pick a zone. Play the levels. Collect every concept card.</h1>
-        <p>Every concept is a power-up you collect mid-level, then use straight away in puzzles: sort it, order it, match it, fix the bug, beat the boss. Wrong answers explain themselves, so mistakes are how you learn.</p>
-        ${last ? `<a class="btn big solid q-cont" href="#zone-${last.id}">Continue: ${esc(last.title)}</a>` : `<a class="btn big solid q-cont" href="#zone-spark">Start with Spark</a>`}</div>
+        <p>Start with a <b>🎬 Story mission</b>: a real situation (a 3 AM incident, a launch day, a security leak) where you make the calls, watch runtime, cost and trust move, and learn each idea through an everyday example. Then sharpen it in practice drills.</p>
+        ${last ? `<a class="btn big solid q-cont" href="#zone-${last.id}">Continue: ${esc(last.title)}</a>` : `<a class="btn big solid q-cont" href="#mis-spark-0">Play: The 6 AM deadline 🌙</a>`}</div>
       <div class="q-me"><div class="q-rank"><small>Rank</small><b>${esc(r.name)}</b></div>
         <div class="q-bar"><span style="width:${pct}%"></span></div>
         <div class="q-me-row"><span><b>${PR.xp.toLocaleString()}</b> XP</span><span><b>${PR.streak || 0}</b> day streak</span><span><b>${ZONES.reduce((a, z) => a + zCards(z.id), 0)}</b> cards</span></div>
@@ -132,13 +132,13 @@ function mapView(){
     </section>
     ${WORLDS.map(w => `<section class="q-world" style="--h:${w.hue}"><div class="q-world-h"><h2>${esc(w.title)}</h2><p>${esc(w.sub)}</p></div>
       <div class="q-zones">${ZONES.filter(z => z.world === w.id).map(z => { const lv = P.lv[z.id], s = zStars(z.id); return `<a class="q-zone" href="#zone-${z.id}" style="--h:${z.hue}">
-        <span class="q-mono">${esc(z.mono)}</span><span class="q-zone-t"><b>${esc(z.title)}</b><small>${esc(z.short)}</small></span>
+        <span class="q-mono">${esc(z.mono)}</span><span class="q-zone-t"><b>${esc(z.title)}${STORY.has(z.id) ? ` <em class="q-badge">🎬 Story</em>` : ""}</b><small>${esc(z.short)}</small></span>
         <span class="q-zone-p">${lv ? `<span class="q-mini"><span style="width:${s / (lv * 3) * 100}%"></span></span><small>${STAR} ${s}/${lv * 3} · ${zCards(z.id)} cards</small>` : `<small class="q-new">New</small>`}</span></a>`; }).join("")}</div></section>`).join("")}
   </div>`;
 }
 
 /* ================= Zone ================= */
-function zoneView(id){
+function zoneView(id, toDeck){
   const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
   needZone(id, () => {
     const Z = Q.data[id]; P.last = id; P.lv[id] = Z.levels.length; save();
@@ -152,15 +152,25 @@ function zoneView(id){
       <section class="q-zhero"><span class="q-mono big">${esc(z.mono)}</span><div><p class="q-eyebrow">${esc(WORLDS.find(w => w.id === z.world).title)} zone</p><h1>${esc(z.title)}</h1><p>${esc(z.short)}</p>
         <div class="q-me-row"><span>${STAR} <b>${zStars(id)}</b>/${Z.levels.length * 3}</span><span><b>${got.size}</b>/${deck.length} cards</span><span><b>${Z.levels.length}</b> levels</span></div></div></section>
       ${m ? `<div class="q-say" style="--ch:${m[2]}"><span class="q-av">${esc(m[0][0])}</span><div><b>${esc(m[0])} <small>${esc(m[1])}</small></b><p>${fm(Z.mission[1])}</p></div></div>` : ""}
+      ${Z.missions ? `<section class="q-story"><div class="q-deck-h"><h2>🎬 Story missions</h2><span>${Object.keys(P.ms[id] || {}).length}/${Z.missions.length} played</span></div>
+        <p class="muted">Real situations from a working day. Make the calls, watch the meters move, and collect detailed concept cards.</p>
+        <div class="q-eps">${Z.missions.map((M, i) => { const s = (P.ms[id] || {})[i] || 0, open = msOpen(id, i);
+          return `<${open ? `a href="#mis-${id}-${i}"` : "div"} class="q-ep ${open ? "" : "locked"} ${s ? "done" : ""}"><span class="q-ep-ic">${open ? (M.icon || "🎬") : "🔒"}</span><div><small>Mission ${i + 1}${M.place ? " · " + esc(M.place) : ""}</small><b>${esc(M.title)}</b><p>${fm(M.setup || "")}</p>${stars(s, "sm")}</div></${open ? "a" : "div"}>`; }).join("")}</div></section>
+        <h2 class="q-sec-h">🏋️ Practice drills</h2><p class="muted">Quick-fire rounds to sharpen what the missions taught.</p>` : ""}
       <ol class="q-path">${Z.levels.map((L, li) => { const head = L.act && (li === 0 || Z.levels[li - 1].act !== L.act) ? `<li class="q-act"><span>${esc(L.act)}</span></li>` : ""; const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
         return head + `<li class="q-node ${kind} ${L.act ? "expert" : ""} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
           ${open ? `<a href="#lvl-${id}-${li}" class="q-dot">` : `<span class="q-dot">`}${L.boss ? "👑" : L.arcade ? "🕹" : li + 1}${open ? "</a>" : "</span>"}
           <div class="q-node-l"><b>${esc(L.t)}</b><small>${L.boss ? (L.act ? "Expert boss" : "Boss fight") : L.arcade ? "Arcade" : `${(L.rounds || []).length} rounds`}${L.sub ? " · " + esc(L.sub) : ""}</small>${stars(s, "sm")}</div></li>`; }).join("")}</ol>
-      <section class="q-deck"><div class="q-deck-h"><h2>Card deck</h2><span>${got.size}/${deck.length} collected</span></div>
+      ${Z.cardBook ? (() => { const where = cardMissionIndex(Z), keys = Object.keys(Z.cardBook); const have = keys.filter(k => got.has("c:" + k));
+        return `<section class="q-deck" id="qDeckX"><div class="q-deck-h"><h2>🃏 Concept cards</h2><span>${have.length}/${keys.length} collected</span></div>
+        <p class="muted">Full cards: real-life analogy, how it works, worked example, gotchas and an interview answer. Tap to open.</p>
+        <div class="q-xcards">${keys.map(k => { const C = Z.cardBook[k]; return got.has("c:" + k) ? `<details class="q-xcd"><summary><b>${fm(C.t)}</b><small>${fm(C.one || "")}</small></summary>${cardHTML(C, "deck")}</details>` : `<div class="q-xcd lock"><b>?</b><small>Unlock in mission ${(where[k] ?? 0) + 1}</small></div>`; }).join("")}</div></section>`; })() : ""}
+      <section class="q-deck"><div class="q-deck-h"><h2>${Z.cardBook ? "Drill cards" : "Card deck"}</h2><span>${got.size}/${deck.length} collected</span></div>
         <p class="muted">Concept cards you collect while playing. Tap one to flip it.</p>
         <div class="q-cards">${deck.map(c => got.has(c.id) ? `<button class="q-card got" type="button"><span class="q-card-k">${esc(c.L.t)}</span><b>${esc(c.t)}</b><span class="q-card-b">${fm(c.b)}</span>${c.d ? `<span class="q-card-d">${md(c.d)}</span><small class="q-card-more">Deep card · tap to read</small>` : ""}</button>` : `<div class="q-card lock"><span class="q-card-k">${esc(c.L.t)}</span><b>?</b><small>Play level ${c.li + 1} to collect</small></div>`).join("")}</div></section>
     </div>`;
     root().querySelectorAll(".q-card.got").forEach(b => b.onclick = () => b.classList.toggle("open"));
+    if (toDeck){ const d = document.getElementById("qDeckX"); if (d) setTimeout(() => d.scrollIntoView(), 50); }
   });
 }
 
@@ -440,12 +450,187 @@ ROUND.num = (r, st, c) => {
 };
 Q.ROUND = ROUND;
 
+/* ================= Story missions ================= */
+// QUEST.missions(zoneId, [mission]) and QUEST.cards(zoneId, {key: card}) are called from zone files after QUEST.zone().
+// Mission: {title, icon, place, setup, meters:{k:{label, value, unit, goal, better:"low"|"high", max}}, steps:[...], learned:[...]}
+// Steps: {say:[[who, text]...]} · {choose:"prompt", options:[{t, ok:true|false|"partial", fx:{k:delta}, say:[...], why, life}]}
+//        {task:[round], intro:[[who,text]], label, ok:{fx}, bad:{fx}, life} · {card:"key"} · {fx:{...}}
+// Card: {t, one, life, how:[...], ex (deep-text markdown), traps:[...], say}
+Q.missions = function(id, list){ if (this.data[id]) this.data[id].missions = list; };
+Q.cards = function(id, map){ if (this.data[id]) this.data[id].cardBook = map; };
+P.ms = P.ms || {};
+const STORY = new Set(["spark", "kafka", "rag"]);
+const msOpen = (id, i) => i === 0 || ((P.ms[id] || {})[i - 1] || 0) > 0;
+const sleep = ms => new Promise(r => setTimeout(r, reduce() ? 0 : ms));
+const cardHTML = (C, cls = "") => `<article class="q-xc ${cls}">
+  <header><span class="q-xc-k">🃏 Concept card</span><h3>${fm(C.t)}</h3>${C.one ? `<p class="q-xc-one">${fm(C.one)}</p>` : ""}</header>
+  ${C.life ? `<section class="q-xc-life"><h4>🏠 In real life</h4><p>${fm(C.life)}</p></section>` : ""}
+  ${C.how ? `<section><h4>⚙️ How it really works</h4><ol>${C.how.map(x => `<li>${fm(x)}</li>`).join("")}</ol></section>` : ""}
+  ${C.ex ? `<section><h4>🧪 Worked example</h4>${md(C.ex)}</section>` : ""}
+  ${C.traps ? `<section><h4>⚠️ Gotchas</h4><ul>${C.traps.map(x => `<li>${fm(x)}</li>`).join("")}</ul></section>` : ""}
+  ${C.say ? `<section class="q-xc-say"><h4>🎤 Say it in an interview</h4><p>${fm(C.say)}</p></section>` : ""}
+</article>`;
+function cardMissionIndex(Z){
+  const m = {};
+  (Z.missions || []).forEach((M, i) => M.steps.forEach(s => { if (s.card && !(s.card in m)) m[s.card] = i; }));
+  return m;
+}
+
+function missionView(id, mi){
+  const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
+  needZone(id, () => {
+    const Z = Q.data[id], M = (Z.missions || [])[mi];
+    if (!M){ location.hash = "#zone-" + id; return; }
+    if (!msOpen(id, mi)){ location.hash = "#zone-" + id; toast("Finish the previous mission first"); return; }
+    P.last = id; save();
+    document.title = `${M.title} · ${z.title} · Dagdeep`;
+    const meters = JSON.parse(JSON.stringify(M.meters || {}));
+    let mistakes = 0, keyFn = null; const newCards = [];
+    root().innerHTML = `<div class="q-wrap q-mis" style="--h:${z.hue}; --sc:hsl(${z.hue} 70% 45%)">
+      <div class="q-mis-top"><a class="q-x" href="#zone-${id}" aria-label="Leave mission">✕</a>
+        <div><p class="q-eyebrow">${esc(z.title)} · Mission ${mi + 1}</p><h1>${M.icon ? M.icon + " " : ""}${esc(M.title)}</h1>${M.place ? `<p class="q-mis-place">${esc(M.place)}</p>` : ""}</div></div>
+      <div class="q-meters"></div>
+      <div class="q-feed" aria-live="polite"></div>
+      <div class="q-actz"></div></div>`;
+    const $ = s => root().querySelector(s);
+    const feed = $(".q-feed"), act = $(".q-actz"), mEl = $(".q-meters");
+    const alive = () => document.body.contains(feed);
+    setKeys(e => { if (!alive()){ setKeys(null); return; } if (keyFn && !e.metaKey && !e.ctrlKey) keyFn(e); });
+    const ok = k => { const m = meters[k]; return m.better === "low" ? m.value <= m.goal : m.value >= m.goal; };
+    const fmtV = (m, v) => `${m.pre || ""}${Number.isInteger(v) ? v.toLocaleString() : v.toFixed(1)}${m.unit || ""}`;
+    const drawMeters = () => {
+      mEl.innerHTML = Object.entries(meters).map(([k, m]) => { const max = m.max || Math.max(m.value, m.goal) * 1.2 || 100; return `<div class="q-meter ${ok(k) ? "met" : ""}" data-k="${k}">
+        <small>${esc(m.label)}</small><b>${fmtV(m, m.value)}</b><span class="q-mbar"><span style="width:${Math.min(100, m.value / max * 100)}%"></span><i style="left:${Math.min(100, m.goal / max * 100)}%"></i></span><small class="q-goal">${ok(k) ? "✓ goal met" : `goal ${m.better === "low" ? "≤" : "≥"} ${fmtV(m, m.goal)}`}</small></div>`; }).join("");
+      Object.values(meters).forEach(m => { if (!m.max) m.max = Math.max(m.value, m.goal) * 1.2 || 100; });
+    };
+    const apply = fx => {
+      if (!fx) return;
+      Object.entries(fx).forEach(([k, d]) => { const m = meters[k]; if (!m) return; m.value = Math.max(0, m.value + d); if (m.cap) m.value = Math.min(m.cap, m.value); });
+      drawMeters();
+      Object.entries(fx).forEach(([k, d]) => { const m = meters[k], el = mEl.querySelector(`[data-k="${k}"]`); if (!m || !el || !d) return;
+        const good = m.better === "low" ? d < 0 : d > 0;
+        el.insertAdjacentHTML("beforeend", `<span class="q-delta ${good ? "good" : "bad"}">${d > 0 ? "+" : "−"}${fmtV(m, Math.abs(d))}</span>`);
+        el.classList.add(good ? "pulse-g" : "pulse-b"); setTimeout(() => el.classList.remove("pulse-g", "pulse-b"), 700); });
+    };
+    const scroll = el => { if (el && el.scrollIntoView) el.scrollIntoView({behavior:reduce() ? "auto" : "smooth", block:"end"}); };
+    const msg = async (who, text) => {
+      if (!alive()) return;
+      let h;
+      if (who === "ui"){ const [title, ...lines] = String(text).split("\n"); h = `<div class="q-screen"><span>🖥 ${esc(title)}</span><pre>${esc(lines.join("\n"))}</pre></div>`; }
+      else if (who === "code") h = `<pre class="q-code q-fcode">${esc(text)}</pre>`;
+      else if (who === "sys") h = `<p class="q-sys">${fm(text)}</p>`;
+      else if (who === "you") h = `<div class="q-msg me"><div class="q-bub">${fm(text)}</div></div>`;
+      else { const c = CAST[who] || [who, "", 200]; h = `<div class="q-msg" style="--ch:${c[2]}"><span class="q-av">${esc(c[0][0])}</span><div class="q-bub"><b>${esc(c[0])} <small>${esc(c[1])}</small></b><p>${fm(text)}</p></div></div>`; }
+      feed.insertAdjacentHTML("beforeend", h); scroll(feed.lastElementChild);
+      await sleep(Math.min(1400, 350 + String(text).length * 6));
+    };
+    const sayAll = async list => { for (const [w, t] of list || []){ if (!alive()) return; await msg(w, t); } };
+    const cont = label => new Promise(res => {
+      act.insertAdjacentHTML("beforeend", `<button class="btn big solid q-cont">${esc(label || "Continue ▸")}</button>`);
+      const b = act.querySelector(".q-cont:last-of-type"); scroll(b);
+      const go = () => { keyFn = null; b.remove(); res(); };
+      b.onclick = go; keyFn = e => { if (e.key === "Enter"){ e.preventDefault(); go(); } };
+    });
+    const explain = (kind, verdict, why, life) => {
+      feed.insertAdjacentHTML("beforeend", `<div class="q-exp ${kind}"><p class="q-exp-v">${verdict}</p>${why ? `<p>${fm(why)}</p>` : ""}${life ? `<div class="q-life"><b>🏠 Real life</b><p>${fm(life)}</p></div>` : ""}</div>`);
+      scroll(feed.lastElementChild);
+    };
+    const choose = S => new Promise(res => {
+      const tried = new Set();
+      const render = () => {
+        const opts = S.options.map((o, i) => ({o, i}));
+        act.innerHTML = `<div class="q-dec"><p class="q-kick">🎯 Your call</p><h2>${fm(S.choose)}</h2><div class="q-opts">${opts.map(({o, i}, k) => `<button class="q-opt ${tried.has(i) ? "tried" : ""}" data-i="${i}" ${tried.has(i) ? "disabled" : ""}><kbd>${k + 1}</kbd><span>${fm(o.t)}</span></button>`).join("")}</div></div>`;
+        scroll(act.firstElementChild);
+        act.querySelectorAll(".q-opt").forEach(b => b.onclick = () => pick(+b.dataset.i));
+        keyFn = e => { const n = +e.key; if (n >= 1 && n <= opts.length && !tried.has(n - 1)) pick(n - 1); };
+      };
+      const pick = async i => {
+        keyFn = null; const o = S.options[i]; act.innerHTML = "";
+        await msg("you", o.t); apply(o.fx); await sayAll(o.say);
+        if (o.ok === true){ explain("ok", "✓ Good call", o.why, o.life); await cont(); res(); }
+        else {
+          mistakes += o.ok === "partial" ? 0.5 : 1; tried.add(i);
+          explain(o.ok === "partial" ? "mid" : "no", o.ok === "partial" ? "≈ Helps a little, but not the real fix" : "✗ That backfired", o.why, o.life);
+          await cont("Try another move ▸"); if (alive()) render();
+        }
+      };
+      render();
+    });
+    const task = S => new Promise(async res => {
+      await sayAll(S.intro);
+      if (!alive()) return;
+      act.innerHTML = `<div class="q-taskbox"><p class="q-kick">🛠 Hands-on${S.label ? " · " + esc(S.label) : ""}</p><div class="q-tstage"></div><div class="q-tres"></div></div>`;
+      const st = act.querySelector(".q-tstage"), out = act.querySelector(".q-tres"); let fin = false;
+      scroll(act.firstElementChild);
+      const ctx = {
+        done:(good, why) => {
+          if (fin) return; fin = true; keyFn = null;
+          if (good) apply(S.ok); else { mistakes++; apply(S.bad); }
+          out.innerHTML = `<div class="q-exp ${good ? "ok" : "no"}"><p class="q-exp-v">${good ? "✓ Nailed it" : "✗ Not quite"}</p>${why ? `<p>${fm(why)}</p>` : ""}${S.life ? `<div class="q-life"><b>🏠 Real life</b><p>${fm(S.life)}</p></div>` : ""}</div><button class="btn big solid q-cont">Continue ▸</button>`;
+          const b = out.querySelector(".q-cont"); scroll(b);
+          const go = () => { keyFn = null; act.innerHTML = ""; feed.insertAdjacentHTML("beforeend", `<p class="q-sys">${good ? "✓" : "✗"} ${esc(S.label || "Task")} ${good ? "done" : "attempted"}</p>`); res(); };
+          b.onclick = go; keyFn = e => { if (e.key === "Enter"){ e.preventDefault(); go(); } };
+        },
+        collect:() => {}, mistake:el => { if (el){ el.classList.remove("shake"); void el.offsetWidth; el.classList.add("shake"); } },
+        setKey:f => keyFn = f
+      };
+      ROUND[S.task[0]](S.task, st, ctx);
+    });
+    const card = key => new Promise(res => {
+      const C = (Z.cardBook || {})[key]; if (!C) return res();
+      feed.insertAdjacentHTML("beforeend", `<p class="q-unlock">🃏 New concept card: <b>${fm(C.t)}</b></p>`);
+      act.innerHTML = cardHTML(C, "in") + `<button class="btn big solid q-cont">Add to my deck ▸</button>`;
+      scroll(act.firstElementChild);
+      const go = () => {
+        keyFn = null; act.innerHTML = "";
+        const cid = "c:" + key; P.cards[id] = P.cards[id] || [];
+        if (!P.cards[id].includes(cid)){ P.cards[id].push(cid); newCards.push(C.t); save(); }
+        res();
+      };
+      act.querySelector(".q-cont").onclick = go;
+      keyFn = e => { if (e.key === "Enter"){ e.preventDefault(); go(); } };
+    });
+    const debrief = () => {
+      setKeys(null);
+      const s = mistakes === 0 ? 3 : mistakes <= 2 ? 2 : 1;
+      P.ms[id] = P.ms[id] || {}; const prev = P.ms[id][mi] || 0;
+      let gain = 40 + newCards.length * 5 + Math.max(0, s - prev) * 20;
+      if (s > prev) P.ms[id][mi] = s;
+      save(); addXP(gain); if (s === 3) confetti();
+      const nx = Z.missions[mi + 1];
+      act.innerHTML = `<div class="q-res won q-debrief"><p class="q-eyebrow">Mission debrief</p>${stars(s, "big")}
+        <div class="q-res-stats"><span><small>XP</small><b>+${gain}</b></span><span><small>Wrong calls</small><b>${mistakes}</b></span><span><small>New cards</small><b>${newCards.length}</b></span></div>
+        <div class="q-final">${Object.entries(meters).map(([k, m]) => `<span class="${ok(k) ? "met" : ""}">${ok(k) ? "✓" : "✗"} ${esc(m.label)}: <b>${fmtV(m, m.value)}</b></span>`).join("")}</div>
+        ${M.learned ? `<div class="gk-learned q-learned"><p>What you now know</p><ul>${M.learned.map(x => `<li>${fm(x)}</li>`).join("")}</ul></div>` : ""}
+        ${s < 3 ? `<p class="muted">Make every call right first time for 3 stars.</p>` : ""}
+        <div class="q-res-b">${nx ? `<a class="btn big solid" href="#mis-${id}-${mi + 1}">Next mission: ${esc(nx.title)} →</a>` : `<a class="btn big solid" href="#zone-${id}">Back to ${esc(z.title)}</a>`}
+        <button class="btn big q-again">Replay</button><a class="btn big" href="#zone-${id}#deck">Read my cards</a></div></div>`;
+      act.querySelector(".q-again").onclick = () => missionView(id, mi);
+      scroll(act.firstElementChild);
+    };
+    drawMeters();
+    (async () => {
+      if (M.setup) await msg("sys", M.setup);
+      for (const S of M.steps){
+        if (!alive()) return;
+        if (S.say) await sayAll(S.say);
+        if (S.fx) apply(S.fx);
+        if (S.choose) await choose(S);
+        if (S.task) await task(S);
+        if (S.card) await card(S.card);
+      }
+      if (alive()) debrief();
+    })();
+  });
+}
+
 window.loadQuest = function(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null);
   let m;
   if ((m = h.match(/^lvl-([a-z]+)-(\d+)$/))) levelView(m[1], +m[2]);
-  else if ((m = h.match(/^zone-([a-z]+)$/))) zoneView(m[1]);
+  else if ((m = h.match(/^mis-([a-z]+)-(\d+)$/))) missionView(m[1], +m[2]);
+  else if ((m = h.match(/^zone-([a-z]+)(#deck)?$/))) zoneView(m[1], !!m[2]);
   else mapView();
   window.scrollTo(0, 0);
 };

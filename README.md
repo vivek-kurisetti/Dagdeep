@@ -6,6 +6,8 @@ Live site: https://vivek0803.github.io/Dagdeep/
 
 ## How it plays
 
+- **🎬 Story missions** (Spark, Kafka, RAG so far): each mission is a real situation — a late nightly job, a broker crash, a data leak — played as a live incident with teammates' messages, Spark UI / log screens, decisions with consequences on meters (runtime, cost, trust…), hands-on tasks, and an everyday-life analogy for every concept. Missions unlock **detailed concept cards**: real-life analogy, how it works step by step, worked example, gotchas and an interview answer.
+
 - **World map** with two worlds and 26 zones. Rank, XP, day streak and collected cards show on the map.
 - **Zones** have a short story mission, a path of levels that unlock in order, and a **card deck** of every concept you've collected.
 - **Levels** have 3 hearts, a streak multiplier, and a feedback sheet after every round that teaches the why. Stars = hearts left.
@@ -32,6 +34,22 @@ Progress is saved in the visitor's browser.
 | `quest.css` | Styles for the game |
 | `zones/<id>.js` | One file per zone, loaded on demand |
 | `game-kit.js`, `course-spark-games.js` | Arcade framework and the Spark arcade levels |
+
+## Story missions
+
+Append to a zone file after `QUEST.zone(...)`:
+
+```js
+QUEST.cards("kafka", { partitions: {t, one, life, how: [...], ex: `markdown`, traps: [...], say} });
+QUEST.missions("kafka", [{title, icon, place, setup,
+  meters: {lag: {label, value, unit, goal, better: "low", max}},
+  steps: [
+    {say: [["dev", "text"], ["ui", "Screen title\nline"], ["code", "..."]]},
+    {choose: "Prompt", options: [{t, ok: true|false|"partial", fx: {lag: -1000}, say: [...], why, life}]},
+    {task: ["num", ...round], intro: [...], label, ok: {fx}, bad: {fx}, life},
+    {card: "partitions"}
+  ], learned: [...]}]);
+```
 
 ## Adding or extending a zone
 

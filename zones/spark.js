@@ -253,3 +253,242 @@ Removing an executor would lose its shuffle files. You need either the **externa
  ["pick","Reducers on one host keep hitting fetch timeouts during a 40,000-reducer shuffle. Knob?",["maxBlocksInFlightPerAddress / maxReqsInFlight","maxPartitionBytes","codegen.maxFields","locality.wait"],0,"Throttle per-host fetch pressure (and cut reducer count)."]
 ]}
 ]);
+
+QUEST.cards("spark", {
+lazy:{t:"Transformations vs actions (lazy evaluation)", one:"Spark builds a recipe first and cooks only when you ask for a result — and it cooks from scratch every time you ask.",
+ life:"Writing a biryani recipe costs nothing. Cooking happens only when a guest asks for a plate. If one guest asks 'how many plates will this make?' and another asks to be served, a careless cook makes the whole biryani twice.",
+ how:["Every DataFrame is a **logical plan** (a tree of steps), not data. «filter», «select», «join», «groupBy» just add nodes.","An **action** («count», «show», «collect», «write», «toPandas», «foreach») asks for a result, so Spark optimises the plan (Catalyst) and runs a **job**.","Each action runs the **full plan from the source** unless something in the plan is cached or checkpointed.","«cache()» is itself lazy: it marks the plan; the next action fills the cache; later actions reuse it. Call «unpersist()» when done.","Catalyst can only optimise what it sees, so laziness lets it push filters into the scan and drop unused columns before running anything."],
+ ex:`~~~
+raw   = spark.read.parquet("s3://lake/raw/payments/")      # nothing runs
+clean = raw.filter("status = 'SUCCESS'").dropDuplicates(["payment_id"])   # nothing runs
+print(clean.count())                       # JOB 0: read 500 GB → filter → dedup → count
+clean.write.parquet("s3://lake/mart/pay")  # JOB 1: read 500 GB → filter → dedup AGAIN → write
+~~~
+Fix when you really need both:
+~~~
+clean.cache()
+n = clean.count()          # computes once, fills the cache
+clean.write.parquet(out)   # reads cached partitions
+clean.unpersist()
+~~~
+| Line | Runs a job? |
+|---|---|
+| df.filter(...) | No |
+| df.cache() | No (marks only) |
+| df.checkpoint() | Yes (eager by default) |
+| spark.read.option("inferSchema", True).csv(p) | Yes (scans to guess types) |
+| df.explain() | No |`,
+ traps:["Debug «count()» / «show()» left in production code silently doubles the work.","Caching something used once wastes memory that joins and sorts need.","«collect()» on big data pulls everything to the driver → driver OOM.","Python UDFs hide logic from Catalyst: no filter pushdown, no codegen."],
+ say:"DataFrame operations are lazy transformations that build a logical plan; actions trigger jobs that execute the optimised plan from the source. Each action recomputes the lineage unless it's cached, so I avoid extra actions and cache only DataFrames reused by multiple actions."},
+partitions:{t:"Partitions, tasks and waves", one:"Spark splits data into partitions; each partition is one task on one core; tasks run in waves.",
+ life:"4,000 dishes and 200 cooks. Each cook makes one dish at a time, so the kitchen works in about 20 rounds. Dinner is served only when the slowest cook in the last round finishes.",
+ how:["File sources are cut into **input partitions** of up to «spark.sql.files.maxPartitionBytes» (128 MB default); small files are packed together.","Each partition becomes **one task**; a task runs on **one core**.","**Waves** = tasks ÷ total cores (rounded up). Stage time ≈ waves × typical task time.","After a shuffle, the number of partitions is «spark.sql.shuffle.partitions» (200 default) or what AQE coalesces it to.","A stage ends when its **slowest task** ends — one straggler holds everyone."],
+ ex:`500 GB input, 128 MB partitions, 50 executors × 4 cores = 200 cores:
+- Tasks ≈ 500 × 1,024 ÷ 128 = **4,000**
+- Waves = 4,000 ÷ 200 = **20**
+- If a task takes 6 s → stage ≈ 20 × 6 s = **2 minutes**
+
+| Symptom in Spark UI | Meaning |
+|---|---|
+| 60,000+ tasks, median < 1 s | Too many tiny partitions (small files) |
+| 50 tasks, each 15 min, spills | Partitions too big |
+| Median 30 s, max 40 min | Skew (one partition much bigger) |`,
+ traps:["Fewer cores than partitions isn't bad — waves are normal. Wildly uneven task times are bad.","«coalesce(n)» early in a job can shrink the whole stage to n tasks.","Gzip CSV/JSON files can't be split: one file = one task however big."],
+ say:"One partition maps to one task on one core, so parallelism is min(partitions, cores) and stage time is roughly waves × task time plus the slowest straggler. I size input partitions around 128–512 MB and shuffle partitions around 100–300 MB."},
+smallfiles:{t:"The small-files problem", one:"Millions of tiny files make Spark spend its time opening files instead of reading data.",
+ life:"Paying 2 million ₹10 UPI bills one by one versus one bank transfer of ₹2 crore. The money is the same; the per-transaction overhead kills you.",
+ how:["Every file costs a **LIST** entry, an **open/GET** request, a Parquet **footer** read and a **metadata** entry.","Spark counts each file as at least «openCostInBytes» (4 MB) when packing partitions, so 2M tiny files explode the task count.","S3 throttles around 5,500 GET/s per prefix → **503 Slow Down** retries.","Tiny files come from **writers**: streaming commits every few seconds, over-fine partitioning (by hour/user), or every task writing to every date partition.","Fix at the source: compact existing files, and change writers to produce ~256 MB–1 GB files."],
+ ex:`Iceberg compaction (schedule hourly/daily):
+~~~
+CALL system.rewrite_data_files(
+  table => 'lake.raw.payments',
+  where => "dt >= current_date - 2",
+  options => map('target-file-size-bytes', '536870912'))   -- 512 MB
+~~~
+Write well in the first place:
+~~~
+(df.repartition("dt")                       # each date handled by few tasks
+   .sortWithinPartitions("merchant_id")     # tight min/max per file
+   .writeTo("lake.raw.payments").overwritePartitions())
+~~~
+Before vs after (our nightly job): 2,097,152 files → 1,020 files; Stage 0 from 69,212 tasks to ~1,000; read time 52 min → 9 min.`,
+ traps:["Raising maxPartitionBytes hides the problem for one job; every other reader still suffers.","Compaction with «remove_orphan_files older_than = now()» can delete in-flight files — keep the safety window.","Partitioning a 1 GB/day table by hour guarantees small files."],
+ say:"Small files add per-file overhead — listing, opening, footer reads, metadata and task scheduling — and trigger S3 throttling. I fix them where they're produced (writer distribution, target file size, sane partition granularity) and schedule compaction for the rest."},
+shuffle:{t:"Shuffles and stages", one:"A shuffle redistributes rows across the cluster by key; every shuffle is a stage boundary and usually the most expensive step.",
+ life:"A post office sorting letters by PIN code: every letter is read, bagged by destination, trucked to the right branch and unpacked. Expensive, but needed whenever letters for the same PIN must end up together.",
+ how:["**Narrow** operations (filter, select, union) work partition by partition — no movement, same stage.","**Wide** operations (groupBy, join of big tables, distinct, orderBy, window with PARTITION BY) need all rows of a key together → **shuffle**.","Map side: each task computes «hash(key) % R», writes **one sorted file + index** to local disk.","Reduce side: each of R tasks fetches **its block from every map task** (M × R blocks) over the network.","In «explain()», every **Exchange** node is a shuffle and a stage boundary."],
+ ex:`~~~
+== Physical Plan ==
+SortMergeJoin [merchant_id]
+:- Exchange hashpartitioning(merchant_id, 200)   <- shuffle of payments (2.1 TB)
++- Exchange hashpartitioning(merchant_id, 200)   <- shuffle of merchants (58 MB)
+~~~
+Cost model: 2.1 TB serialized → written to local disks → fetched across the network → deserialized → sorted. M = 16,000 map tasks × R = 200 reducers = 3.2 M blocks.
+
+Ways to shuffle less: filter and select columns **before** wide ops; pre-aggregate; broadcast small sides; bucket/partition both tables identically for repeated joins.`,
+ traps:["groupBy aggregations shuffle less than joins thanks to partial (map-side) aggregation.","A window without PARTITION BY sends everything to one task.","Shuffle files live on executors' local disks — losing executors (spot) causes FetchFailed and recomputation."],
+ say:"Wide transformations need all rows for a key together, so Spark hash-partitions map output to local disk and reducers fetch their blocks from every mapper. Each Exchange is a stage boundary; I minimise shuffles by filtering early, pre-aggregating and broadcasting small sides."},
+broadcast:{t:"Broadcast joins", one:"Copy the small table to every executor so the big table never has to move.",
+ life:"Instead of sending every customer to the manager's desk to check prices (a queue for everyone), photocopy the one-page price list and give a copy to every cashier.",
+ how:["The driver collects the small side, then **broadcasts** it to every executor.","Each task builds a hash table from the copy and probes it with its partition of the big table.","The big side is **not shuffled at all** — usually the biggest win available.","Spark chooses it automatically if the estimated size < «autoBroadcastJoinThreshold» (10 MB); AQE can switch at runtime using real sizes; you can force it with «broadcast()»/hints.","Join type limits which side can be broadcast: inner → either; left outer/semi/anti → **right only**; right outer → left only; full outer → neither."],
+ ex:`~~~
+from pyspark.sql import functions as F
+pay = spark.table("lake.pay.payments").filter("dt = '2026-11-17'")   # 2.1 TB
+mer = spark.table("lake.pay.merchants")                              # 58 MB
+out = pay.join(F.broadcast(mer), "merchant_id", "left")   # right side broadcast: allowed
+~~~
+Result on our job: shuffle write 2.2 TB → 0; join stage 38 min → 4 min.
+
+Why the preserved side can't be broadcast: in «merchants LEFT JOIN payments», each task would only see part of payments, so it can't know a merchant has no payments anywhere → wrong NULL rows.`,
+ traps:["Size on disk ≠ size in memory: 300 MB Parquet can be 3 GB as a hash table.","The broadcast is built on the driver: huge broadcasts need driver memory and can time out («broadcastTimeout»).","Stale table statistics make small tables look big → Spark picks sort-merge."],
+ say:"For a big-to-small equi-join I broadcast the small side so each task joins locally and the big side isn't shuffled. I check the join type allows it, that the small side fits comfortably in memory, and I confirm BroadcastHashJoin in the plan."},
+aqe:{t:"Adaptive Query Execution (AQE)", one:"Spark re-plans the rest of the query after each shuffle, using the real data sizes it just saw.",
+ life:"A wedding caterer plans 500 plates, but after counting heads at the door re-plans: fewer serving counters if fewer guests came, a separate counter if one family brought 80 people.",
+ how:["AQE cuts the plan into **query stages** at shuffles/broadcasts.","When a stage finishes, it reads the real **map output sizes**.","**Coalesce**: merges small reduce partitions up to «advisoryPartitionSizeInBytes».","**Switch join**: if a side turns out small, sort-merge → broadcast hash join.","**Skew join**: splits partitions > 5× median and > 256 MB into pieces (joins only)."],
+ ex:`~~~
+spark.conf.set("spark.sql.adaptive.enabled", "true")                       # default since 3.2
+spark.conf.set("spark.sql.adaptive.coalescePartitions.initialPartitionNum", "8000")
+spark.conf.set("spark.sql.adaptive.advisoryPartitionSizeInBytes", "256m")
+~~~
+Sizing rule without AQE: partitions ≈ shuffled bytes ÷ 200 MB. 1 TB → ~5,000. With AQE, start high (8,000) and let it merge down.
+
+In the UI: «AdaptiveSparkPlan isFinalPlan=true», «AQEShuffleRead coalesced», new «BroadcastHashJoin» nodes.`,
+ traps:["AQE can't re-plan the first scan stage — it has no runtime stats yet.","Skew join handling doesn't fix skewed groupBy aggregations.","Switching to broadcast after the fact still paid for writing that shuffle."],
+ say:"AQE re-optimises at shuffle boundaries using actual statistics: it coalesces small partitions, converts joins to broadcast when a side is small, and splits skewed join partitions. I set a generous initial partition number and an advisory size, and check the final plan."},
+skew:{t:"Data skew", one:"A few keys hold most of the rows, so one task does most of the work while the rest wait.",
+ life:"DMart during Diwali: 20 billing counters, but everyone buying rice is sent to counter 7. The store closes only when counter 7's queue is done.",
+ how:["After a shuffle, all rows of a key go to **one** reduce partition.","If one key (a mega-merchant, NULL, 'unknown') has 40% of rows, its task gets 40% of the data.","Diagnose: stage task summary → **max ≫ median** for duration and shuffle read.","Find keys: «groupBy(key).count().orderBy(desc)».","Fixes depend on the operation: NULL handling, AQE skew join, broadcast, salting, two-phase aggregation, isolating hot keys."],
+ ex:`Stage 7 on Diwali night:
+| Metric | Median task | Max task |
+|---|---|---|
+| Duration | 31 s | 46 min |
+| Shuffle read | 0.3 GB | 180 GB |
+Top keys: MegaMart 41.2 M rows, NULL 10.4 M rows, next merchant 0.6 M.
+
+| Situation | Fix |
+|---|---|
+| NULL/junk keys | Filter or process separately |
+| Skewed sort-merge join | AQE skew join → salting if needed |
+| Other side small | Broadcast |
+| Skewed groupBy | Two-phase (salted) aggregation |`,
+ traps:["Speculation doesn't help: the duplicate task reads the same 180 GB.","More executors don't help: the hot partition is still one task.","Averages hide skew — always look at max vs median."],
+ say:"Skew shows up as max task time and shuffle read far above the median. I find the hot keys, handle NULLs first, then use broadcast or AQE skew join for joins, and two-phase salted aggregation for groupBys."},
+salting:{t:"Salting and two-phase aggregation", one:"Split a hot key into N sub-keys so N tasks share its work, then combine.",
+ life:"Open 16 extra counters only for rice buyers. Each counter totals its own bills; at closing, the manager adds up the 16 totals.",
+ how:["Add a random **salt** 0…N-1 to rows of the hot key.","**Aggregation**: group by (key, salt) → N partial sums spread over N tasks; then group by key to add the partials.","**Join**: salt the big side randomly and **replicate** the small side N times (one copy per salt), join on (key, salt).","Pick N from the skew ratio (hot partition size ÷ target size).","Salt only hot keys when possible to limit the small-side blow-up."],
+ ex:`Two-phase aggregation:
+~~~
+N = 16
+step1 = (pay.withColumn("salt", (F.rand() * N).cast("int"))
+            .groupBy("merchant_id", "salt").agg(F.sum("amount").alias("part")))
+step2 = step1.groupBy("merchant_id").agg(F.sum("part").alias("gmv"))
+~~~
+MegaMart's 180 GB partition becomes 16 × ~11 GB; max task 26 min → ~2 min.
+
+Salted join:
+~~~
+big   = pay.withColumn("salt", (F.rand() * N).cast("int"))
+small = mer.withColumn("salt", F.explode(F.array(*[F.lit(i) for i in range(N)])))
+joined = big.join(small, ["merchant_id", "salt"]).drop("salt")
+~~~`,
+ traps:["Averages need sum and count separately (average of averages is wrong).","Non-deterministic rand() can misbehave on task retries for joins — seed it or derive salt from a hash of another column.","Salting a join multiplies the small side by N."],
+ say:"For a skewed aggregation I add a random salt, aggregate by key and salt, then aggregate again by key. For joins I salt the big side and replicate the small side per salt value. It spreads a hot key over N tasks at the cost of extra rows."},
+memory:{t:"Executor memory and containers", one:"An executor's container holds the JVM heap plus off-heap overhead; exceed the total and the cluster kills it.",
+ life:"The airline weighs your suitcase AND your backpack. Your suitcase (heap) has space, but the backpack (Python workers, buffers) is overweight — you're stopped at the gate anyway.",
+ how:["Container size = «spark.executor.memory» (heap) + «memoryOverhead» (default max(384 MB, 10%)) + optional «pyspark.memory».","Heap: 300 MB reserved; 60% (**unified memory**) shared by execution (joins, sorts, aggregations) and storage (cache).","Memory per task ≈ (heap − 0.3 GB) × 0.6 ÷ cores per executor.","When execution memory runs out, tasks **spill** to disk; when even that can't help, **OOM**.","Python UDF / pandas UDF workers run **outside the heap** → count against overhead."],
+ ex:`Error: «Container killed by YARN for exceeding memory limits. 33.1 GB of 33 GB used»
+- Heap 30 GB, overhead 3 GB (10%) = 33 GB container.
+- pandas UDF workers used ~3.5 GB off-heap → over the limit.
+- Fix: «spark.executor.memoryOverhead=6g» (≈20% for PySpark-heavy jobs).
+
+Sizing for 32-core / 256 GB nodes: leave 1 core + 8 GB → 5 cores/executor × 6 executors; ~41 GB containers = 37 GB heap + 4 GB overhead; memory per task ≈ (37 − 0.3) × 0.6 ÷ 5 ≈ 4.4 GB.`,
+ traps:["Raising heap doesn't fix off-heap overuse — and huge heaps (> 64 GB) cause long GC pauses.","Big spills mean partitions don't fit per-task memory: make partitions smaller first.","Driver OOM usually means collect()/toPandas() or a huge broadcast."],
+ say:"Executors are containers of heap plus overhead. 'Exceeding memory limits' with a non-full heap is off-heap use — Python workers, buffers — so I raise memoryOverhead. For spills and heap OOM I reduce partition size or give each task more memory by using fewer cores per executor."}
+});
+
+QUEST.missions("spark", [
+{title:"The 6 AM deadline", icon:"🌙", place:"Wed 03:10 AM · you're on call", setup:"Paydesk's nightly payments job usually finishes by 1 AM. Tonight it's still running. Finance needs the report at 6 AM.",
+ meters:{runtime:{label:"Job runtime", value:250, unit:" min", goal:130, better:"low", max:300}, cost:{label:"Cost per run", value:9000, pre:"₹", unit:"", goal:9000, better:"low", max:18000}, trust:{label:"Finance trust", value:40, unit:"%", goal:60, better:"high", max:100, cap:100}},
+ steps:[
+  {say:[["ravi","📟 PagerDuty woke me up. «nightly_payments» has been running for 3 hours. It normally takes 70 minutes."],["arjun","I have a board meeting at 9. I need those numbers by 6. What's happening?"],["ui","Spark UI · Jobs\nJob 0  count at nightly.py:41      1 h 38 min   ✓\nJob 1  parquet at nightly.py:57    1 h 52 min   running…\nBoth jobs read s3://lake/raw/payments/  (500 GB)"]]},
+  {choose:"The job is way behind. What's your first move?", options:[
+   {t:"Add 20 more nodes to the cluster and rerun", ok:false, fx:{cost:6000, runtime:-10}, say:[["ravi","Cluster doubled… runtime barely moved. Bill doubled."]], why:"More machines help only when work is spread evenly and CPU is the bottleneck. You haven't looked at where the time goes yet.", life:"Hiring 20 more cooks doesn't help if every dish waits on one person opening 2 million tiny masala packets."},
+   {t:"Open the Spark UI and find where the time goes", ok:true, say:[["priya","Good. Measure first, change second. What do you notice about those two jobs?"]], why:"The Spark UI breaks the application into jobs → stages → tasks. Two separate jobs both reading the same 500 GB is already a big clue.", life:"A doctor reads the reports before prescribing medicine."},
+   {t:"Kill it and restart — probably a glitch", ok:false, fx:{runtime:30, trust:-10}, say:[["arjun","It started over?! That's another hour."]], why:"Restarting throws away progress and fixes nothing deterministic. The same code will behave the same way.", life:"Switching the TV off and on won't fix a dish antenna pointing the wrong way."}]},
+  {say:[["code","raw   = spark.read.parquet(SRC)\nclean = raw.filter(\"status = 'SUCCESS'\").dropDuplicates(['payment_id'])\nprint('rows:', clean.count())                 # line 41\nclean.write.mode('overwrite').parquet(OUT)    # line 57"],["priya","Job 0 is the count, Job 1 is the write. Why does Spark run the whole pipeline twice?"]]},
+  {choose:"Why are there two full jobs over the same data?", options:[
+   {t:"count() is an action, so Spark runs the full plan for it — then again for write()", ok:true, fx:{runtime:-95, trust:10}, say:[["ravi","Commented out the debug count. Job 0 is gone."]], why:"filter and dropDuplicates only build a plan (transformations). Every **action** — count, write, show, collect — executes that plan from the source. Two actions = the 500 GB read, filter and dedup ran twice.", life:"You cooked the entire biryani just to count how many plates it makes, threw it away, and cooked it again to serve."},
+   {t:"Spark caches DataFrames automatically, so it can't be that", ok:false, why:"Spark never caches by itself. Without cache(), each action recomputes everything from the source.", life:"The kitchen doesn't keep yesterday's biryani unless someone puts it in the fridge."},
+   {t:"Parquet is slow — switch the source to CSV", ok:false, fx:{runtime:20}, why:"CSV is slower: no column pruning, no row-group skipping, more bytes to parse. And it doesn't explain two jobs.", life:"Switching from a sorted file cabinet to a pile of loose papers won't help you find things faster."}]},
+  {card:"lazy"},
+  {choose:"The audit team still needs the row count every night. How do you give it to them without paying twice?", options:[
+   {t:"clean.cache(), then count(), then write(), then unpersist()", ok:true, fx:{trust:5}, why:"Now the expensive read + filter + dedup runs once; the second action reads the cached partitions. Unpersist frees memory for the rest of the job.", life:"Cook once, keep the pot on the counter, serve from it and count plates from the same pot."},
+   {t:"Keep both actions — the audit needs it", ok:false, fx:{runtime:40}, why:"That brings back the duplicate job: the whole pipeline runs twice every night.", life:"Cooking two biryanis because two people asked questions about one."},
+   {t:"Use collect() and count rows in Python on the driver", ok:false, fx:{trust:-10}, say:[["ravi","Driver died: java.lang.OutOfMemoryError."]], why:"collect() pulls every row to one machine. 500 GB doesn't fit on the driver.", life:"Asking all 4,000 dishes to be carried to one tiny table to be counted."}]},
+  {task:["num","Stage 0 reads 500 GB in 128 MB partitions on 200 cores. About how many waves of tasks does it run?",20,1,"waves","500 GB ÷ 128 MB ≈ 4,000 tasks; 4,000 ÷ 200 cores = 20 waves."], intro:[["priya","Quick sanity check before we look at Stage 0. Do the maths."]], label:"Estimate the waves", ok:{trust:5}, life:"4,000 dishes, 200 cooks, one dish per cook at a time → 20 rounds of cooking."},
+  {card:"partitions"},
+  {say:[["ui","Spark UI · Stage 0 (scan payments)\nFiles listed: 2,097,152     Tasks: 69,212\nTask time  min 0.2 s · median 0.9 s · max 4 s\nS3 errors: 503 Slow Down × 18,402"],["ravi","69 thousand tasks and S3 throttled us 18,000 times. The streaming job writes a new file every few seconds."]]},
+  {choose:"69,212 tiny tasks over 2 million files. What's the real fix?", options:[
+   {t:"Compact the table into ~512 MB files and fix the writer that creates tiny files", ok:true, fx:{runtime:-60, trust:10}, why:"Every file costs a listing, an open request, a footer read and scheduling. Compacting 2M files into ~1,000 removes that overhead for every reader, and fixing the writer stops it coming back.", life:"Paying 2 million ₹10 bills one by one vs one bank transfer: same money, but the per-transaction fees and queues disappear."},
+   {t:"Raise spark.sql.files.maxPartitionBytes to 1 GB", ok:"partial", fx:{runtime:-15}, why:"Fewer, bigger tasks for this job — but still 2 million file opens and S3 requests, and every other reader of the table still suffers.", life:"Asking the cashier to staple bills together still means 2 million bills to open."},
+   {t:"Enable speculative execution", ok:false, fx:{cost:500}, why:"Speculation copies slow tasks. No task is slow here; there are just far too many tiny ones.", life:"Sending a second delivery boy for each of 2 million tiny parcels."}]},
+  {task:["fill","Write the compaction call Ravi will schedule hourly",`CALL system.___(\n  table => 'lake.raw.payments',\n  options => map('target-file-size-bytes', '___'))`,["rewrite_data_files","536870912"],["expire_snapshots","134217728000"],"rewrite_data_files compacts small files; 536,870,912 bytes = 512 MB targets."], intro:[["ravi","Write me the compaction call and I'll put it on a schedule."]], label:"Schedule compaction", ok:{trust:5}, bad:{trust:-5}},
+  {card:"smallfiles"},
+  {say:[["arjun","Report landed at 5:20 AM. Cutting it close, but I made it. Thank you."],["priya","The job is down to about an hour and a half. Tomorrow: the joins. They shuffle terabytes they don't need to."]]}
+ ],
+ learned:["Transformations build a plan; every action runs it from scratch unless cached.","Partitions → tasks → waves; the slowest task sets the pace.","Small files cost overhead per file: compact them and fix the writer."]},
+{title:"The 2 TB join", icon:"🔀", place:"Thu 11:00 AM · performance review", setup:"The job now takes 95 minutes. Priya spotted a join that shuffles 2.2 TB every night to attach merchant names.",
+ meters:{runtime:{label:"Job runtime", value:95, unit:" min", goal:50, better:"low", max:130}, shuffle:{label:"Shuffle written", value:2.4, unit:" TB", goal:0.5, better:"low", max:3}, trust:{label:"Finance trust", value:70, unit:"%", goal:80, better:"high", max:100, cap:100}},
+ steps:[
+  {say:[["priya","Look at query 3 in the SQL tab."],["ui","Spark UI · SQL · Query 3\nSortMergeJoin [merchant_id]\n├─ Exchange hashpartitioning(merchant_id, 200)   ← payments  2.1 TB\n└─ Exchange hashpartitioning(merchant_id, 200)   ← merchants 58 MB\nShuffle write: 2.2 TB    Stage time: 38 min"]]},
+  {choose:"What is that 'Exchange' doing?", options:[
+   {t:"A shuffle: every row is re-sent across the network, grouped by merchant_id", ok:true, why:"An Exchange hash-partitions rows by key so equal keys meet in the same task. Here both sides — including all 2.1 TB of payments — are written to disk and fetched across the network.", life:"A post office sorting every letter by PIN code: read, bag, truck to the right branch, unpack."},
+   {t:"A caching step that keeps data in memory", ok:false, why:"Caching shows as InMemoryTableScan/InMemoryRelation. Exchange means data movement.", life:"The fridge isn't the delivery truck."},
+   {t:"Reading the tables from S3", ok:false, why:"Reads show as Scan/BatchScan nodes. Exchange happens after the scan, between stages.", life:"Picking letters up from the mailbox isn't the same as sorting them."}]},
+  {card:"shuffle"},
+  {task:["sort","Which steps make the post office sort every letter?",{"Shuffle (wide)":["groupBy('merchant_id').sum()","join of two big tables","distinct()","orderBy('amount')"],"No shuffle (narrow)":["filter(status = 'SUCCESS')","withColumn('day', ...)","union()","join(broadcast(merchants))"]},"Wide operations need all rows of a key together, so data moves. Narrow ones work partition by partition."], intro:[["priya","Before we fix it: can you spot which operations force a shuffle?"]], label:"Spot the shuffles", ok:{trust:5}},
+  {choose:"payments is 2.1 TB, merchants is 58 MB. How do you fix this join?", options:[
+   {t:"Broadcast merchants to every executor", ok:true, fx:{runtime:-35, shuffle:-2.1, trust:5}, say:[["ui","Spark UI · Query 3 (after)\nBroadcastHashJoin [merchant_id]\n└─ BroadcastExchange  ← merchants 58 MB\nShuffle write: 0 B    Stage time: 4 min"]], why:"Each executor gets a full copy of the 58 MB table and joins its own payments locally. The 2.1 TB side never moves.", life:"Instead of sending every customer to the manager's desk to check prices, photocopy the one-page price list for every cashier."},
+   {t:"Salt the join key ×16", ok:false, fx:{runtime:5, shuffle:0.3}, why:"Salting fixes skew (one key too big), not size. It still shuffles 2 TB and multiplies the small side by 16.", life:"Opening 16 extra counters doesn't help when the problem is that everyone walks to the manager's desk."},
+   {t:"Raise shuffle partitions from 200 to 8,000", ok:"partial", fx:{runtime:-5}, why:"Smaller partitions spill less, so it's a bit faster — but you still move 2.1 TB every night.", life:"More mail bags make sorting easier, but you're still trucking every letter."}]},
+  {card:"broadcast"},
+  {say:[["meera","My report needs every merchant, even ones with zero payments today. So it's «merchants LEFT JOIN payments». Can you still broadcast merchants?"]]},
+  {choose:"merchants LEFT JOIN payments — what do you do?", options:[
+   {t:"Aggregate payments per merchant first, then merchants LEFT JOIN that small result (broadcasting the aggregate)", ok:true, fx:{runtime:-10, shuffle:-0.2, trust:5}, why:"In a LEFT JOIN only the right side can be broadcast. Pre-aggregating payments shrinks the right side to one row per merchant (tiny after partial aggregation), so it can be broadcast — and the 2 TB never joins row by row.", life:"The guest list (left) must stay complete; you can hand out copies of the short 'who paid' summary (right), not the guest list."},
+   {t:"Broadcast merchants anyway", ok:false, why:"Spark won't: the preserved (left) side can't be broadcast. Each task would only see part of payments and wrongly emit 'no payments' rows.", life:"Each cashier would think a guest never paid just because the payment went through another cashier."},
+   {t:"Switch to a FULL OUTER JOIN", ok:false, fx:{runtime:5}, why:"Full outer joins can't broadcast either side — you'd force a sort-merge join of 2 TB.", life:"Now neither list can be photocopied."}]},
+  {task:["num","After the fixes, the daily aggregation still shuffles 1 TB. Targeting ~200 MB per partition, how many shuffle partitions?",5000,100,"partitions","1,000,000 MB ÷ 200 MB ≈ 5,000. With AQE you can start higher and let it coalesce."], intro:[["priya","Last thing: spark.sql.shuffle.partitions is still the default 200. Size it."]], label:"Size the shuffle", ok:{runtime:-3, trust:5}, life:"Splitting 1 tonne of parcels into vans that carry 200 kg each → about 5,000 vans."},
+  {card:"aqe"},
+  {say:[["arjun","Report at 4:40 AM. Who did this? Chai is on me."],["priya","Under 50 minutes. Enjoy it — next week is Diwali, and MegaMart's sale triples our volume."]]}
+ ],
+ learned:["Every Exchange is a shuffle: data written, sent and read again.","Broadcast small tables; the join type decides which side can be broadcast.","Size shuffle partitions by data (~200 MB each) and let AQE adjust."]},
+{title:"Diwali night", icon:"🪔", place:"Sat 01:30 AM · Diwali sale", setup:"MegaMart's festival sale tripled volume. The job that took 47 minutes yesterday has been running for 2 hours 20 minutes.",
+ meters:{runtime:{label:"Job runtime", value:140, unit:" min", goal:45, better:"low", max:170}, maxtask:{label:"Slowest task", value:46, unit:" min", goal:5, better:"low", max:50}, trust:{label:"Finance trust", value:60, unit:"%", goal:80, better:"high", max:100, cap:100}},
+ steps:[
+  {say:[["arjun","It's Diwali and the job is crawling again. Please tell me this isn't another 4-hour night."],["ui","Spark UI · Stage 7 · HashAggregate by merchant_id\nTasks: 4,000 · median 31 s · max 46 min\nTask 1,271: shuffle read 180 GB   (others ~0.3 GB)"]]},
+  {choose:"What do those numbers tell you?", options:[
+   {t:"Data skew: one key holds a huge share of the rows, so one task does most of the work", ok:true, why:"Median 31 s vs max 46 min, and one task reading 180 GB while others read 0.3 GB. All rows of a key land in one partition, so a hot key makes one giant task.", life:"DMart on Diwali: 20 billing counters, but everyone buying rice is sent to counter 7. The store closes only when counter 7 is done."},
+   {t:"Not enough executors — add more", ok:false, fx:{runtime:-2}, why:"The hot partition is still one task on one core. More executors just sit idle waiting for it.", life:"Opening more counters doesn't help if all rice buyers must use counter 7."},
+   {t:"A slow node — turn on speculation", ok:false, fx:{runtime:5}, why:"Speculation launches a copy of task 1,271 elsewhere — which also has to read 180 GB. Skew is a data problem, not a hardware problem.", life:"Sending a second cashier to counter 7 with the same queue."}]},
+  {card:"skew"},
+  {say:[["meera","I ran the key counts. MegaMart is 40% of tonight's rows. And 10% of rows have merchant_id = NULL from the old checkout flow."],["ui","SELECT merchant_id, count(*) … ORDER BY 2 DESC\nMegaMart   41,203,118\nNULL       10,377,402\nM-77812       612,233"]]},
+  {choose:"Two hot keys. What do you fix first?", options:[
+   {t:"Take the NULL merchant_id rows out of the aggregation and handle them separately", ok:true, fx:{maxtask:-20, runtime:-30, trust:5}, why:"NULL isn't a real merchant: those rows hash to one partition and do pointless work. Filtering them (and reporting them separately) removes a whole hot partition cheaply.", life:"Parcels with no address shouldn't all be dumped on one sorting desk; put them aside for the 'unknown address' team."},
+   {t:"Turn on AQE skew join", ok:false, why:"This stage is a groupBy aggregation, not a join. AQE's skew handling only splits join partitions.", life:"A rule for sharing queues at the exchange counter doesn't apply at the billing counter."},
+   {t:"Give the driver more memory", ok:false, why:"The bottleneck is one executor task, not the driver.", life:"A bigger office for the store manager doesn't speed up counter 7."}]},
+  {choose:"MegaMart alone still makes one task take 26 minutes. Next move?", options:[
+   {t:"Two-phase aggregation: add a random salt 0–15, sum by (merchant, salt), then sum by merchant", ok:true, fx:{maxtask:-22, runtime:-55, trust:10}, why:"MegaMart's rows now spread over 16 tasks that each produce a partial sum; a tiny second aggregation adds the 16 partials. The giant task becomes 16 small ones.", life:"Open 16 extra counters just for rice buyers. Each counter totals its own bills; at closing the manager adds up 16 totals."},
+   {t:"Broadcast the payments table", ok:false, why:"There's nothing to broadcast in a groupBy, and 2 TB can't be broadcast anyway.", life:"Photocopying the entire warehouse for every cashier."},
+   {t:"Increase shuffle partitions to 20,000", ok:"partial", fx:{maxtask:-2}, why:"Other partitions get smaller, but every MegaMart row still hashes to the same single partition.", life:"Adding more counters while still sending every rice buyer to counter 7."}]},
+  {card:"salting"},
+  {task:["fill","Write the two-phase aggregation",`step1 = (pay.withColumn("salt", (F.rand() * 16).cast("int"))\n           .groupBy("merchant_id", "___").agg(F.sum("amount").alias("part")))\nstep2 = step1.groupBy("___").agg(F.sum("___").alias("gmv"))`,["salt","merchant_id","part"],["amount","dt"],"Aggregate by (key, salt), then by key, summing the partials."], intro:[["priya","Write it so Ravi can deploy before the 3 AM rerun."]], label:"Code the fix", ok:{trust:5}, bad:{trust:-5}},
+  {say:[["ravi","📟 New alert during the rerun: 2 executors lost. 'Container killed by YARN for exceeding memory limits. 33.1 GB of 33 GB physical memory used.' The job has a pandas UDF for currency conversion."]]},
+  {choose:"The heap is 30 GB and isn't full. What's the fix?", options:[
+   {t:"Raise spark.executor.memoryOverhead — the Python workers live outside the heap", ok:true, fx:{runtime:-10, trust:5}, why:"The container limit is heap + overhead. pandas UDFs run in Python processes whose memory counts against overhead (10% by default). Raising overhead to ~20% stops the kills.", life:"The airline weighs your suitcase AND your backpack. The suitcase (heap) has room; the backpack (Python workers) is overweight."},
+   {t:"Raise the executor heap to 60 GB", ok:false, fx:{runtime:5}, why:"A bigger heap makes a bigger container, but the Python workers still overflow the overhead slice — and huge heaps bring long GC pauses.", life:"Buying a bigger suitcase when it's the backpack that's overweight."},
+   {t:"Reduce shuffle partitions", ok:false, fx:{runtime:5}, why:"Fewer partitions make each task's data bigger — more memory pressure, not less.", life:"Packing more into each backpack."}]},
+  {card:"memory"},
+  {say:[["arjun","Done at 3:05 AM on Diwali night?! 45 minutes. I'm showing this graph to the board."],["priya","You fixed lazy evaluation, small files, the join, skew and memory. That's most of the Spark interview, by the way."]]}
+ ],
+ learned:["Skew = max task ≫ median; find the hot keys first.","Handle NULL keys, then salt hot keys (two-phase aggregation for groupBys).","Container = heap + overhead; Python workers live in overhead."]}
+]);

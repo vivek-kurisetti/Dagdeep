@@ -175,3 +175,174 @@ The next-generation consumer protocol (GA in Kafka 4.0, «group.protocol=consume
  ["pick","ISR shrinks repeatedly on one broker during peak. Most useful first check?",["That broker's disk/network saturation and replica fetcher lag","Consumer group lag","Schema registry","Producer linger.ms"],0,"Followers fall out of sync when they can't keep up."]
 ]}
 ]);
+
+QUEST.cards("kafka", {
+partitions:{t:"Partitions, keys and ordering", one:"Kafka keeps order only inside a partition, and the record key decides which partition a record goes to.",
+ life:"A railway reservation office with 12 counters. If your booking goes to counter 4 and your cancellation to counter 9, the cancellation can be processed first because counter 9's queue is shorter. Give every passenger a token tied to one counter and their requests are handled in order.",
+ how:["A topic is split into **partitions**; each is an append-only log with increasing **offsets**.","The producer picks the partition: «hash(key) % partition_count» (murmur2) when there's a key; the sticky partitioner when there isn't.","**Same key → same partition → ordered.** Different partitions are consumed independently, at different speeds.","Adding partitions changes «hash % N», so existing keys can move to a new partition — ordering across the change isn't guaranteed.","Partition count caps consumer parallelism in a group: one partition is read by at most one consumer of that group."],
+ ex:`Without a key (launch day):
+| Event | Partition | Offset |
+|---|---|---|
+| p_77 PAYMENT | 4 | 88,120 |
+| p_77 REFUND | 9 | 51,002 |
+Partition 9's consumer was ahead, so the refund was processed before the payment existed.
+
+With «key = payment_id»:
+~~~
+producer.send("payments", key=event["payment_id"].encode(), value=payload)
+# hash("p_77") % 12 = 4  → PAYMENT and REFUND both go to partition 4, in order
+~~~`,
+ traps:["Low-cardinality keys (country, status) create hot partitions.","A single partition gives total order but kills throughput (one consumer).","Increasing partitions on a keyed topic breaks per-key order for in-flight entities — plan partition counts up front."],
+ say:"Kafka guarantees ordering only within a partition, so I key records by the entity whose events must stay ordered — payment_id or customer_id. The default partitioner hashes the key modulo the partition count, so I choose partition counts up front because adding partitions remaps keys."},
+groups:{t:"Consumer groups and lag", one:"Consumers in a group split the partitions between them; one partition goes to exactly one consumer.",
+ life:"A shop has 12 delivery areas and hires 16 delivery boys. Each area is given to one boy, so 4 boys sit in the shop with nothing to deliver. To use more boys you have to create more areas.",
+ how:["A **consumer group** shares the work of a topic; Kafka assigns each partition to one member.","Max useful consumers = number of partitions; extras are idle standbys.","Each group tracks its own **committed offsets** in «__consumer_offsets», so two groups each get every record.","**Lag** = latest offset in the partition − the group's committed offset. Watch it per partition.","To scale out: more partitions (and consumers), or faster processing per record (batching, async I/O)."],
+ ex:`~~~
+Group payments-sink · topic payments (12 partitions) · 16 consumers
+consumer-1..12  → one partition each
+consumer-13..16 → no assignment (idle)
+lag: 120,400 and climbing
+~~~
+After repartitioning to 48 partitions and running 48 consumers: lag drained to ~5,000 within 10 minutes.
+
+Lag per partition tells you more than total lag: one partition lagging = hot key or a slow/poison record; all lagging = not enough capacity.`,
+ traps:["Adding consumers beyond the partition count does nothing.","Two different group ids reading one topic both process every record (double processing!).","auto.offset.reset only applies when the group has no committed offset."],
+ say:"Within a consumer group each partition is owned by one consumer, so parallelism is capped by partitions. I monitor lag per partition and scale by adding partitions or making processing faster, not just by adding consumers."},
+replication:{t:"Replication, acks and ISR", one:"Each partition has a leader and followers; acks and min.insync.replicas decide when a write is really safe.",
+ life:"Registered post. A clerk who gives you a receipt after writing your parcel on a single notepad (acks=1) can lose it if that notepad is lost. A receipt that's only issued after two post offices have logged the parcel (acks=all + min.insync.replicas=2) survives one office burning down.",
+ how:["Each partition has **RF** replicas: one **leader** (all reads/writes) and followers that copy it.","Followers that are caught up form the **ISR** (in-sync replicas).","«acks=0» no wait; «acks=1» leader wrote it; «acks=all» every ISR member wrote it.","«min.insync.replicas» = minimum ISR size for acks=all writes to succeed; below it producers get NotEnoughReplicas.","If a leader dies, a new leader is elected from the ISR. With «unclean.leader.election.enable=true», an out-of-sync replica can be elected and acknowledged writes are lost."],
+ ex:`Incident: «acks=1», RF=3, min.insync.replicas=1. broker-3 (leader for partition 7) lost its disk 40 ms after acking 214 payments that followers hadn't copied yet → 214 confirmed payments vanished.
+
+Fix:
+~~~
+# producer
+acks=all
+enable.idempotence=true
+# topic
+replication.factor=3
+min.insync.replicas=2
+unclean.leader.election.enable=false
+~~~
+Now an ack means ≥ 2 brokers have the record; one broker can die with zero loss. If 2 die, writes are rejected rather than risked. Cost: p99 produce latency 8 ms → 17 ms.`,
+ traps:["acks=all with min.insync.replicas=1 is effectively acks=1 when followers fall behind.","RF=3 + min.insync=3 means any single broker outage stops writes.","acks=all has been the producer default since Kafka 3.0 — but check old configs."],
+ say:"Durability comes from acks=all plus min.insync.replicas=2 on replication factor 3: an acknowledged write exists on at least two brokers, so one failure loses nothing, and unclean leader election stays disabled so out-of-sync replicas never become leader."},
+idempotence:{t:"Idempotent producers and duplicates", one:"Producer ids and sequence numbers let the broker drop duplicates created by retries.",
+ life:"You tap 'Pay' twice because the app froze. A good bank sees request #4411 twice and processes it once, because every request carries a unique number.",
+ how:["A retry after a timeout can re-send a batch the broker already wrote → duplicate.","With «enable.idempotence=true» (default since Kafka 3.0) each producer gets a **producer id**; each batch carries a per-partition **sequence number**.","The broker rejects batches with sequence numbers it has already written, and out-of-order ones.","Ordering is preserved with up to 5 in-flight requests per connection.","Scope: duplicates from **producer retries** within a producer session. App-level duplicates (your code sending twice, consumer replays) need idempotent processing or transactions."],
+ ex:`Incident: 37 customers charged twice. Producer had «retries» on and «enable.idempotence=false». A slow broker answered after request.timeout.ms; the client retried; both copies were written.
+
+~~~
+acks=all
+enable.idempotence=true
+max.in.flight.requests.per.connection=5
+delivery.timeout.ms=120000
+~~~
+Downstream, the payments consumer also upserts on payment_id, so even a replay never double-charges.`,
+ traps:["retries=0 avoids retry duplicates but drops records on transient errors.","Idempotence doesn't dedupe across producer restarts with a new id — use transactions (transactional.id) or idempotent consumers.","Exactly-once into an external DB needs idempotent writes there."],
+ say:"Retries can duplicate writes, so I enable producer idempotence — the broker deduplicates by producer id and sequence number while keeping order. For end-to-end exactly-once I add transactions for Kafka-to-Kafka flows and idempotent upserts for external sinks."},
+rebalance:{t:"Rebalances", one:"When group membership changes, partitions are reassigned — and with the old eager protocol everyone stops while it happens.",
+ life:"If one delivery boy is late, the manager stops all deliveries, takes every area back and redraws the whole map. With a smarter manager, only the late boy's area is reassigned, and regular boys keep their areas when they step out for chai.",
+ how:["Rebalances happen when a consumer joins, leaves, misses heartbeats («session.timeout.ms», 45 s) or doesn't call poll() within «max.poll.interval.ms» (5 min).","**Eager** protocol: all members revoke all partitions → stop-the-world.","**Cooperative-sticky** assignor: only partitions that must move are revoked, in two rounds.","**Static membership** («group.instance.id») lets a restarting pod rejoin with its old partitions without a rebalance, if back within session.timeout.ms.","The new consumer protocol (KIP-848, Kafka 4.0) moves assignment to the broker and makes rebalances incremental by design."],
+ ex:`Settlement consumer: «max.poll.records=500», 0.8 s per record → 400 s per poll loop > 300 s limit → consumer kicked out → rebalance → it rejoins → kicked out again. 40 rebalances/hour, lag 2.4 M.
+
+Fixes:
+~~~
+max.poll.records=100                     # 80 s per loop
+partition.assignment.strategy=org.apache.kafka.clients.consumer.CooperativeStickyAssignor
+group.instance.id=<pod-name>           # static membership
+~~~
+Result: 2 rebalances/hour (deploys only), lag peaks at ~40k.`,
+ traps:["Lowering session.timeout.ms makes false 'dead consumer' detections more likely.","Long processing inside the poll loop is the #1 cause of rebalance storms.","Deploying all pods at once avoids one-by-one rebalances but causes a full outage of processing."],
+ say:"Rebalances reassign partitions when membership changes. I keep poll loops well under max.poll.interval.ms by tuning max.poll.records, use the cooperative-sticky assignor so only moved partitions pause, and static membership so rolling restarts don't trigger rebalances."},
+offsets:{t:"Offsets, commits and delivery guarantees", one:"Where you commit offsets — before or after processing — decides whether you lose data or get duplicates.",
+ life:"A bookmark in a long book. If you move the bookmark before reading a chapter and fall asleep, you skip that chapter (at-most-once). If you move it after reading, you might re-read a few pages after waking up (at-least-once).",
+ how:["Consumers read from an offset and **commit** the next offset to read to «__consumer_offsets».","Commit **before** processing → crash loses records (**at-most-once**).","Commit **after** processing → crash replays records since the last commit (**at-least-once**).","Make processing **idempotent** (upsert by key, dedupe on an event id) so replays are harmless.","Kafka **transactions** give exactly-once for consume → process → produce **within Kafka** (offsets committed in the same transaction)."],
+ ex:`~~~
+consumer = KafkaConsumer("settlements", enable_auto_commit=False)
+for batch in poll_batches(consumer):
+    rows = transform(batch)
+    db.execute("""INSERT INTO settlements (...) VALUES (...)
+                  ON CONFLICT (settlement_id) DO UPDATE SET ...""", rows)   # idempotent
+    consumer.commit()        # after the DB write
+~~~
+Before the fix a plain INSERT created ~9,000 duplicates per deploy (records between the last commit and the restart were re-delivered). With the upsert: 0.
+
+Alternative: store the Kafka offset in the same DB transaction as the data, and on startup seek to the stored offset.`,
+ traps:["Auto-commit can commit before your async processing finishes.","enable.idempotence (producer) does nothing for consumer-side duplicates.","Exactly-once in Kafka does not extend to external databases by itself."],
+ say:"I disable auto-commit, commit after processing, and make the sink idempotent with upserts on a business key — that's at-least-once delivery with effectively-once results. For Kafka-to-Kafka pipelines I use transactions with read_committed consumers."}
+});
+
+QUEST.missions("kafka", [
+{title:"Ghost refunds", icon:"👻", place:"Mon 10:02 AM · real-time payments launch", setup:"Payments now flow through Kafka in real time. Ten minutes after launch, the ops dashboard shows refunds for payments that don't exist yet.",
+ meters:{order:{label:"Out-of-order events/min", value:340, unit:"", goal:5, better:"low", max:400}, lag:{label:"Consumer lag", value:120000, unit:" msgs", goal:5000, better:"low", max:200000}, trust:{label:"Ops trust", value:50, unit:"%", goal:70, better:"high", max:100, cap:100}},
+ steps:[
+  {say:[["dev","We're live! 12 partitions, 12 consumers, everything green… mostly."],["meera","Not green for me. The ledger shows a REFUND for p_77, but p_77's PAYMENT isn't there yet. 340 of these per minute."],["ui","Topic payments · 12 partitions · producer key = null\np_77 PAYMENT → partition 4, offset 88,120\np_77 REFUND  → partition 9, offset 51,002\nconsumer(p9) is 3 min ahead of consumer(p4)"]]},
+  {choose:"How can a refund overtake the payment it refunds?", options:[
+   {t:"Kafka only orders within a partition, and with no key the two events landed on different partitions", ok:true, why:"Each partition is consumed independently. Partition 9's consumer was ahead of partition 4's, so the refund was processed first.", life:"Railway reservation: your booking went to counter 4 and your cancellation to counter 9, which had a shorter queue."},
+   {t:"Kafka doesn't guarantee any ordering", ok:false, why:"It does — strictly within a partition. Offsets in one partition are always read in order.", life:"Each counter serves its own queue strictly in order; the problem is using two counters."},
+   {t:"The consumer code has a bug", ok:false, why:"The consumer processed each partition correctly; the events were split across partitions by the producer.", life:"The clerks did their job; the tokens sent you to two different counters."}]},
+  {card:"partitions"},
+  {choose:"How do you fix the ordering?", options:[
+   {t:"Use payment_id as the record key so all events of a payment go to the same partition", ok:true, fx:{order:-335, trust:10}, say:[["meera","Ghost refunds dropped from 340/min to almost zero."]], why:"hash(payment_id) % 12 sends PAYMENT and REFUND of p_77 to the same partition, where they're read in order. Different payments still spread across all 12 partitions.", life:"Every passenger gets a token for one counter; booking, changes and cancellation all go to that counter, in order."},
+   {t:"Use a topic with 1 partition", ok:"partial", fx:{order:-340, lag:80000}, why:"Total order, but one partition = one consumer. Throughput collapses and lag explodes.", life:"One counter for the whole station: orderly, and a 3-hour queue."},
+   {t:"Sort events by timestamp in the consumer", ok:false, why:"Clocks differ across services, and you'd have to buffer forever waiting for late events.", life:"Asking every counter clerk to wait in case an older request arrives at another counter."}]},
+  {say:[["ui","Group payments-sink · 16 consumers · 12 partitions\nconsumer-13…16: no partitions assigned\nlag: 120,400 and climbing"],["dev","Ops scaled to 16 consumers an hour ago. Lag still grows. Quick check:"]]},
+  {task:["num","12 partitions and 16 consumers in one group. How many consumers are idle?",4,0,"consumers","Each partition goes to one consumer: 12 busy, 4 idle."], label:"Count idle consumers", life:"12 delivery areas, 16 delivery boys: 4 boys sit in the shop.", ok:{trust:5}},
+  {card:"groups"},
+  {choose:"Each active consumer is CPU-bound. How do you get more throughput?", options:[
+   {t:"Increase partitions (e.g. to 48) and run up to 48 consumers", ok:true, fx:{lag:-115000, trust:5}, why:"More partitions = more units of parallelism. Note: keys remap when partitions change, so do it in a quiet window or drain in-flight payments first.", life:"Split the city into more delivery areas so more boys can work at once."},
+   {t:"Add 20 more consumers", ok:false, why:"Still 12 partitions → still 12 working consumers; 24 more idle.", life:"Hiring more delivery boys without creating more areas."},
+   {t:"Increase topic retention", ok:false, why:"Retention decides how long data is kept, not how fast it's processed.", life:"A bigger warehouse doesn't deliver parcels faster."}]},
+  {task:["pick","Partitions went 12 → 48. What happens to payment p_77, which started before the change?",["Its new events may hash to a different partition than its old ones","Kafka moves its old events to the new partition","Nothing changes for existing keys","The topic must be recreated"],0,"hash % 48 differs from hash % 12, so new events for an old key can land elsewhere. Plan partition counts up front, or drain in-flight entities before resizing."], label:"Resize safely", ok:{trust:0}},
+  {say:[["meera","No ghost refunds, lag under a minute. You saved launch day."],["dev","Next time I'm choosing partition counts before launch."]]}
+ ],
+ learned:["Order is per partition: key by the entity that must stay ordered.","Consumers in a group ≤ partitions; extras sit idle.","Adding partitions remaps keys — size topics up front."]},
+{title:"The broker that ate payments", icon:"💥", place:"Tue 02:14 AM · broker-3 down", setup:"broker-3 lost its disk. The API had confirmed 214 payments to customers, but they're nowhere in Kafka.",
+ meters:{durability:{label:"Durability score", value:30, unit:"%", goal:90, better:"high", max:100, cap:100}, dupes:{label:"Duplicate charges/day", value:37, unit:"", goal:0, better:"low", max:40}, latency:{label:"p99 produce latency", value:8, unit:" ms", goal:25, better:"low", max:40}},
+ steps:[
+  {say:[["ravi","📟 broker-3's disk died at 02:14. Payments API had returned 'success' for 214 payments that are not in the topic."],["ui","Producer: acks=1 · enable.idempotence=false · retries=2147483647\nTopic payments: replication.factor=3 · min.insync.replicas=1\nunclean.leader.election.enable=true"]]},
+  {choose:"How could confirmed payments vanish?", options:[
+   {t:"acks=1: the leader acknowledged before followers copied the data, then the leader died", ok:true, why:"With acks=1 the producer gets success as soon as the leader writes. Followers were a few ms behind; the leader's disk died; a follower without those records became leader.", life:"The shop gave you a receipt after writing your order on one notepad — and that notepad was lost before anyone copied it to the main register."},
+   {t:"Retention deleted them", ok:false, why:"Retention removes data after hours or days, not milliseconds.", life:"The record room doesn't shred today's files at night."},
+   {t:"A consumer deleted them", ok:false, why:"Consumers can't delete records from a topic; they only read and commit offsets.", life:"Reading a register doesn't erase it."}]},
+  {card:"replication"},
+  {choose:"Make acknowledged writes survive a broker loss.", options:[
+   {t:"acks=all + min.insync.replicas=2 (with RF=3), and disable unclean leader election", ok:true, fx:{durability:60, latency:9}, why:"An ack now means at least two brokers have the record. Out-of-sync replicas can never become leader. Latency rises a little because the leader waits for followers.", life:"Registered post: the receipt is issued only after two post offices have logged your parcel."},
+   {t:"Raise replication.factor to 5 but keep acks=1", ok:"partial", fx:{durability:10}, why:"More copies eventually, but the ack still happens after one write — the same 40 ms window of loss exists.", life:"Five notepads, but you still get your receipt after writing on the first one."},
+   {t:"Keep unclean.leader.election.enable=true for availability", ok:false, fx:{durability:-20}, why:"Unclean election picks replicas that missed writes, deliberately trading data loss for availability. Wrong trade for payments.", life:"Promoting the clerk who missed half the day's entries to be the official record keeper."}]},
+  {task:["num","RF=3, min.insync.replicas=2, acks=all. How many brokers holding a partition can fail while producers still succeed?",1,0,"brokers","Writes need ≥ 2 in-sync replicas; 3 − 2 = 1 broker can fail. Lose 2 and writes are rejected (no silent loss)."], label:"Failure budget", life:"Two of three branch offices must log the parcel: one office can be closed, not two."},
+  {say:[["meera","Different problem: yesterday 37 customers were charged twice. Logs show producer retries after timeouts on a slow broker."]]},
+  {choose:"How do you stop duplicates from retries?", options:[
+   {t:"enable.idempotence=true: producer id + sequence numbers let the broker drop repeats", ok:true, fx:{dupes:-37}, why:"Each batch carries a sequence number per partition. When a retried batch arrives that was already written, the broker discards it, keeping order with up to 5 in-flight requests.", life:"The bank sees request #4411 twice and processes it once, because every request has a unique number."},
+   {t:"Set retries=0", ok:"partial", fx:{dupes:-30, durability:-10}, why:"No retry duplicates — but every transient error now drops a payment.", life:"Never re-sending a letter that might have been lost, so some letters just disappear."},
+   {t:"Use acks=0 to make it faster", ok:false, fx:{durability:-40}, why:"No acknowledgement at all: no idea whether anything was written.", life:"Throwing letters over the post office wall."}]},
+  {card:"idempotence"},
+  {task:["fill","Final producer config for payments",`acks=___\nenable.idempotence=___\nmax.in.flight.requests.per.connection=___`,["all","true","5"],["1","false","50"],"acks=all for durability, idempotence for retry safety, ≤ 5 in flight keeps ordering."], intro:[["ravi","Write the producer config; I'll roll it out before the morning peak."]], label:"Ship the config", ok:{durability:20}, bad:{durability:-5}},
+  {say:[["ravi","Chaos test: killed a broker during peak load. Zero lost, zero duplicates. p99 latency 17 ms."],["meera","That's a sentence I can put in the audit report."]]}
+ ],
+ learned:["acks=all + min.insync.replicas=2 on RF=3: one broker can die with zero loss.","Unclean leader election trades data for availability.","Idempotent producers stop duplicates from retries."]},
+{title:"The lag monster", icon:"🐉", place:"Thu 04:00 PM · weekly deploy", setup:"Every deploy of the settlement consumer turns into a disaster: lag shoots to millions, logs fill with 'Rebalancing…', and finance finds duplicate settlement rows.",
+ meters:{lag:{label:"Peak lag", value:2400000, unit:" msgs", goal:50000, better:"low", max:2600000}, rebal:{label:"Rebalances/hour", value:40, unit:"", goal:2, better:"low", max:45}, dupes:{label:"Duplicates per deploy", value:9000, unit:"", goal:0, better:"low", max:10000}},
+ steps:[
+  {say:[["dev","Deploy started 20 minutes ago. Lag is 2.4 million and climbing."],["ui","Group settlement · 30 pods · rolling deploy\nRebalances last hour: 40 (eager protocol)\nmax.poll.records=500 · avg processing 0.8 s/record\nWARN consumer poll timeout has expired (max.poll.interval.ms=300000)"]]},
+  {task:["num","500 records per poll × 0.8 s each. How many seconds per poll loop?",400,0,"s","400 s > 300 s max.poll.interval.ms → the consumer is considered stuck and kicked from the group."], intro:[["priya","Do the maths before guessing."]], label:"Poll-loop maths", life:"The manager calls every 5 minutes to check you're alive; you take 7 minutes per batch, so he assumes you quit."},
+  {choose:"Consumers get kicked out for slow polls. Fix?", options:[
+   {t:"Lower max.poll.records (e.g. 100) so each loop finishes well under the limit", ok:true, fx:{rebal:-20, lag:-800000}, why:"100 × 0.8 s = 80 s per loop: consumers stay in the group. You could also raise max.poll.interval.ms or process faster, but smaller batches are the safest first fix.", life:"Take smaller batches of parcels so you're back to answer the manager's call on time."},
+   {t:"Lower session.timeout.ms so dead consumers are detected faster", ok:false, fx:{rebal:10}, why:"It makes false 'dead consumer' detection more likely: more rebalances, not fewer.", life:"A manager who panics sooner."},
+   {t:"Add partitions", ok:false, why:"Each consumer would still take 400 s per poll.", life:"More delivery areas don't help if each boy is too slow to call back."}]},
+  {card:"rebalance"},
+  {choose:"Rolling deploys still trigger a rebalance per pod (30 per deploy). Fix?", options:[
+   {t:"Static membership (group.instance.id per pod) + cooperative-sticky assignor", ok:true, fx:{rebal:-18, lag:-1500000}, why:"A pod restarting with the same instance id gets its partitions back without a rebalance; when one is needed, cooperative rebalancing moves only the affected partitions.", life:"Regular delivery boys keep their areas when they step out for chai; the manager doesn't redraw the whole map."},
+   {t:"Deploy all 30 pods at once", ok:"partial", fx:{rebal:-10, lag:200000}, why:"One rebalance instead of 30, but nothing is processed while every pod restarts.", life:"Sending every delivery boy home at the same time."},
+   {t:"Disable heartbeats", ok:false, why:"Heartbeats can't be disabled; the coordinator needs them to know members are alive.", life:"Telling the manager to stop checking — he'd just fire everyone."}]},
+  {say:[["meera","Lag is fine now. But after every deploy, ~9,000 duplicate settlement rows appear."]]},
+  {task:["bug","Why do restarts create duplicate settlement rows? Tap the faulty line.",["consumer = KafkaConsumer('settlements', enable_auto_commit=False)","for batch in poll_batches(consumer):","    rows = transform(batch)","    db.execute('INSERT INTO settlements VALUES ...', rows)   # plain insert","    consumer.commit()"],3,"Records after the last commit are re-delivered after a restart (at-least-once). A plain INSERT writes them again. Use an upsert keyed on settlement_id."], label:"Find the duplicate source", ok:{dupes:-9000}},
+  {card:"offsets"},
+  {choose:"Finance asks: can Kafka transactions give us exactly-once into Postgres?", options:[
+   {t:"Kafka transactions cover Kafka-to-Kafka; for Postgres, use idempotent upserts (or store offsets in the same DB transaction)", ok:true, fx:{lag:-50000}, why:"Transactions make Kafka writes and offset commits atomic inside Kafka. An external database isn't part of that transaction, so the sink must be idempotent.", life:"A bank's internal transfers are atomic, but a cheque you deposit in another bank needs that bank's own checks."},
+   {t:"Yes — enable.idempotence makes it exactly-once end to end", ok:false, why:"Producer idempotence only dedupes producer retries into Kafka.", life:"A unique request number at one bank doesn't stop another bank from processing your cheque twice."},
+   {t:"Use acks=all on the consumer", ok:false, why:"acks is a producer setting about writes, not consumer delivery.", life:"Registered post doesn't control how the receiver files letters."}]},
+  {say:[["dev","Deploys are boring now: lag peaks at 40k, two rebalances, zero duplicates."],["priya","Boring deploys are the best deploys."]]}
+ ],
+ learned:["Keep poll loops under max.poll.interval.ms (max.poll.records × time per record).","Static membership + cooperative-sticky = calm rolling deploys.","Commit after processing and make sinks idempotent."]}
+]);
