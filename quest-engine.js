@@ -83,6 +83,7 @@ Q.useGuest = () => {
   swap(P, Object.assign(DEF_P(), raw(KQ()) || {})); swap(PR, Object.assign(DEF_PR(), raw(KP()) || {}));
   drawAcct(); rerender();
 };
+Q.toastMsg = m => toast(m);
 Q.reset = () => { swap(P, DEF_P()); swap(PR, DEF_PR()); save(); rerender(); toast("Fresh start — all progress cleared"); };
 const esc = s => String(s == null ? "" : s).replace(/[&<>"]/g, c => ({"&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;"}[c]));
 const fm = t => esc(t).replace(/\*\*(.+?)\*\*/g, "<b>$1</b>").replace(/(^|[\s(])\*([^*\s][^*]*?)\*(?=[\s).,:;!?]|$)/g, "$1<i>$2</i>").replace(/«(.+?)»/g, "<code>$1</code>").replace(/\n/g, "<br>");
@@ -189,21 +190,50 @@ function drawAcct(){
 function acctPanel(confirmReset){
   let p = document.getElementById("qAcctPanel");
   if (p && !confirmReset){ p.remove(); return; }
-  if (!p){ p = document.createElement("div"); p.id = "qAcctPanel"; p.className = "q-acctpanel"; document.body.appendChild(p); }
-  const u = Q.account, A = window.DAGDEEP_AUTH || {}, r = rank(PR.xp);
+  if (!p){ p = document.createElement("div"); p.id = "qAcctPanel"; p.className = "q-acctpanel"; p.setAttribute("role", "dialog"); p.setAttribute("aria-label", "Account"); document.body.appendChild(p); }
+  const u = Q.account, A = window.DAGDEEP_AUTH || {state:"loading"}, r = rank(PR.xp), sy = Q.sync || {};
+  const ago = t => { const m = Math.round((Date.now() - t) / 60000); return m < 1 ? "just now" : m < 60 ? m + " min ago" : Math.round(m / 60) + " h ago"; };
+  const syncLine = !u ? "Sign in to keep your progress and sync it across devices."
+    : sy.state === "error" ? `⚠️ Sync failed${sy.code ? ` (${esc(sy.code)})` : ""}. Progress is still saved on this device.`
+    : sy.state === "ok" ? `☁️ Synced to your Google account · ${ago(sy.at)}` : "☁️ Syncing…";
+  let signInUI = "";
+  if (!u){
+    if (A.inApp) signInUI = `<p class="q-ap-note">Google doesn't allow sign-in inside in-app browsers (LinkedIn, Instagram…). Open this page in Chrome or Safari to sign in.</p><button class="btn big" data-a="copy">📋 Copy link</button>`;
+    else if (A.state === "off") signInUI = `<button class="btn big q-gbtn" disabled>${GICON}<span>Continue with Google</span></button><p class="q-ap-note">Sign-in isn't switched on for this site yet. Your progress is saved on this device, and you can move it with Export / Import below.</p>`;
+    else if (A.state === "failed") signInUI = `<button class="btn big q-gbtn" disabled>${GICON}<span>Continue with Google</span></button><p class="q-ap-note">${esc(A.error)}</p>`;
+    else signInUI = `<button class="btn big q-gbtn" data-a="in" ${A.state === "ready" ? "" : "disabled"}>${GICON}<span>${A.state === "ready" ? "Continue with Google" : "Connecting…"}</span></button><p class="q-ap-err" role="alert"></p>`;
+  }
   p.innerHTML = confirmReset ? `<p class="q-ap-h">Start fresh?</p><p class="muted">This clears XP, stars, cards and trophies ${u ? "for <b>" + esc(u.displayName || u.email) + "</b>" : "on this device"}. It can't be undone.</p>
       <button class="btn big solid q-danger" data-a="doreset">Yes, start from scratch</button><button class="btn big" data-a="cancel">Cancel</button>`
-    : `<div class="q-ap-me">${u ? `<span class="q-av-md">${avatar(u)}</span><div><b>${esc(u.displayName || "Signed in")}</b><small>${esc(u.email || "")}</small></div>` : `<span class="q-av-md"><span>👤</span></span><div><b>Playing as guest</b><small>Progress is saved on this device only</small></div>`}</div>
-      <p class="q-ap-sync">${u ? "☁️ Progress syncs to your Google account on every device." : "Sign in to keep your progress separate and synced everywhere."}</p>
+    : `<div class="q-ap-me">${u ? `<span class="q-av-md">${avatar(u)}</span><div><b>${esc(u.displayName || "Signed in")}</b><small>${esc(u.email || "")}</small></div>` : `<span class="q-av-md"><span>👤</span></span><div><b>Playing as guest</b><small>Progress is saved on this device</small></div>`}</div>
+      <p class="q-ap-sync">${syncLine}</p>
       <div class="q-ap-stats"><span><b>${esc(r.name)}</b><small>rank</small></span><span><b>${PR.xp}</b><small>XP</small></span><span><b>${totalCards()}</b><small>cards</small></span></div>
-      ${u ? `<button class="btn big" data-a="out">Sign out</button>` : `<button class="btn big q-gbtn" data-a="in">${GICON}<span>Continue with Google</span></button>${A.configured === false ? `<p class="q-ap-note">Google sign-in isn't switched on for this site yet.</p>` : ""}`}
+      ${u ? `<button class="btn big" data-a="out">Sign out</button>` : signInUI}
+      <div class="q-ap-row"><button class="btn" data-a="export">⬇️ Export progress</button><button class="btn" data-a="import">⬆️ Import</button></div>
       <button class="btn big q-reset" data-a="reset">🔄 Start fresh</button>`;
+  if (!u && A.state === "loading") setTimeout(() => { if (document.body.contains(p) && !confirmReset && (window.DAGDEEP_AUTH || {}).state !== "loading"){ p.remove(); acctPanel(); } }, 700);
   p.onclick = async e => {
     e.stopPropagation();
     const a = e.target.closest("[data-a]"); if (!a) return;
-    const act = a.dataset.a;
-    if (act === "in"){ if (A.signIn){ try { await A.signIn(); p.remove(); } catch(err){ toast("Sign-in was cancelled or blocked"); } } else toast("Google sign-in isn't configured yet"); }
-    if (act === "out"){ if (A.signOut) await A.signOut(); p.remove(); }
+    const act = a.dataset.a, err = p.querySelector(".q-ap-err");
+    if (act === "in" && A.signIn){
+      a.disabled = true; a.querySelector("span").textContent = "Opening Google…";
+      try { await A.signIn(); p.remove(); }
+      catch(x){ a.disabled = false; a.querySelector("span").textContent = "Continue with Google"; if (err) err.textContent = A.message(x); }
+    }
+    if (act === "out"){ if (A.signOut) await A.signOut(); p.remove(); toast("Signed out. Playing as guest."); }
+    if (act === "copy"){ try { await navigator.clipboard.writeText(location.href); toast("Link copied. Paste it into your browser."); } catch(x){ toast(location.href); } }
+    if (act === "export"){
+      const blob = new Blob([JSON.stringify({app:"dagdeep", v:1, at:new Date().toISOString(), quest:P, profile:PR}, null, 1)], {type:"application/json"});
+      const link = document.createElement("a"); link.href = URL.createObjectURL(blob); link.download = `dagdeep-progress-${new Date().toISOString().slice(0, 10)}.json`; link.click(); setTimeout(() => URL.revokeObjectURL(link.href), 2000);
+    }
+    if (act === "import"){
+      const f = document.createElement("input"); f.type = "file"; f.accept = "application/json,.json";
+      f.onchange = async () => { try { const d = JSON.parse(await f.files[0].text()); if (d.app !== "dagdeep" || !d.quest) throw 0;
+        swap(P, Object.assign(DEF_P(), d.quest)); swap(PR, Object.assign(DEF_PR(), d.profile || {})); save(); p.remove(); rerender(); drawAcct(); toast("Progress imported ✓"); }
+        catch(x){ toast("That file isn't a Dagdeep progress export"); } };
+      f.click();
+    }
     if (act === "reset") acctPanel(true);
     if (act === "cancel") acctPanel(false);
     if (act === "doreset"){ p.remove(); Q.reset(); unlock("fresh"); }
@@ -236,7 +266,7 @@ function mapView(){
     <section class="q-hello">
       <p class="q-eyebrow">${name ? "Welcome back" : "Dagdeep"}</p>
       <h1>${name ? `Hi ${esc(name)} 👋` : "Learn data &amp; AI engineering by playing"}</h1>
-      <p class="muted">Real situations, real decisions, interview-ready answers.</p>
+      <p class="muted">Real situations, real decisions, interview-ready answers. <a class="q-aboutl" href="#about">What is this?</a></p>
       <div class="q-statrow"><span><b>${esc(r.name)}</b><small>rank</small></span><span><b>${PR.xp.toLocaleString()}</b><small>XP</small></span><span><b>${PR.streak || 0}</b><small>day streak</small></span><span><b>${achN}/${ACH.length}</b><small>trophies</small></span></div>
       <div class="q-bar" title="${r.next ? (r.next[0] - PR.xp) + " XP to " + r.next[1] : ""}"><span style="width:${pct}%"></span></div>
     </section>
@@ -985,7 +1015,7 @@ function desk(id, ci, z, Z, C){
         <div class="q-chips" aria-label="Suggested commands"></div></section>
       ${C.dash ? `<section class="q-app" data-app="dash" hidden><p class="q-app-tip">Find what changed, and when. Red lines are deploys/events.</p><div class="q-dash">${C.dash.map((D, k) => `<div class="q-dpanel" data-k="${k}"><header><b>${esc(D.title)}</b><button class="q-flag" data-src="dash" data-k="${k}">🚩 Flag</button></header>${chartSVG(D)}</div>`).join("")}</div></section>` : ""}
       ${C.ui ? `<section class="q-app" data-app="ui" hidden><p class="q-app-tip">The system's own UI. 🚩 what explains the alert.</p><div class="q-dash">${C.ui.map((U, k) => `<div class="q-dpanel q-uipanel" data-k="${k}"><header><b>${esc(U.title)}</b><button class="q-flag" data-src="ui" data-k="${k}">🚩 Flag</button></header>${U.img ? shot(U.img, U.cap) : ""}${U.md ? `<div class="q-uimd">${md(U.md)}</div>` : ""}</div>`).join("")}</div></section>` : ""}
-      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">Tap a line to flag it.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-selected="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
+      ${C.files ? `<section class="q-app" data-app="code" hidden><p class="q-app-tip">Tap a line to flag it.</p><div class="q-ftabs">${C.files.map((F, k) => `<button data-f="${k}" aria-pressed="${k === 0}">${esc(F.path.split("/").pop())}</button>`).join("")}</div><div class="q-codev"></div></section>` : ""}
       <section class="q-app" data-app="notes" hidden><p class="q-app-tip">Your evidence, then the write-up.</p><div class="q-notes"></div></section>
       <section class="q-app" data-app="guide" hidden><div class="q-guide"></div></section>
     </div></div>`;
@@ -1100,7 +1130,7 @@ function desk(id, ci, z, Z, C){
     const cv = $(".q-codev");
     const file = k => {
       const F = C.files[k];
-      $$(".q-ftabs button").forEach(b => b.setAttribute("aria-selected", +b.dataset.f === k));
+      $$(".q-ftabs button").forEach(b => b.setAttribute("aria-pressed", +b.dataset.f === k));
       cv.innerHTML = `<div class="q-fpath">${esc(F.path)}${F.meta ? ` <small>${esc(F.meta)}</small>` : ""}</div><div class="q-clines">${F.text.split("\n").map((l, i) => `<button class="q-cl" data-f="${k}" data-n="${i + 1}"><span>${i + 1}</span><code>${esc(l) || " "}</code></button>`).join("")}</div>`;
       cv.querySelectorAll(".q-cl").forEach(b => b.onclick = () => {
         const n = +b.dataset.n, cid = (F.clues || {})[n];
@@ -1274,7 +1304,7 @@ function workHub(filter){
     <a class="q-back" href="#play">← Home</a>
     <h1>💼 Work simulator</h1>
     <p class="muted">Real tasks from a data and AI engineer's week. Each type plays differently. ${done}/${all.length} done.</p>
-    <div class="q-wfilter" role="tablist"><button data-f="all" aria-selected="${f === "all"}">All <small>${all.length}</small></button>${Object.entries(WTYPES).map(([k, T]) => `<button data-f="${k}" aria-selected="${f === k}">${T.ic} ${T.name} <small>${all.filter(c => c.type === k).length}</small></button>`).join("")}</div>
+    <div class="q-wfilter" role="tablist"><button role="tab" data-f="all" aria-selected="${f === "all"}">All <small>${all.length}</small></button>${Object.entries(WTYPES).map(([k, T]) => `<button role="tab" data-f="${k}" aria-selected="${f === k}">${T.ic} ${T.name} <small>${all.filter(c => c.type === k).length}</small></button>`).join("")}</div>
     ${f !== "all" ? `<p class="q-wline">${WTYPES[f].ic} <b>${WTYPES[f].name}:</b> ${WTYPES[f].line}</p>` : ""}
     ${workList(list)}</div>`;
   root().querySelectorAll(".q-wfilter button").forEach(b => b.onclick = () => { history.replaceState(null, "", b.dataset.f === "all" ? "#work" : "#work/" + b.dataset.f); workHub(b.dataset.f); });
@@ -1384,13 +1414,13 @@ WPLAY.logs = x => {
   root().innerHTML = wkShell(x, `<div class="q-logs">
     <div class="q-lq"></div>
     <div class="q-ltools"><input class="q-lsearch" type="search" placeholder="Filter lines… (e.g. ERROR, killed)" aria-label="Filter log lines" autocapitalize="off" spellcheck="false">
-      <div class="q-llv">${["ALL", "ERROR", "WARN"].map(v => `<button data-l="${v}" aria-selected="${v === "ALL"}">${v}</button>`).join("")}</div></div>
+      <div class="q-llv">${["ALL", "ERROR", "WARN"].map(v => `<button data-l="${v}" aria-pressed="${v === "ALL"}">${v}</button>`).join("")}</div></div>
     <div class="q-lsrc">${esc(W.source)} · <span class="q-lcount"></span></div>
     <div class="q-lview">${L.map((l, i) => `<button class="q-ll ${lvlOf(l).toLowerCase()}" data-i="${i}"><span>${i + 1}</span><code>${termFmt(l)}</code></button>`).join("")}</div></div>`, prog());
   const qEl = root().querySelector(".q-lq"), rows = [...root().querySelectorAll(".q-ll")];
   const filter = () => { let n = 0; rows.forEach((r, i) => { const l = L[i], v = (st.lvl === "ALL" || lvlOf(l) === st.lvl || (st.lvl === "ERROR" && lvlOf(l) === "FATAL")) && (!st.text || l.toLowerCase().includes(st.text)); r.hidden = !v; if (v) n++; }); root().querySelector(".q-lcount").textContent = `${n} of ${L.length} lines`; };
   root().querySelector(".q-lsearch").oninput = e => { st.text = e.target.value.trim().toLowerCase(); filter(); };
-  root().querySelectorAll(".q-llv button").forEach(b => b.onclick = () => { st.lvl = b.dataset.l; root().querySelectorAll(".q-llv button").forEach(z => z.setAttribute("aria-selected", z === b)); filter(); });
+  root().querySelectorAll(".q-llv button").forEach(b => b.onclick = () => { st.lvl = b.dataset.l; root().querySelectorAll(".q-llv button").forEach(z => z.setAttribute("aria-pressed", z === b)); filter(); });
   const ask = () => {
     root().querySelector(".q-wkp").textContent = prog();
     const q = W.qs[st.q];
@@ -1517,6 +1547,47 @@ WPLAY.triage = x => {
   card();
 };
 
+
+/* ================= About (for the portfolio) ================= */
+const AUTHOR = {name:"Vivek Kurisetti", role:"Senior Data Engineer", github:"https://github.com/vivek-kurisetti", repo:"https://github.com/vivek-kurisetti/Dagdeep", linkedin:"https://www.linkedin.com/in/vivek-kurisetti"};
+function aboutView(){
+  document.title = "About · Dagdeep";
+  const all = ALLW(), stat = [["26", "topics", "Spark to MCP"], ["289", "drill levels", "1,500+ challenges"], ["32", "story missions", "real situations"], [String(all.length), "work tasks", "6 formats"], ["26", "mock interviews", "with model answers"]];
+  const modes = [
+    ["🎯", "Drills", "Short puzzles per concept: sort, match, fill the gap, spot the bug, estimate a number. Basic and expert tiers with boss levels."],
+    ["🎬", "Story missions", "A real day at work. Make the calls, watch the meters move, collect detailed concept cards."],
+    ["📟", "Incidents", "Get paged. Slack, a working terminal, dashboards and code. Find the root cause, ship a fix, read the postmortem."],
+    ["🔍", "PR reviews", "Read a real-looking diff, tap the risky lines and say what's wrong before it ships."],
+    ["🧾", "Log hunts", "Hundreds of filterable log lines. Find the one that matters."],
+    ["🎛️", "Tune it", "Real config knobs and a simulator: hit every goal in as few runs as you can."],
+    ["🧭", "Postmortems", "Order the events, label trigger vs root cause, then ask \"why?\" five times."],
+    ["🚦", "Triage", "Sort a morning inbox of alerts by urgency and pick the first move."],
+    ["🎤", "Mock interviews", "A full technical round per topic, with model answers and a hire verdict."],
+    ["🌊", "Data flows", "Animated, step-by-step views of how a write moves through MySQL and Iceberg."]];
+  root().innerHTML = `<div class="q-wrap q-about">
+    <section class="q-ab-hero"><p class="q-eyebrow">About this project</p><h1>Learn data &amp; AI engineering the way the job actually feels.</h1>
+      <p class="q-ab-lede">Dagdeep turns data engineering and AI engineering into a game: every concept is something you <b>do</b>. Debug a broken pipeline, review a pull request, tune a Spark job, triage an inbox of alerts, then explain it all in a mock interview.</p>
+      <div class="q-res-b"><a class="btn big solid" href="#play">Start playing</a><a class="btn big" href="#work">Try a work task</a></div></section>
+    <div class="q-ab-stats">${stat.map(([n, l, s]) => `<div><b>${n}</b><span>${l}</span><small>${s}</small></div>`).join("")}</div>
+    <h2 class="q-sec-h">Ten ways to play</h2>
+    <div class="q-ab-modes">${modes.map(([i, t, d]) => `<div><span>${i}</span><b>${t}</b><p>${d}</p></div>`).join("")}</div>
+    <h2 class="q-sec-h">What's covered</h2>
+    <div class="q-ab-topics">${WORLDS.map(w => `<div><b>${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</b><p>${ZONES.filter(z => z.world === w.id).map(z => esc(z.title)).join(" · ")}</p></div>`).join("")}</div>
+    <h2 class="q-sec-h">How it's built</h2>
+    <div class="q-ab-build">
+      <div><b>No framework, no build step</b><p>A single-page app in plain JavaScript with a hash router. Each topic is a separate content module loaded on demand, so the first page stays small.</p></div>
+      <div><b>Content as data</b><p>~7,000 lines of hand-written scenarios, from incidents with terminal commands to log files and simulators. Six small engines turn them into very different games.</p></div>
+      <div><b>Real artefacts</b><p>Spark UI screenshots come from real PySpark runs. Command outputs, EXPLAIN plans and logs mirror what you'd see in production.</p></div>
+      <div><b>Accounts that sync</b><p>Progress saves in the browser. With Google sign-in (Firebase Auth), it syncs per user through Firestore, protected by per-user security rules. Export/import works for everyone.</p></div>
+      <div><b>Tested by bots</b><p>Playwright bots play every drill, mission, incident, work task and interview end to end, on desktop and phone widths, checking for errors and layout overflow.</p></div>
+      <div><b>Fast and accessible</b><p>Deferred scripts, lazy content and minified assets on GitHub Pages. Keyboard and screen-reader friendly, reduced-motion aware, light and dark themes.</p></div>
+    </div>
+    <section class="q-ab-me"><div><p class="q-eyebrow">Built by</p><h2>${esc(AUTHOR.name)}</h2><p>${esc(AUTHOR.role)}. I build near-real-time pipelines and lakehouses, and I made Dagdeep to teach the things that are hard to learn from docs: what breaks, why, and what to do about it.</p></div>
+      <div class="q-ab-links"><a class="btn" href="${AUTHOR.repo}" target="_blank" rel="noopener">⌨️ Source on GitHub</a><a class="btn" href="${AUTHOR.linkedin}" target="_blank" rel="noopener">in&nbsp; LinkedIn</a></div></section>
+  </div>`;
+  window.scrollTo(0, 0);
+}
+
 window.loadQuest = function(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null); drawAcct();
@@ -1528,6 +1599,7 @@ window.loadQuest = function(h){
   else if ((m = h.match(/^case-([a-z]+)-(\d+)$/))) caseView(m[1], +m[2]);
   else if ((m = h.match(/^work-([a-z]+)-(\d+)$/))) workView(m[1], +m[2]);
   else if (h === "interview") ivHub();
+  else if (h === "about") aboutView();
   else if ((m = h.match(/^work(?:\/([a-z]+))?$/))) workHub(m[1]);
   else if ((m = h.match(/^learn-([a-z]+)-(\d+)$/))) studyView(m[1], +m[2]);
   else if ((m = h.match(/^card-([a-z]+)-(\w+)$/))) studyView(m[1], 0, m[2]);

@@ -18,13 +18,24 @@ jobs:
       url: ${{ steps.deployment.outputs.page_url }}
     steps:
       - uses: actions/checkout@v4
+      - id: pages
+        uses: actions/configure-pages@v5
       - name: Prepare site folder
         run: |
           mkdir _site
-          cp index.html *.js *.css _site/
+          cp index.html *.js *.css manifest.webmanifest robots.txt _site/
           cp -r zones _site/zones
           cp -r img _site/img
-      - uses: actions/configure-pages@v5
+          # absolute URLs for social previews (og:image needs a full URL)
+          sed -i "s#__SITE_URL__#${{ steps.pages.outputs.base_url }}/#g" _site/index.html
+      - name: Minify JS and CSS
+        run: |
+          npm i -g esbuild@0.24 >/dev/null
+          for f in _site/*.js _site/zones/*.js; do
+            if [ "$(basename $f)" = "auth.js" ]; then esbuild "$f" --minify --format=esm --allow-overwrite --outfile="$f" --log-level=warning
+            else esbuild "$f" --minify --allow-overwrite --outfile="$f" --log-level=warning; fi
+          done
+          esbuild _site/quest.css --minify --allow-overwrite --outfile=_site/quest.css --log-level=warning
       - uses: actions/upload-pages-artifact@v3
         with:
           path: _site

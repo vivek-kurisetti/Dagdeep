@@ -72,6 +72,10 @@ window.DAGDEEP_FIREBASE = {
 
 7. Commit and push. The web config isn't a secret; the rules above ensure each signed-in user can only read and write their own document (`users/{uid}`). Guest progress is moved into the account on first sign-in.
 
+## Google sign-in
+
+Firebase project **dagdeep** is wired in `firebase-config.js` (the web config is public by design). Each signed-in user's progress is stored in Firestore at `users/{uid}`, protected by the rules below. Authorized domains (Firebase → Authentication → Settings) must include every domain that serves the site. Popups fall back to redirect, in-app browsers (LinkedIn, Instagram) get an "open in your browser" prompt, and anyone can export/import progress as JSON.
+
 ## Story missions and mock interviews everywhere
 
 Every one of the 26 zones has at least one story mission (🎬) and one mock interview round (🎤). New ones are written compactly with `QUEST.story(zoneId, {...})` and `QUEST.mock(zoneId, {...})` (formats documented next to `Q.story` in `quest-engine.js`). `#interview` lists every round. Answer options in missions, interviews, incidents and work tasks are shuffled on every play.
