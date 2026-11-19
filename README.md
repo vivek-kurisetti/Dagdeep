@@ -86,6 +86,12 @@ Firebase project **dagdeep** is wired in `firebase-config.js` (the web config is
 
 Diagrams are generated SVG from a small spec (`{nodes:{id:{c, r, label, sub, k}}, edges:[[from, to, label]]}`) and flip to top-to-bottom on phones.
 
+## Learning path and robustness
+
+- Every zone opens on **📘 Concepts**: every concept from the drills in order (basic, then expert), each expandable with a *Go deeper* section and a "Mark as understood" toggle with progress. Then Missions → Drills → Work → Interview → Cards.
+- **20 incidents** now (added Cassandra wide partition, MongoDB missing index, Snowflake runaway task, DynamoDB hot key, Delta MERGE conflict, LLM 429 retry storm, MCP tool rename, LangGraph state bloat). Each shows a **live business-impact counter** that keeps growing until you resolve it.
+- Zone files retry twice on network errors; any rendering error shows a friendly recovery screen instead of a blank page; a network-first service worker keeps played content available offline.
+
 ## Security
 
 - Static site: no server, no secrets. The Firebase web config is public by design.

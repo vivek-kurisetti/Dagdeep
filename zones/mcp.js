@@ -143,3 +143,59 @@ QUEST.mock("mcp", {title:"MCP round", who:"rohit", intro:"Rohit here. Let's talk
   ["Security concerns with MCP servers?","Over-privileged tools, **tool poisoning** (malicious descriptions), prompt injection via tool outputs, token handling (no passthrough of client tokens), untrusted third-party servers, and missing user consent for actions. Use OAuth, least privilege, allowlisted servers and approvals.",[["Over-privilege, tool poisoning, injection via outputs, token misuse, untrusted servers; mitigate with OAuth, least privilege, allowlists, approvals",1,"Good."],["None, it's a standard",0,"Red flag."],["Only rate limiting",0.5,"Narrow."]]],
   ["Why standardise tool access with MCP instead of custom integrations?","Build a server once and use it from any MCP client (IDEs, chat apps, agents); consistent discovery and schemas; easier governance and reuse; vendors and community provide servers.",[["Build once, use across clients, consistent discovery, easier governance",1,"Clear."],["It makes models smarter",0,"No."],["It's required by law",0,"No."]]]],
  learned:["Tools, resources, prompts.","Transports: stdio and Streamable HTTP.","Least privilege and trusted servers."]});
+
+/* ===== On-call desk: MCP incident ===== */
+QUEST.cases("mcp", [
+{
+ title:"Every assistant says \"Unknown tool\"", icon:"🔌", sev:2, clock:"09:50", channel:"inc-2437-mcp-tools", svc:"warehouse-mcp · internal MCP server", need:3,
+ impact:{label:"Failed tool calls", ic:"🧰", rate:2, start:1800},
+ terms:[["MCP server","A service exposing tools, resources and prompts to AI clients over the Model Context Protocol."],["tools/list","The request a client sends to discover which tools a server offers."],["listChanged","A capability: the server promises to notify clients (notifications/tools/list_changed) when its tools change."],["JSON-RPC error -32602","\"Invalid params\": often returned for an unknown tool name or bad arguments."],["Deprecation alias","Keeping an old tool name working for a while after a rename."]],
+ deep:[{t:"Tools are an API: version them", md:"Clients and models learn tool names and schemas. Renaming or changing required parameters is a **breaking change**: keep the old name as an alias for a deprecation period, announce it, and only remove it when usage drops to zero (log calls per tool name)."},{t:"Discovery and change notification", md:"Clients call «tools/list» on connect and often cache it. If the server declares «capabilities.tools.listChanged = true», it should send «notifications/tools/list_changed» after changes so clients refresh. Long-lived sessions (IDEs, desktop apps) otherwise keep calling the old names until they reconnect."}],
+ pager:`[y]WARN[/y]  warehouse-mcp  tool call errors [r]92%[/r]   (JSON-RPC -32602 Unknown tool)
+clients   Claude Desktop, IDE agents, Slack bot
+since     09:12 (deploy warehouse-mcp 2.0.0 at 09:10)`,
+ brief:"Analysts use an internal MCP server to query the warehouse from their AI assistants. This morning the server was upgraded to 2.0.0. Now almost every query fails.",
+ slack:[
+  {at:0, who:"meera", t:"My assistant keeps saying it can't run warehouse queries. Since this morning."},
+  {at:5, who:"priya", t:"Check the server's logs for what clients are calling.", cmd:"kubectl logs deploy/warehouse-mcp --since=40m | grep -i error | tail -5"},
+  {on:"unknown", who:"priya", t:"They're calling «query_warehouse». What does 2.0.0 actually offer?", cmd:"mcp-cli tools/list --server https://mcp.internal/warehouse"},
+  {on:"renamed", who:"dev", t:"Oops, I renamed it in the 2.0 refactor. Clients should pick up the new list… shouldn't they?", cmd:"mcp-cli initialize --server https://mcp.internal/warehouse"}
+ ],
+ hints:["What tool name are clients calling, and does the server still have it?","Compare the error log with tools/list.","Did the server tell clients the tool list changed? Check its declared capabilities."],
+ term:{host:"ops-bastion", user:"oncall", suggest:["kubectl logs deploy/warehouse-mcp --since=40m | grep -i error | tail -5","kubectl get pods -l app=warehouse-mcp"],
+  cmds:[
+  {m:["kubectl logs"], out:`09:41:02 ERROR jsonrpc id=8812 method=tools/call name=[r]query_warehouse[/r] -> -32602 Unknown tool: query_warehouse
+09:41:05 ERROR jsonrpc id=8813 method=tools/call name=[r]query_warehouse[/r] -> -32602 Unknown tool: query_warehouse
+[d]… 1,812 similar errors since 09:12[/d]`, clue:"unknown", unlock:["mcp-cli tools/list --server https://mcp.internal/warehouse"]},
+  {m:["mcp-cli tools/list"], out:`tools:
+  - name: [g]run_query[/g]        (read-only SQL, limit 10k rows)
+  - name: list_tables
+  - name: describe_table
+[d]-- no query_warehouse[/d]`, clue:"renamed", unlock:["mcp-cli initialize --server https://mcp.internal/warehouse","git -C ~/repos/warehouse-mcp log --oneline -3"]},
+  {m:["mcp-cli initialize"], out:`serverInfo: warehouse-mcp 2.0.0
+capabilities: { tools: { [r]listChanged: false[/r] }, resources: {} }`, clue:"nonotify"},
+  {m:["git -C ~/repos/warehouse-mcp log","git log"], out:`[y]e41a9c0[/y] (09:02, dev) 2.0.0: refactor, rename query_warehouse -> run_query, add row limit
+7b11d02 (Mon) add describe_table`, note:"Confirms the rename, which the tools/list output already showed."},
+  {m:["kubectl get pods"], out:`warehouse-mcp-7d9c-x1   1/1   Running   0   41m
+warehouse-mcp-7d9c-q8   1/1   Running   0   41m`, note:"The server is up and healthy. It's answering, just not with the tool clients ask for."}
+ ]},
+ dash:[
+  {title:"Tool calls by name (per min)", x:["08:30","09:00","09:15","09:30","09:45"], series:[{name:"query_warehouse", v:[44,47,46,45,47]}, {name:"run_query", v:[0,0,3,4,4]}], marks:[{i:2, label:"2.0.0"}], clue:"stillold"},
+  {title:"Server CPU %", unit:"%", x:["08:30","09:00","09:15","09:30","09:45"], series:[{name:"CPU", v:[12,11,6,5,5]}], note:"Low CPU. It's rejecting calls quickly, not overloaded."}
+ ],
+ clues:{unknown:"Clients call «query_warehouse» and get -32602 Unknown tool", renamed:"2.0.0 only offers «run_query»: the tool was renamed", nonotify:"The server declares listChanged: false, so connected clients never refresh their tool list", stillold:"After the deploy, ~45 calls/min still use the old name; only new sessions use run_query"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"2.0.0 renamed query_warehouse to run_query with no alias, and connected clients keep using their cached tool list because the server never signals a change", ok:true},
+  {t:"The MCP server is down", ok:false, why:"Pods are running and answering quickly.", say:[["ravi","Both pods are up and answering in milliseconds. They just reject the tool name."]]},
+  {t:"The warehouse is down", ok:false, why:"Calls fail before touching the warehouse.", say:[["meera","The error is Unknown tool. It never even reaches the warehouse."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Restore «query_warehouse» as a deprecated alias of run_query", kind:"must", why:"Every existing session works again immediately.", miss:[["meera","New sessions work, but my long-running IDE session and the Slack bot still fail until someone restarts them."]]},
+  {t:"Declare listChanged and send tools/list_changed on deploys; log calls per tool name to know when the alias can go", kind:"good", why:"Clients refresh automatically next time, and you can remove the alias safely."},
+  {t:"Add tool-name compatibility tests to the server's CI", kind:"good", why:"A rename becomes a deliberate, reviewed decision."},
+  {t:"Ask everyone to restart their assistants", kind:"meh", why:"Helps people who read Slack; bots and forgotten sessions keep failing."},
+  {t:"Roll back to 1.x permanently", kind:"meh", why:"Works, but throws away the useful row-limit safety in 2.0."}]},
+ post:{summary:"92% of warehouse tool calls failed for ~40 minutes after warehouse-mcp 2.0.0.", cause:"2.0.0 **renamed** the tool «query_warehouse» to «run_query» with no alias. Clients had cached the tool list at connect time, and the server declared «listChanged: false», so connected sessions kept calling the old name and got «-32602 Unknown tool».", prevent:["Treat tool names and schemas as a versioned API","Deprecation aliases","listChanged notifications"]},
+ learned:["MCP tool names are an **API contract**.","Clients cache tools/list; signal changes.","Deprecate, measure usage, then remove."],
+ cards:[]
+}
+]);

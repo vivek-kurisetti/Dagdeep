@@ -169,3 +169,65 @@ QUEST.mock("mongodb", {title:"MongoDB round", who:"rohit", intro:"Hey, Rohit her
   ["What do write concern and read concern do?","**Write concern** «w: 'majority'» waits until a majority of replica set members have the write, so it survives failover. **Read concern** «majority» returns only majority-committed data; «linearizable» for strongest reads. Combined with causal sessions you get read-your-writes across nodes.",[["Write concern sets how many nodes acknowledge; read concern sets how committed the data you read must be; majority/majority survives failover",1,"Correct and practical."],["They set encryption",0,"Unrelated."],["w:1 is always safe",0,"A primary can fail before replicating; the write is then rolled back."]]],
   ["A query is slow. How do you investigate?","«explain('executionStats')»: look for **COLLSCAN**, and compare «totalDocsExamined» to «nReturned». Build compound indexes following **ESR** (Equality, Sort, Range). Check the profiler and «$indexStats» for unused indexes.",[["explain executionStats, docs examined vs returned, ESR compound indexes",1,"Methodical."],["Add RAM",0.5,"May help a little; a collection scan stays a scan."],["Use $where JavaScript",0,"Slow and can't use indexes."]]]],
  learned:["Model for queries; embed bounded data.","Shard keys: cardinality, distribution, isolation.","Write/read concern majority for durable, consistent reads."]});
+
+/* ===== On-call desk: MongoDB incident ===== */
+QUEST.cases("mongodb", [
+{
+ title:"Checkout API p99 jumped to 3 seconds", icon:"🍃", sev:2, clock:"12:20", channel:"inc-2410-orders-slow", svc:"orders-api · MongoDB 7 replica set", need:4,
+ impact:{label:"Slow checkouts", ic:"🛒", rate:9, start:2100},
+ terms:[["COLLSCAN","MongoDB reading every document in a collection because no index matches the query."],["IXSCAN","Using an index to find documents."],["docsExamined / nReturned","How many documents MongoDB looked at vs returned. A big ratio means a missing index."],["ESR rule","Build compound indexes as Equality fields, then Sort fields, then Range fields."],["maxTimeMS","A per-query time limit so one slow query can't run forever."]],
+ deep:[{t:"Reading explain() like a pro", md:"«db.orders.find(q).sort(s).explain('executionStats')»:\n- **winningPlan.stage**: COLLSCAN (bad), IXSCAN + FETCH (good), SORT (in-memory sort, often bad).\n- **totalDocsExamined vs nReturned**: should be close.\n- **totalKeysExamined**: index entries scanned.\n- **executionTimeMillis**.\nAn in-memory SORT over many docs also risks the 100 MB sort limit."},{t:"Building indexes safely in production", md:"Since 4.2, index builds hold an exclusive lock only briefly at the start and end; the rest runs concurrently. Still: build during lower traffic, watch replication lag (secondaries build too), and consider a **rolling index build** (one member at a time) for very large collections."}],
+ pager:`[r]FIRING[/r]  orders-api p99 latency [r]3.1 s[/r] (SLO 300 ms)
+mongod primary CPU [r]94%[/r]
+since     11:45 (deploy orders-api v2.31 at 11:40)`,
+ brief:"Checkout is slow for everyone. The orders API shipped a new \"recent pending orders\" panel for merchants at 11:40.",
+ slack:[
+  {at:0, who:"dev", t:"Primary CPU at 94%. Do I upsize the instance?"},
+  {at:5, who:"priya", t:"Before buying hardware, find out what the database is busy with.", cmd:"mongosh --eval \"db.currentOp({secs_running:{$gt:1}})\""},
+  {on:"collscan", who:"priya", t:"COLLSCAN on 41M orders. Let's see the plan for that exact query.", cmd:"mongosh --eval \"db.orders.find({merchantId:'M-2031',status:'PENDING'}).sort({createdAt:-1}).limit(20).explain('executionStats')\""},
+  {on:"explain", who:"ravi", t:"Who added that query? It started with the 11:40 deploy.", cmd:"git -C ~/repos/orders-api show v2.31 --stat"}
+ ],
+ hints:["Look at what's running right now: db.currentOp().","Run explain('executionStats') on the slow query. COLLSCAN or IXSCAN?","Compare with the indexes that exist: db.orders.getIndexes()."],
+ term:{host:"ops-bastion", user:"oncall", suggest:["mongosh --eval \"db.currentOp({secs_running:{$gt:1}})\"","mongosh --eval \"rs.status().members\""],
+  cmds:[
+  {m:["mongosh --eval \"db.currentop"], out:`{ opid: 88123, secs_running: 2, ns: 'shop.orders',
+  command: { find: 'orders', filter: { merchantId: 'M-…', status: 'PENDING' }, sort: { createdAt: -1 }, limit: 20 },
+  planSummary: '[r]COLLSCAN[/r]', docsExamined: [r]18,420,113[/r] }
+[d]… 212 more operations like this one[/d]`, clue:"collscan", unlock:["mongosh --eval \"db.orders.find({merchantId:'M-2031',status:'PENDING'}).sort({createdAt:-1}).limit(20).explain('executionStats')\"","mongosh --eval \"db.orders.getIndexes()\""]},
+  {m:["mongosh --eval \"db.orders.find"], out:`winningPlan: { stage: 'SORT', inputStage: { stage: '[r]COLLSCAN[/r]' } }
+executionStats: { nReturned: 20, totalDocsExamined: [r]41,203,991[/r], executionTimeMillis: [r]2,914[/r] }`, clue:"explain"},
+  {m:["mongosh --eval \"db.orders.getindexes"], out:`[ { key: { _id: 1 } },
+  { key: { customerId: 1, createdAt: -1 } },
+  { key: { status: 1 } } ]
+[d]-- nothing starts with merchantId[/d]`, clue:"noindex"},
+  {m:["mongosh --eval \"rs.status"], out:`PRIMARY    health 1  optimeDate 12:20:04
+SECONDARY  health 1  lag [g]0.4 s[/g]
+SECONDARY  health 1  lag [g]0.6 s[/g]`, note:"Replication is healthy. The primary is busy, not broken."},
+  {m:["git -C ~/repos/orders-api show","git show"], out:`v2.31 (11:38, rohan) Merchant panel: recent pending orders
+ src/orders/merchantPanel.ts | 24 +++++
+[d]+ db.orders.find({merchantId, status:'PENDING'}).sort({createdAt:-1}).limit(20)
++ // called on every merchant dashboard load (~70/s)[/d]`, clue:"deploy"}
+ ]},
+ dash:[
+  {title:"orders-api p99 (ms)", x:["11:00","11:20","11:40","12:00","12:20"], series:[{name:"p99", v:[180,170,190,2600,3100]}], marks:[{i:2, label:"v2.31"}], note:"The symptom. It tells you when (11:40), not why."},
+  {title:"Documents examined per second", x:["11:00","11:20","11:40","12:00","12:20"], series:[{name:"docs examined/s", v:[90000,85000,95000,1.2e9,1.3e9]}, {name:"docs returned/s", v:[4000,3900,4200,5300,5400]}], marks:[{i:2, label:"v2.31"}], clue:"ratio"},
+  {title:"Connections", x:["11:00","11:20","11:40","12:00","12:20"], series:[{name:"connections", v:[420,410,430,610,640]}], note:"Connections rose because requests are slower and pile up. A consequence."}
+ ],
+ clues:{collscan:"Hundreds of running ops are COLLSCANs of orders by merchantId + status", explain:"explain(): COLLSCAN + in-memory SORT, 41M docs examined to return 20", noindex:"No index starts with merchantId", deploy:"v2.31 added the merchant panel query, called ~70 times/s", ratio:"Docs examined per second jumped from 90k to 1.3B at 11:40"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"v2.31 added a frequent query on {merchantId, status} sorted by createdAt with no matching index, so every call scans all 41M orders", ok:true},
+  {t:"The instance is too small", ok:false, why:"The same instance was fine at 11:39; the workload changed.", say:[["priya","It was at 30% CPU at 11:39. The hardware didn't shrink; the queries got 2,000× more expensive."]]},
+  {t:"Replication lag", ok:false, why:"Secondaries are under a second behind.", say:[["ravi","Lag is 0.5 s. That's not it."]]},
+  {t:"Too many connections", ok:false, why:"Connections rose because queries got slow.", say:[["priya","Connections are a symptom of slow queries, not the cause."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Create the index {merchantId: 1, status: 1, createdAt: -1} (ESR order)", kind:"must", why:"Seeks straight to the merchant's pending orders already sorted: 20 docs examined instead of 41M.", miss:[["dev","Feature-flagged the panel off, CPU is fine, but the merchant team wants it back today. It'll melt the DB again without an index."]]},
+  {t:"Disable the merchant panel with its feature flag until the index is built", kind:"must", why:"Immediate relief for checkout while the index builds.", miss:[["arjun","Index is building (ETA 25 min) but checkout is still failing right now. Can we stop the bleeding first?"]]},
+  {t:"Add maxTimeMS to the panel query and a CI check that runs explain() on new queries", kind:"good", why:"One bad query can no longer take down checkout."},
+  {t:"Upsize the primary to 2× CPU", kind:"meh", why:"Costs double and 41M-doc scans at 70/s still saturate it."},
+  {t:"Route the panel to secondaries (secondaryPreferred)", kind:"meh", why:"Spreads the pain to secondaries, which then lag; still scanning."},
+  {t:"Drop the {status: 1} index to free memory", kind:"bad", why:"Other queries depend on it; now they scan too.", say:[["ravi","Dropped status_1… now the refunds job is COLLSCANning as well. Recreating it!"]]}]},
+ post:{summary:"Checkout p99 went from 180 ms to 3.1 s for 40 minutes after orders-api v2.31.", cause:"The new merchant panel ran «find({merchantId, status}).sort({createdAt:-1}).limit(20)» about 70 times a second. No index started with «merchantId», so each call did a **COLLSCAN of 41M orders** plus an in-memory sort, driving primary CPU to 94% and slowing every query.", prevent:["explain() check for new queries in CI","maxTimeMS on non-critical queries","Feature flags for new DB-heavy features"]},
+ learned:["High CPU on a DB? First ask **what it's doing** (currentOp), not how big it is.","docsExamined ≫ nReturned = missing index.","Compound index order: **Equality, Sort, Range**."],
+ cards:[]
+}
+]);

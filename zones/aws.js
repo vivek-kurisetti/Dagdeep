@@ -219,3 +219,60 @@ QUEST.mock("aws", {title:"AWS data platform round", who:"farah", intro:"Farah he
   ["How do you secure a data lake on AWS?","Least-privilege **IAM roles** per job, **Lake Formation** for table/column/row-level permissions, **KMS** encryption, bucket policies blocking public access, VPC endpoints, CloudTrail for audit, and tag-based access for PII.",[["IAM least privilege, Lake Formation fine-grained access, KMS, blocked public access, VPC endpoints, CloudTrail",1,"Layered."],["Make the bucket private",0.5,"Necessary, far from sufficient."],["Share one admin key with all jobs",0,"Red flag."]]],
   ["Glue vs EMR vs Athena: when do you use each?","**Athena**: serverless SQL on S3, ad hoc and light transforms, pay per scan. **Glue**: serverless Spark ETL + Data Catalog, good for scheduled jobs without cluster ops. **EMR** (or EMR Serverless): full control, big/long Spark/Flink workloads, spot instances, tuning.",[["Athena for SQL on S3, Glue for serverless ETL + catalog, EMR for big, tunable Spark/Flink",1,"Clear trade-offs."],["They're interchangeable",0,"Different cost and control models."],["Always EMR",0.5,"Overkill for small jobs."]]]],
  learned:["Bytes scanned drives Athena cost.","S3 is strongly consistent, not transactional.","Pick Athena/Glue/EMR by workload."]});
+
+/* ===== On-call desk: AWS DynamoDB incident ===== */
+QUEST.cases("aws", [
+{
+ title:"Wallet writes throttled at 40% capacity", icon:"🧨", sev:1, clock:"13:15", channel:"inc-2420-wallet-throttle", svc:"wallet-svc · DynamoDB wallet_ledger",
+ impact:{label:"Failed wallet top-ups", ic:"👛", rate:6, start:3800},
+ terms:[["WCU","Write capacity unit: one write per second of up to 1 KB."],["Partition","DynamoDB splits a table into partitions by partition key; each partition handles up to ~1,000 WCU and 3,000 RCU per second."],["Hot key","One partition key getting far more traffic than others. Its partition throttles even when the table has spare capacity."],["Adaptive capacity","DynamoDB shifts capacity toward hot partitions, but it can't exceed per-partition limits for a single key."],["Contributor Insights","A CloudWatch feature that shows the most-accessed and most-throttled keys."]],
+ deep:[{t:"Table capacity vs partition limits", md:"Provisioned (or on-demand) capacity is spread across partitions. A single **partition key value** can never exceed ~**1,000 WCU/s**, no matter how much capacity the table has. So a table at 40% of 25,000 WCU can still throttle if one key wants 2,500 writes/s. On-demand mode has the same per-key limit."},{t:"Patterns for counters and hot keys", md:"- **Don't** keep a global counter item updated on every request.\n- Use **DynamoDB Streams** → Lambda/Kinesis to aggregate counts asynchronously.\n- Or **shard** the counter: «COUNTER#global#<0..N-1>» chosen randomly, sum on read.\n- Design partition keys with high cardinality and even access."}],
+ pager:`[r]FIRING[/r]  wallet-svc 5xx [r]4.2%[/r]  ProvisionedThroughputExceededException
+DynamoDB wallet_ledger  WriteThrottleEvents [r]2,310/min[/r]
+consumed WCU 10,140 / provisioned 25,000 ([y]41%[/y])`,
+ brief:"Wallet top-ups are failing. DynamoDB says writes are throttled, yet the table is using only **41%** of its provisioned write capacity. Yesterday the team shipped a \"live total top-ups today\" counter for the marketing screen.",
+ slack:[
+  {at:0, who:"dev", t:"Throttling at 41% usage makes no sense. Let me just double the provisioned WCU?"},
+  {at:5, who:"priya", t:"Throttling below table capacity usually means one **partition** is hot. Which keys are throttled?", cmd:"aws cloudwatch get-insight-rule-report --rule-name DynamoDBContributorInsights-PKT-wallet_ledger"},
+  {on:"hotkey", who:"priya", t:"One key takes 2,300 writes a second. What writes to COUNTER#global?", cmd:"git -C ~/repos/wallet-svc log -p -1 -- src/topup.py"},
+  {on:"code", who:"arjun", t:"That's the marketing counter. Can we turn it off without breaking top-ups?"}
+ ],
+ hints:["Throttling while the table is at 41%: think per-partition limits.","Find the most-throttled partition keys with Contributor Insights.","Find the code that writes that key."],
+ term:{host:"ops-bastion", user:"oncall", suggest:["aws dynamodb describe-table --table-name wallet_ledger","aws cloudwatch get-insight-rule-report --rule-name DynamoDBContributorInsights-PKT-wallet_ledger"],
+  cmds:[
+  {m:["aws dynamodb describe-table"], out:`TableName: wallet_ledger   BillingMode: PROVISIONED
+ProvisionedThroughput: { ReadCapacityUnits: 30000, WriteCapacityUnits: 25000 }
+KeySchema: [ { AttributeName: pk, KeyType: HASH }, { AttributeName: sk, KeyType: RANGE } ]
+ItemCount: 1,881,204,331`, note:"Plenty of provisioned capacity. The question is where the writes land."},
+  {m:["aws cloudwatch get-insight-rule-report"], out:`Top throttled partition keys (last 15 min)
+  [r]COUNTER#global[/r]          2,310 writes/s   throttled [r]1,310/s[/r]
+  WALLET#U-882113             3 writes/s       throttled 0
+  WALLET#U-104455             2 writes/s       throttled 0`, clue:"hotkey", unlock:["git -C ~/repos/wallet-svc log -p -1 -- src/topup.py"]},
+  {m:["git -C ~/repos/wallet-svc log","git log"], out:`commit [y]5c71b0e[/y] (Wed 18:10, neel) Live top-up total for the marketing screen
++    ddb.update_item(Key={"pk": "COUNTER#global", "sk": "today"},
++        UpdateExpression="ADD total :amt, n :one", ...)   [d]# inside the top-up transaction[/d]
+     ddb.transact_write_items(...)   [d]# credit wallet + ledger entry + counter[/d]`, clue:"code"},
+  {m:["aws cloudwatch get-metric-statistics"], out:`ConsumedWriteCapacityUnits (sum/min): 608,400  (~10,140/s)
+WriteThrottleEvents (sum/min): 2,310`, note:"Confirms throttling with lots of spare table capacity. Now find which key."}
+ ]},
+ dash:[
+  {title:"Consumed vs provisioned WCU", x:["Wed 12","Wed 18","Thu 00","Thu 09","Thu 13"], series:[{name:"consumed", v:[7800,9100,3200,9600,10140]}, {name:"provisioned", v:[25000,25000,25000,25000,25000]}], note:"The table never gets near its limit. Table-level capacity isn't the problem."},
+  {title:"Write throttle events / min", x:["Wed 12","Wed 18","Thu 00","Thu 09","Thu 13"], series:[{name:"throttles", v:[0,40,0,1500,2310]}], marks:[{i:1, label:"counter deploy"}], clue:"timing"}
+ ],
+ clues:{hotkey:"Contributor Insights: COUNTER#global takes 2,310 writes/s, with 1,310/s throttled", code:"Commit 5c71b0e updates COUNTER#global inside every top-up transaction", timing:"Throttles began with Wednesday's counter deploy and scale with daytime traffic"},
+ need:3,
+ cause:{q:"What's the root cause?", o:[
+  {t:"Every top-up now also updates a single COUNTER#global item; that one key exceeds the ~1,000 WCU/s per-partition limit, and because it's in the same transaction, whole top-ups fail", ok:true},
+  {t:"The table needs more provisioned WCU", ok:false, why:"It uses 41%; a single key can't use more than one partition's limit.", say:[["priya","We're at 41%. More capacity doesn't help one key that wants 2,300 writes/s."]]},
+  {t:"DynamoDB regional outage", ok:false, why:"Other keys write fine.", say:[["ravi","AWS Health is green and every other key is writing fine."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Remove the counter update from the top-up transaction (feature-flag it off now)", kind:"must", why:"Top-ups stop failing immediately.", miss:[["arjun","We sharded the counter… but it's still inside the payment transaction, so any counter hiccup still fails top-ups."]]},
+  {t:"Rebuild the live total from DynamoDB Streams (or a sharded counter) asynchronously", kind:"must", why:"Marketing keeps their number without touching the payment path.", miss:[["meera","Top-ups work again, but the marketing screen is blank and they're launching a campaign at 4. Can it come back safely?"]]},
+  {t:"Alarm on throttles per key with Contributor Insights", kind:"good", why:"Points straight at the hot key next time."},
+  {t:"Double provisioned WCU to 50,000", kind:"bad", why:"Twice the cost; the single key still throttles at its partition limit.", say:[["dev","50k WCU applied. Throttles: still ~1,300/s on the same key. And the bill doubled."]]},
+  {t:"Switch the table to on-demand", kind:"meh", why:"Removes capacity planning, not the per-key limit."}]},
+ post:{summary:"4% of wallet top-ups failed for ~19 hours with throttling, while the table used 41% of its capacity.", cause:"Commit «5c71b0e» added an «UpdateItem» on the single key «COUNTER#global» to **every top-up transaction**. One partition key is limited to ~1,000 WCU/s; at peak it received 2,300/s, so writes to it throttled and, being in the same transaction, **failed the whole top-up**.", prevent:["Never put analytics counters in the payment path","Hot-key reviews for new access patterns","Throttle alarms per key"]},
+ learned:["Throttling below table capacity = a **hot partition key**.","Per-key limits apply in provisioned and on-demand modes alike.","Keep side effects like counters out of critical transactions."],
+ cards:[]
+}
+]);

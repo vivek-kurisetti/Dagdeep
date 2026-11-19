@@ -142,3 +142,71 @@ QUEST.mock("cassandra", {title:"Cassandra round", who:"farah", intro:"Farah agai
   ["How does a write work internally?","Write to the **commit log** (durability) and the **memtable** (memory), acknowledge. Memtables flush to immutable **SSTables**; **compaction** merges them. Reads check memtable + SSTables, using **bloom filters** and partition indexes to skip files.",[["Commit log + memtable, flush to immutable SSTables, compaction merges; reads use bloom filters",1,"LSM-tree internals."],["Writes update rows in place on disk",0,"Cassandra never updates in place."],["Writes go to a leader node first",0,"Masterless: any node can coordinate."]]],
   ["What's repair and why does it matter?","Anti-entropy **repair** compares replicas (Merkle trees) and fixes differences. It must run within **gc_grace_seconds** (default 10 days), or a replica that missed a delete can bring deleted data back (zombie data). Use incremental repair or Reaper on a schedule.",[["It syncs replicas; it must run within gc_grace_seconds or deleted data can resurrect",1,"The key operational risk."],["It fixes corrupted SSTables only",0.5,"That's scrub."],["It's optional",0,"Skipping repair causes inconsistency and zombies."]]]],
  learned:["Query-first tables, bounded partitions.","R + W > RF for strong reads.","Repair within gc_grace_seconds."]});
+
+/* ===== On-call desk: Cassandra incident ===== */
+QUEST.cases("cassandra", [
+{
+ title:"Reads time out on three nodes", icon:"🐘", sev:2, clock:"19:40", channel:"inc-2402-events-timeouts", svc:"user-events · Cassandra 4.1, 12 nodes", need:4,
+ impact:{label:"Failed reads", ic:"❌", rate:35, start:41000},
+ terms:[["Partition","All rows sharing a partition key live together on the same replicas. It's the unit of distribution."],["Wide / large partition","A partition that grew far beyond ~100 MB. Reading or compacting it is slow and memory-hungry."],["Replica","Each partition is stored on RF nodes (here 3). A hot or huge partition hurts exactly those nodes."],["GC pause","The JVM stops to clean up memory. Long pauses make a node look dead to the others."],["Bucketing","Adding a time bucket (day, hour) to the partition key so no partition grows forever."]],
+ deep:[{t:"Why one partition can hurt three nodes", md:"A partition key hashes to one token range, owned by **RF replicas** (here 3). Every read and every compaction of that partition happens on those three nodes. A 2.4 GB partition means huge index entries, big memory allocations during reads and compaction, long **GC pauses**, and timeouts for *every* query those nodes coordinate, not only the bad key. Other nodes look healthy, which is the giveaway."},{t:"Designing partitions that stay bounded", md:"- Aim for partitions under ~100 MB and ~100k rows.\n- Add a **time bucket** to the key: «((user_id, day), event_ts)».\n- Protect against abusive keys: rate-limit or drop events from bots before they hit the database.\n- Watch «nodetool tablehistograms» max partition size and the «Writing large partition» warning («compaction_large_partition_warning_threshold»)."}],
+ pager:`[r]FIRING[/r]  user-events read timeouts  [r]3.1%[/r] of reads (SLO 0.1%)
+nodes     cass-04, cass-07, cass-11 p99 read [r]4.8 s[/r]; other 9 nodes p99 [g]6 ms[/g]
+since     ~17:00, getting worse`,
+ brief:"The **user-events** table stores app events per user. Reads for the activity feed time out, but only on **three** of twelve nodes. Nothing was deployed today.",
+ slack:[
+  {at:0, who:"ravi", t:"Only 3 nodes are sick. Same hardware as the rest. Weird."},
+  {at:5, who:"priya", t:"3 nodes is a number that should ring a bell: our replication factor is 3. Check the table's partition sizes.", cmd:"nodetool tablehistograms events user_events"},
+  {at:50, who:"dev", t:"Shall I add 4 more nodes? I can have them in 30 minutes."},
+  {on:"bigpart", who:"priya", t:"A 2.4 GB partition. Which key? Cassandra logs a warning when it compacts a large partition.", cmd:"grep -i 'large partition' /var/log/cassandra/system.log"},
+  {on:"botkey", who:"sana", t:"BOT-9921… that's a scraper we've seen before. It's been sending ~400 events/s with the same fake user id since this afternoon."}
+ ],
+ hints:["Three sick nodes out of twelve, with RF=3: what do those three nodes have in common?","Look at partition sizes with «nodetool tablehistograms». Is one partition enormous?","Find which partition key it is from the large-partition warning in system.log."],
+ term:{host:"cass-04", user:"oncall", suggest:["nodetool status","nodetool tablehistograms events user_events"],
+  cmds:[
+  {m:["nodetool status"], out:`Datacenter: ap-south-1
+--  Address     Load       Tokens  Owns   Host ID   Rack
+UN  10.6.1.4    [y]612 GiB[/y]    16      25.1%  …        1a
+UN  10.6.1.7    [y]598 GiB[/y]    16      24.9%  …        1b
+UN  10.6.1.11   [y]605 GiB[/y]    16      25.0%  …        1c
+UN  10.6.1.2    561 GiB    16      24.8%  …        1a
+[d]… all 12 nodes Up/Normal[/d]`, note:"All nodes are up and data is balanced. Nothing is down; three nodes are just slow."},
+  {m:["nodetool tablehistograms"], out:`events/user_events histograms
+Percentile  Read Latency  Partition Size   Cell Count
+50%         0.61 ms       2.3 KiB          12
+99%         88 ms         310 KiB          4,102
+Max         [r]4.9 s[/r]         [r]2.4 GiB[/r]          [r]31,881,204[/r]`, clue:"bigpart", unlock:["grep -i 'large partition' /var/log/cassandra/system.log"]},
+  {m:["grep -i 'large partition'","grep -i large"], out:`WARN  [CompactionExecutor:41] 17:12:03 BigTableWriter.java:274 - [y]Writing large partition events/user_events:BOT-9921 (1.1 GiB)[/y]
+WARN  [CompactionExecutor:44] 19:31:40 BigTableWriter.java:274 - [r]Writing large partition events/user_events:BOT-9921 (2.4 GiB)[/r]`, clue:"botkey", unlock:["nodetool getendpoints events user_events BOT-9921","grep GCInspector /var/log/cassandra/system.log"]},
+  {m:["nodetool getendpoints"], out:`10.6.1.4
+10.6.1.7
+10.6.1.11`, clue:"replicas"},
+  {m:["grep gcinspector","grep -i gc"], out:`INFO  [Service Thread] 19:35:12 GCInspector.java:299 - G1 Young Generation GC in 1120ms
+WARN  [Service Thread] 19:36:40 GCInspector.java:299 - [r]G1 Old Generation GC in 8412ms[/r]. Heap 15.6 GiB / 16 GiB`, clue:"gc"},
+  {m:["nodetool compactionstats"], out:`pending tasks: 14
+compaction  events  user_events  [y]2.1 GiB / 2.4 GiB[/y]  bytes  87%`, note:"14 pending compactions is moderate. Notice what's being compacted, though: the giant partition."},
+  {m:["df -h"], out:`/dev/nvme1n1  1.7T  612G  1.1T  36% /var/lib/cassandra`, note:"Plenty of disk. Not a capacity problem."}
+ ]},
+ dash:[
+  {title:"Read p99 by node (ms)", x:["16:00","17:00","18:00","19:00","19:40"], series:[{name:"cass-04/07/11", v:[6,90,800,2600,4800]}, {name:"other 9 nodes", v:[6,6,6,7,6]}], marks:[{i:1, label:"17:00"}], clue:"threenodes"},
+  {title:"Events written per second, top user_id", x:["16:00","17:00","18:00","19:00","19:40"], series:[{name:"BOT-9921", v:[0,410,405,412,409]}, {name:"next highest user", v:[2,2,3,2,2]}], marks:[{i:1, label:"bot starts"}], clue:"botrate"},
+  {title:"Cluster CPU %", unit:"%", x:["16:00","17:00","18:00","19:00","19:40"], series:[{name:"avg", v:[31,33,35,36,37]}], note:"Average CPU barely moved. The pain is concentrated on three nodes, so cluster averages hide it."}
+ ],
+ clues:{bigpart:"Max partition size is 2.4 GiB (31M cells); p99 is 310 KiB", botkey:"The large partition is user_events:BOT-9921, growing since 17:12", replicas:"BOT-9921's replicas are exactly cass-04, cass-07 and cass-11", gc:"Those nodes show 8-second old-gen GC pauses with a full heap", threenodes:"Only three nodes are slow; the other nine are at 6 ms", botrate:"BOT-9921 writes ~410 events/s since 17:00; normal users write 2"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"A scraper bot writes ~400 events/s under one user id, growing a single 2.4 GB partition; its three replicas suffer huge reads/compactions and long GC pauses", ok:true},
+  {t:"The cluster is out of capacity", ok:false, why:"Nine nodes are idle at 6 ms; disk at 36%.", say:[["ravi","Nine nodes are fine at 6 ms and disks are a third full. It isn't capacity."]]},
+  {t:"Tombstones from deletes", ok:false, why:"No deletes on this table; the warning is about partition size.", say:[["priya","This table has no deletes. The warning is about a huge partition, not tombstones."]]},
+  {t:"A network problem in one rack", ok:false, why:"The three nodes are in three different racks.", say:[["ravi","cass-04, 07 and 11 are in racks 1a, 1b and 1c. Not one rack."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Block or rate-limit BOT-9921 at the API gateway", kind:"must", why:"Stops the partition growing right now.", miss:[["sana","Partition is still growing at 400 events/s. Stop the bot first."]]},
+  {t:"Delete (or TTL) the bot's partition and move the table to a bucketed key ((user_id, day), event_ts)", kind:"must", why:"Removes the monster and makes it impossible for any one user to grow a partition forever.", miss:[["priya","Bot's blocked, but a 2.4 GB partition still sits on three nodes and gets compacted and read. And any future heavy user can do this again."]]},
+  {t:"Alert on max partition size and the large-partition warning", kind:"good", why:"You'd catch it at 100 MB, not 2.4 GB."},
+  {t:"Add 4 more nodes", kind:"bad", why:"The partition still lives on the same 3 replicas: more nodes don't split a partition.", say:[["dev","4 nodes added, streaming data for an hour… and cass-04/07/11 still time out. The partition didn't move."]]},
+  {t:"Raise read_request_timeout to 30 s", kind:"bad", why:"Hides the timeouts; users wait 30 s instead and threads pile up.", say:[["ravi","Timeouts went down, but app threads are now stuck for 30 s and the feed API is falling over."]]},
+  {t:"Run a major compaction on all nodes", kind:"meh", why:"Heavy I/O for hours; doesn't remove a live, growing partition."}]},
+ post:{summary:"Feed reads timed out for ~3% of users for 2.5 hours. Only three of twelve nodes were affected.", cause:"A scraper wrote ~410 events/s under the fake user id «BOT-9921». The table is keyed by «user_id» alone, so all of it went into **one partition** that reached **2.4 GB / 31M cells**. Its three replicas (RF=3) spent their heap reading and compacting it, hit **8 s GC pauses**, and timed out on unrelated queries too.", prevent:["Bucket partitions by time","Rate-limit events per user at the edge","Alert on max partition size and large-partition warnings"]},
+ learned:["A few sick nodes = check what they **share**: the replicas of one partition.","Partitions must be **bounded**: add a time bucket.","More nodes don't split a hot or huge partition."],
+ cards:[]
+}
+]);

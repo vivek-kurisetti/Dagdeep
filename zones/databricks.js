@@ -138,3 +138,60 @@ QUEST.mock("databricks", {title:"Databricks & Delta round", who:"ana", intro:"An
   ["What does Unity Catalog give you?","Central **governance** across workspaces: three-level namespace (catalog.schema.table), fine-grained access (row/column), lineage, audit, and managing external locations and credentials in one place.",[["Central governance: namespaces, fine-grained access, lineage, audit, external locations",1,"Complete."],["A faster query engine",0,"That's Photon."],["A BI tool",0,"No."]]],
   ["Streaming in Databricks: Auto Loader vs Structured Streaming from Kafka?","**Auto Loader** («cloudFiles») incrementally ingests **new files** from cloud storage, with scalable file discovery and schema inference/evolution. **Structured Streaming from Kafka** reads events directly. Both checkpoint progress; Delta Live Tables can declare either with expectations.",[["Auto Loader for files landing in storage, Kafka source for event streams; both checkpointed",1,"Right tool per source."],["Auto Loader reads Kafka",0,"It reads files."],["Streaming doesn't checkpoint",0,"It must."]]]],
  learned:["Medallion layers.","Delta log = ACID on object storage.","Unity Catalog for governance."]});
+
+/* ===== On-call desk: Databricks incident ===== */
+QUEST.cases("databricks", [
+{
+ title:"Hourly MERGE keeps failing on a conflict", icon:"⚔️", sev:2, clock:"11:10", channel:"inc-2426-orders-merge", svc:"orders_silver · Delta Lake on Databricks", need:4,
+ impact:{label:"Silver data delay", ic:"⏳", rate:1, start:7200, unit:" s"},
+ terms:[["Delta transaction log","«_delta_log/» holds an ordered list of commits. Every write adds the next commit."],["Optimistic concurrency","Writers don't lock; at commit time Delta checks whether someone else changed the files it read. If so, it fails with a conflict."],["ConcurrentAppendException","Another writer added files to the same partitions your operation read."],["Partition predicate","A condition like dt = '2026-11-19' in the MERGE ON clause, so Delta knows which files a write can touch."],["Backfill","Re-running a pipeline over old dates to fix or reload data."]],
+ deep:[{t:"How Delta resolves concurrent writes", md:"Each operation records what it **read** (files/partitions) and what it **wrote**. At commit, Delta checks commits made since it started: if they added or removed files in the areas this operation read, it raises **ConcurrentAppendException** / **ConcurrentDeleteReadException**. Two MERGEs that touch **disjoint partitions** both succeed, if the MERGE condition makes the partitions explicit."},{t:"Running backfills safely", md:"- Restrict each MERGE to explicit partitions («ON t.dt = s.dt AND t.dt = '…'»).\n- Run backfills in a **separate window** or pause the hourly job.\n- Add retries with backoff for conflicts that are expected and harmless.\n- Communicate: a backfill on a shared table is a change to production."}],
+ pager:`[r]FIRING[/r]  job orders_silver_hourly  FAILED (3 runs in a row)
+error   io.delta.exceptions.[r]ConcurrentAppendException[/r]: Files were added to the root of the table by a concurrent update.
+impact  orders_silver is 2 hours stale; downstream gold dashboards stale`,
+ brief:"The hourly job MERGEs new orders into «orders_silver» (partitioned by «dt»). It has worked for months. This morning it started failing with a concurrency conflict.",
+ slack:[
+  {at:0, who:"meera", t:"Gold dashboards still show 9 AM numbers. Is silver stuck?"},
+  {at:5, who:"priya", t:"A conflict means someone else is writing to the same table. Look at the table's history.", cmd:"databricks sql \"DESCRIBE HISTORY prod.orders_silver LIMIT 6\""},
+  {on:"history", who:"ravi", t:"Two writers. What's job 8812?", cmd:"databricks jobs get-run 8812"},
+  {on:"backfill", who:"dev", t:"Ah, that's mine. I started a 90-day backfill this morning to fix the currency column. Didn't think it would clash."}
+ ],
+ hints:["Who else is writing? Check the Delta table history.","Look at the other job's run details.","Why do two MERGEs conflict even though they cover different days? Check the MERGE condition."],
+ term:{host:"dbx-cli", user:"oncall", suggest:["databricks sql \"DESCRIBE HISTORY prod.orders_silver LIMIT 6\"","databricks jobs list-runs --active-only"],
+  cmds:[
+  {m:["databricks sql \"describe history"], out:`version  timestamp  operation  job        operationParameters
+4412     10:58      MERGE      [y]run 8812[/y]   predicate: (t.order_id = s.order_id)
+4411     10:31      MERGE      [y]run 8812[/y]   predicate: (t.order_id = s.order_id)
+4410     09:02      MERGE      run 9001   predicate: (t.order_id = s.order_id)
+4409     08:02      MERGE      run 9001   predicate: (t.order_id = s.order_id)`, clue:"history", unlock:["databricks jobs get-run 8812"]},
+  {m:["databricks jobs list-runs"], out:`run 8812  orders_backfill_currency   RUNNING since 09:40   (dates 2026-08-21 … 2026-11-18)
+run 9214  orders_silver_hourly       FAILED  10:00, 10:05, 11:00`, clue:"twojobs"},
+  {m:["databricks jobs get-run"], out:`run 8812: orders_backfill_currency (started by dev@ at 09:40)
+  for each dt in 90 days: MERGE INTO prod.orders_silver t USING src s [r]ON t.order_id = s.order_id[/r] …`, clue:"backfill", unlock:["cat jobs/orders_silver_hourly.sql"]},
+  {m:["cat jobs/orders_silver_hourly.sql","cat jobs"], out:`MERGE INTO prod.orders_silver t
+USING new_orders s
+[r]ON t.order_id = s.order_id[/r]          -- no partition predicate
+WHEN MATCHED THEN UPDATE SET * WHEN NOT MATCHED THEN INSERT *`, clue:"nopred"},
+  {m:["databricks clusters get"], out:`cluster orders-etl  state RUNNING  workers 8/8  no recent restarts`, note:"Cluster is healthy. This is a data-concurrency problem, not compute."}
+ ]},
+ dash:[
+  {title:"orders_silver commits per hour by job", x:["07:00","08:00","09:00","10:00","11:00"], series:[{name:"hourly job", v:[1,1,1,0,0]}, {name:"backfill run 8812", v:[0,0,1,3,2]}], marks:[{i:2, label:"backfill starts"}], clue:"timing"},
+  {title:"Cluster CPU %", unit:"%", x:["07:00","08:00","09:00","10:00","11:00"], series:[{name:"CPU", v:[44,46,52,61,58]}], note:"Busy but healthy. Not the cause."}
+ ],
+ clues:{history:"Table history shows MERGE commits from another run (8812) between the hourly ones", twojobs:"A 90-day backfill (run 8812) has been running since 09:40", backfill:"The backfill MERGEs on order_id only, with no partition predicate", nopred:"The hourly MERGE also has no partition predicate (ON order_id only)", timing:"Hourly commits stopped exactly when the backfill began"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"A 90-day backfill MERGEs into the same table while the hourly job runs; neither MERGE limits partitions, so each reads the whole table and Delta's optimistic concurrency fails the hourly commit", ok:true},
+  {t:"The cluster is too small", ok:false, why:"It's a commit conflict, not a resource error.", say:[["ravi","The error is ConcurrentAppendException, not out-of-memory. Bigger clusters conflict just the same."]]},
+  {t:"The Delta log is corrupted", ok:false, why:"History is readable and commits keep succeeding for the backfill.", say:[["priya","The log is fine: the backfill commits every 30 minutes."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Pause the backfill, let the hourly job catch up, then resume the backfill outside the hourly window", kind:"must", why:"Gets silver fresh again now.", miss:[["meera","MERGE conditions are updated in the repo, but both jobs are still fighting right now and silver is 3 hours stale."]]},
+  {t:"Add partition predicates to both MERGEs (e.g. ON t.dt = s.dt AND t.dt IN (…))", kind:"must", why:"Writers touching disjoint dates no longer conflict, and MERGEs read far fewer files.", miss:[["priya","Silver caught up, but next time anyone backfills, the same conflict comes back. The MERGEs still read the whole table."]]},
+  {t:"Retry with backoff on ConcurrentAppendException in the hourly job", kind:"good", why:"Harmless conflicts resolve themselves."},
+  {t:"A shared calendar/lock for backfills on production tables", kind:"good", why:"Backfills are production changes."},
+  {t:"Manually delete the backfill's commits from _delta_log", kind:"bad", why:"Corrupts the table for every reader.", say:[["meera","Every query on orders_silver now fails: 'version 4411 not found'. What happened?!"]]},
+  {t:"Run the hourly job on a bigger cluster", kind:"bad", why:"Same conflict, more cost.", say:[["dev","Bigger cluster, same ConcurrentAppendException."]]}]},
+ post:{summary:"orders_silver went 2+ hours stale; three hourly runs failed with ConcurrentAppendException.", cause:"A 90-day backfill was started on the same Delta table during business hours. Both it and the hourly job MERGE with «ON t.order_id = s.order_id» and **no partition predicate**, so each operation read the whole table. With Delta's **optimistic concurrency**, the hourly commit failed whenever the backfill committed first.", prevent:["Partition predicates in every MERGE","Backfill windows and announcements","Retry with backoff for conflicts"]},
+ learned:["Delta uses optimistic concurrency: conflicts happen at **commit**.","Partition predicates make concurrent writers independent.","Never edit «_delta_log» by hand."],
+ cards:[]
+}
+]);

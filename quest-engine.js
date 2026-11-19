@@ -50,7 +50,7 @@ const CAST = {priya:["Priya","Tech lead",205], arjun:["Arjun","Finance",28], rav
 const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }, more(id, levels){ const Z = this.data[id]; if (Z) Z.levels.push(...levels); }};
 const ld = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k)) || {}); } catch(e){ return d; } };
 const raw = k => { try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } };
-const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, wk:{}, sd:{}, ach:{}, chest:{}});
+const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, wk:{}, sd:{}, rd:{}, ach:{}, chest:{}});
 const DEF_PR = () => ({xp:0, streak:0, last:null});
 let NS = "";
 const KQ = () => "dagdeep-quest-v1" + NS, KP = () => "dagdeep-profile-v1" + NS;
@@ -157,12 +157,32 @@ function addXP(n){
   const after = rank(PR.xp).name;
   if (after !== before){ toast(`Promoted to <b>${esc(after)}</b>`); confetti(); }
 }
-function needZone(id, cb){
+const zoneWait = {};
+function needZone(id, cb, tries = 0){
   if (Q.data[id]) return cb();
-  const s = document.createElement("script"); s.src = `zones/${id}.js`;
-  s.onload = () => cb(); s.onerror = () => { root().innerHTML = `<div class="q-wrap"><p class="q-empty">Couldn't load this zone. Check your connection and refresh.</p><a class="btn" href="#play">Back to the map</a></div>`; };
+  if (!ZMAP[id]){ location.hash = "#play"; return; }
+  if (zoneWait[id] && !tries){ zoneWait[id].push(cb); return; }
+  zoneWait[id] = zoneWait[id] || [cb];
+  const s = document.createElement("script"); s.src = `zones/${id}.js` + (tries ? `?r=${tries}` : "");
+  s.onload = () => { const w = zoneWait[id] || []; delete zoneWait[id]; if (!Q.data[id]) return fail(); w.forEach(f => { try { f(); } catch(e){ showError(e); } }); };
+  const fail = () => {
+    s.remove();
+    if (tries < 2) return setTimeout(() => needZone(id, null, tries + 1), 600 * (tries + 1));
+    delete zoneWait[id];
+    root().innerHTML = `<div class="q-wrap q-errbox"><h2>Couldn't load ${esc(ZMAP[id].title)}</h2><p class="muted">${navigator.onLine === false ? "You seem to be offline." : "The network hiccuped."} Your progress is safe.</p><button class="btn big solid" data-retry>Try again</button> <a class="btn big" href="#play">Home</a></div>`;
+    const b = root().querySelector("[data-retry]"); if (b) b.onclick = () => route();
+  };
+  s.onerror = fail;
   document.head.appendChild(s);
 }
+// Last line of defence: show a friendly message instead of a blank or half-drawn page.
+function showError(e){
+  console.error(e);
+  const r = root(); if (!r) return;
+  r.innerHTML = `<div class="q-wrap q-errbox"><h2>Something went wrong on this page</h2><p class="muted">Your progress is saved. Try again, or go back home.</p><div class="q-res-b"><button class="btn big solid" data-retry>Try again</button><a class="btn big" href="#play">Home</a></div><details><summary>Details</summary><pre>${esc(String(e && (e.stack || e.message) || e)).slice(0, 800)}</pre></details></div>`;
+  const b = r.querySelector("[data-retry]"); if (b) b.onclick = () => location.reload();
+}
+window.addEventListener("unhandledrejection", e => console.warn("Unhandled promise rejection", e.reason));
 const unlocked = (id, li) => li === 0 || (P.stars[id] || {})[li - 1] > 0;
 
 /* ================= Achievements ================= */
@@ -305,11 +325,13 @@ function zoneView(id, tab){
   needZone(id, () => {
     const Z = Q.data[id]; P.last = id; P.lv[id] = Z.levels.length; save();
     document.title = `${z.title} · Dagdeep`;
-    const tabs = [];
+    // Learning path: understand the concepts, then use them in missions, drills, real work and interviews.
+    const tabs = [["learn", "📘 Concepts"]];
     if (Z.missions) tabs.push(["missions", "🎬 Missions"]);
+    tabs.push(["drills", "🏋️ Drills"]);
     if (Z.cases || Z.work || ALLW().some(c => c.z === id)) tabs.push(["debug", "💼 Work"]);
     if (Z.interviews) tabs.push(["interview", "🎤 Interview"]);
-    tabs.push(["drills", "🏋️ Drills"], ["cards", "🃏 Cards"]);
+    tabs.push(["cards", "🃏 Cards"]);
     if (!tabs.some(t => t[0] === tab)) tab = tabs[0][0];
     const got = new Set(P.cards[id] || []);
     root().innerHTML = `<div class="q-wrap q-zonev" style="--h:${z.hue}">
@@ -319,6 +341,16 @@ function zoneView(id, tab){
       <div class="q-panel">${zonePanel(id, Z, tab, got)}</div></div>`;
     root().querySelectorAll(".q-tabs button").forEach(b => b.onclick = () => { history.replaceState(null, "", `#zone-${id}/${b.dataset.t}`); zoneView(id, b.dataset.t); });
     root().querySelectorAll(".q-card.got").forEach(b => b.onclick = () => b.classList.toggle("open"));
+    root().querySelectorAll(".q-cread").forEach(b => b.onclick = e => {
+      e.preventDefault(); P.rd[id] = P.rd[id] || {}; const k = b.dataset.k, on = !P.rd[id][k];
+      if (on) P.rd[id][k] = 1; else delete P.rd[id][k]; save();
+      b.setAttribute("aria-pressed", on); b.textContent = on ? "✓ Understood" : "Mark as understood";
+      b.closest(".q-concept").classList.toggle("read", on);
+      const n = Object.keys(P.rd[id]).length, tot = root().querySelectorAll(".q-concept").length, pg = root().querySelector(".q-lprog");
+      if (pg){ pg.querySelector("b").textContent = `${n}/${tot}`; pg.querySelector("i").style.width = (n / tot * 100) + "%"; }
+      if (on && n === tot) { toast("📘 Every concept understood. Time for the missions!"); }
+    });
+    root().querySelectorAll(".q-lgo").forEach(b => b.onclick = () => { history.replaceState(null, "", `#zone-${id}/${b.dataset.t}`); zoneView(id, b.dataset.t); window.scrollTo(0, 0); });
   });
 }
 function epList(id, list, kind){
@@ -327,7 +359,22 @@ function epList(id, list, kind){
       <div class="q-ep-t"><small>${kind === "iv" ? "Mock interview" : "Mission " + (i + 1)}${M.place ? " · " + esc(M.place) : ""}</small><b>${esc(M.title)}</b><p>${fm(M.setup || "")}</p>${s ? stars(s, "sm") : ""}</div>
       <span class="q-ep-go">${open ? (s ? "Replay" : "Play") : ""}</span></${open ? "a" : "div"}>`; }).join("")}</div>`;
 }
+function conceptsPanel(id, Z){
+  const rd = P.rd[id] || {}, secs = [];
+  Z.levels.forEach((L, li) => { const ls = (L.rounds || []).map((r, ri) => [r, ri]).filter(([r]) => r[0] === "learn"); if (ls.length) secs.push({L, li, ls}); });
+  const tot = secs.reduce((a, s) => a + s.ls.length, 0), n = secs.reduce((a, s) => a + s.ls.filter(([, ri]) => rd[`${s.li}.${ri}`]).length, 0);
+  let lastExpert = false;
+  return `<p class="q-lead">Start here. Read each concept, open <b>Go deeper</b> for the internals, and mark it understood. Then use it in missions, drills, real work tasks and interviews.</p>
+    <div class="q-lprog"><span>Concepts understood</span><b>${n}/${tot}</b><div><i style="width:${tot ? n / tot * 100 : 0}%"></i></div></div>
+    ${secs.map(({L, li, ls}) => { const ex = !!L.act; const head = ex && !lastExpert ? `<p class="q-lexpert">Expert concepts</p>` : ""; lastExpert = ex || lastExpert;
+      return `${head}<section class="q-lsec"><header><span>${li + 1}</span><div><b>${esc(L.t)}</b><small>${ls.length} concept${ls.length > 1 ? "s" : ""} · <a href="#lvl-${id}-${li}">practise in drill ${li + 1}</a></small></div></header>
+      ${ls.map(([r, ri]) => { const k = `${li}.${ri}`, on = !!rd[k];
+        return `<details class="q-concept ${on ? "read" : ""}"><summary><span class="q-cdot">${on ? "✓" : ""}</span><div><b>${fm(r[1])}</b><small>${esc(String(r[2]).replace(/<[^>]+>|[*«»]/g, "").slice(0, 110))}…</small></div></summary>
+          <div class="q-cbody">${learnHTML(r, true)}<button class="btn q-cread" data-k="${k}" aria-pressed="${on}">${on ? "✓ Understood" : "Mark as understood"}</button></div></details>`; }).join("")}</section>`; }).join("")}
+    <div class="q-lnext"><b>Ready to use it?</b><div>${Z.missions ? `<button class="btn big solid q-lgo" data-t="missions">🎬 Play the missions →</button>` : ""}<button class="btn big q-lgo" data-t="drills">🏋️ Drills</button><button class="btn big q-lgo" data-t="debug">💼 Real work</button></div></div>`;
+}
 function zonePanel(id, Z, tab, got){
+  if (tab === "learn") return conceptsPanel(id, Z);
   if (tab === "debug") return `<p class="q-lead">Real tasks from the job: incidents, PR reviews, log hunts, tuning, postmortems and triage.</p>${workList(ALLW().filter(c => c.z === id))}`;
   if (tab === "missions") return `<p class="q-lead">Real situations from a working day. Make the calls, watch the meters, collect detailed cards.</p>${epList(id, Z.missions, "ms")}`;
   if (tab === "interview"){
@@ -912,7 +959,15 @@ const CASES = [
   {z:"dbt", i:0, icon:"📈", sev:1, title:"Revenue doubled overnight", svc:"finance mart · dbt on Snowflake", topics:"Incremental models · unique_key · tests", study:["dbt:1","dbt:6","dbt:2"]},
   {z:"redshift", i:0, icon:"🧭", sev:3, title:"The 9 AM dashboard takes 6 minutes", svc:"exec-dashboard · Redshift ra3", topics:"Distribution keys · sort keys · statistics", study:["redshift:1","redshift:2","redshift:5"]},
   {z:"agents", i:0, icon:"🔁", sev:1, title:"An agent burned ₹4 lakh overnight", svc:"refund-agent · LangGraph", topics:"Agent loops · step limits · tool errors · cost", study:["agents:1","agents:6","agents:7","observability:8"]},
-  {z:"aiattack", i:0, icon:"🕵️", sev:1, title:"The bot emailed customer data outside", svc:"support-agent · tools: email, CRM", topics:"Indirect prompt injection · least privilege · exfiltration", study:["aiattack:0","aiattack:2","aiattack:6","aidefense:2"]}
+  {z:"aiattack", i:0, icon:"🕵️", sev:1, title:"The bot emailed customer data outside", svc:"support-agent · tools: email, CRM", topics:"Indirect prompt injection · least privilege · exfiltration", study:["aiattack:0","aiattack:2","aiattack:6","aidefense:2"]},
+  {z:"cassandra", i:0, icon:"🐘", sev:2, title:"Reads time out on three nodes", svc:"user-events · Cassandra", topics:"Partitions · replicas · wide partitions · GC", study:["cassandra:0","cassandra:1","cassandra:8"]},
+  {z:"mongodb", i:0, icon:"🍃", sev:2, title:"Checkout API p99 jumped to 3 seconds", svc:"orders-api · MongoDB", topics:"Indexes · explain() · ESR rule", study:["mongodb:1","mongodb:6"]},
+  {z:"snowflake", i:0, icon:"🔥", sev:2, title:"Credits burning 6× faster since yesterday", svc:"Snowflake · TRANSFORM_WH", topics:"Warehouses · tasks · cost engineering", study:["snowflake:0","snowflake:6","snowflake:8"]},
+  {z:"aws", i:0, icon:"🧨", sev:1, title:"Wallet writes throttled at 40% capacity", svc:"wallet-svc · DynamoDB", topics:"Partition limits · hot keys · adaptive capacity", study:["aws:3","aws:8"]},
+  {z:"databricks", i:0, icon:"⚔️", sev:2, title:"Hourly MERGE keeps failing on a conflict", svc:"orders_silver · Delta Lake", topics:"Delta log · optimistic concurrency · backfills", study:["databricks:0","databricks:5"]},
+  {z:"llm", i:0, icon:"🚦", sev:1, title:"Assistant timing out with 429s", svc:"merchant-assistant · LLM gateway", topics:"Token limits · retries · context budgets", study:["llm:0","llm:6","llm:9"]},
+  {z:"mcp", i:0, icon:"🔌", sev:2, title:"Every assistant says \"Unknown tool\"", svc:"warehouse-mcp · MCP server", topics:"Tool contracts · discovery · versioning", study:["mcp:1","mcp:5","mcp:6"]},
+  {z:"langgraph", i:0, icon:"🐢", sev:3, title:"Agent replies get slower every day", svc:"support-agent · LangGraph", topics:"State · reducers · checkpointers · token budgets", study:["langgraph:1","langgraph:2","langgraph:8"]}
 ];
 Q.CASES = CASES;
 const csStars = (z, i) => ((P.cs || {})[z] || {})[i] || 0;
@@ -1011,6 +1066,8 @@ function desk(id, ci, z, Z, C){
   const el = () => Math.floor((Date.now() - st.t0) / 1000);
   const mmss = s => `${String(Math.floor(s / 60)).padStart(2, "0")}:${String(s % 60).padStart(2, "0")}`;
   const log = (ic, t) => st.log.push({s:el(), ic, t});
+  // Live business impact that keeps growing until the incident is resolved.
+  const impactText = s => { const I = C.impact; if (!I) return ""; const v = Math.round((I.start || 0) + I.rate * s); return (I.pre || "") + v.toLocaleString("en-IN") + (I.unit || ""); };
   const apps = [["slack", "💬", "Slack"], ["term", "⌨️", "Terminal"]];
   if (C.dash) apps.push(["dash", "📈", "Dashboards"]);
   if (C.ui) apps.push(["ui", "🖥", C.uiName || "Console"]);
@@ -1021,7 +1078,7 @@ function desk(id, ci, z, Z, C){
     <div class="q-incbar"><a class="q-x" href="#work/incident" aria-label="Leave">✕</a>
       <span class="q-sev s${sev}">SEV-${sev}</span>
       <div class="q-inc-t"><b>${esc(C.title)}</b><small>#${esc(C.channel || "inc")} · ${esc(C.svc || z.title)}</small></div>
-      <span class="q-inc-st"><span class="q-inc-clock" title="Time since you acknowledged">⏱ 00:00</span><span class="q-inc-clues" title="Clues found · ${need} needed to write up">🔎 0/${clueIds.length}</span></span></div>
+      <span class="q-inc-st">${C.impact ? `<span class="q-inc-imp" title="${esc(C.impact.label)}">${esc(C.impact.ic || "💸")} <b>0</b></span>` : ""}<span class="q-inc-clock" title="Time since you acknowledged">⏱ 00:00</span><span class="q-inc-clues" title="Clues found · ${need} needed to write up">🔎 0/${clueIds.length}</span></span></div>
     <nav class="q-dock" role="tablist">${apps.map(([k, ic, l]) => `<button role="tab" data-app="${k}" aria-selected="${k === "slack"}"><span>${ic}</span><small>${l}</small><i class="q-badge-n" hidden></i></button>`).join("")}</nav>
     <div class="q-apps">
       <section class="q-app" data-app="slack"><p class="q-app-tip">Your team. They share leads and react to what you ship.</p><div class="q-slack-h"># ${esc(C.channel || "inc")}</div><div class="q-slack"></div>
@@ -1110,6 +1167,7 @@ function desk(id, ci, z, Z, C){
   const tick = setInterval(() => {
     if (!alive()){ clearInterval(tick); return; }
     const s = el(); const ce = $(".q-inc-clock"); if (ce) ce.textContent = "⏱ " + mmss(s);
+    const ie = $(".q-inc-imp b"); if (ie) ie.textContent = impactText(s);
     (C.slack || []).forEach((m, k) => { if (m.at != null && !st.fired.has(k) && s >= m.at){ st.fired.add(k); post([m]); } });
   }, 1000);
   (C.slack || []).forEach((m, k) => { if (m.at === 0){ st.fired.add(k); } });
@@ -1253,7 +1311,7 @@ function desk(id, ci, z, Z, C){
     const good = sel.filter(o => o.kind === "must" || o.kind === "good"), meh = sel.filter(o => o.kind === "meh");
     root().innerHTML = `<div class="q-wrap q-postm" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
       <div class="q-res won"><p class="q-eyebrow">Incident resolved · ${wall(secs)}</p><h2>✅ ${esc(C.title)}</h2>${stars(s, "big")}
-        <div class="q-res-stats"><span><small>Time to resolve</small><b>${mmss(secs)}</b></span><span><small>Commands</small><b>${st.cmds}</b></span><span><small>Hints</small><b>${st.hints}</b></span><span><small>Wrong calls</small><b>${st.wrong}</b></span><span><small>XP</small><b>+${gain}</b></span></div>
+        <div class="q-res-stats"><span><small>Time to resolve</small><b>${mmss(secs)}</b></span>${C.impact ? `<span><small>${esc(C.impact.label)}</small><b>${impactText(secs)}</b></span>` : ""}<span><small>Commands</small><b>${st.cmds}</b></span><span><small>Hints</small><b>${st.hints}</b></span><span><small>Wrong calls</small><b>${st.wrong}</b></span><span><small>XP</small><b>+${gain}</b></span></div>
         ${s < 3 ? `<p class="muted">3 stars: no wrong calls, at most 1 hint, and only flag real evidence.</p>` : ""}</div>
       <article class="q-pm"><header><small>POSTMORTEM · blameless</small><h2>${esc(C.title)}</h2><p>${esc(C.svc || "")} · SEV-${sev} · duration ${mmss(secs)}</p></header>
         ${C.post && C.post.summary ? `<section><h3>Summary</h3>${md(C.post.summary)}</section>` : ""}
@@ -1606,7 +1664,8 @@ function aboutView(){
 }
 
 Q._ = {esc, fm, md, root, stars, save, P, PR, addXP, toast, confetti, unlock, shuffle, reduce, ZMAP, refList, needZones, refZones, setKeys};
-window.loadQuest = function(h){
+window.loadQuest = function(h){ try { loadQuestInner(h); } catch(e){ showError(e); } };
+function loadQuestInner(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null); drawAcct();
   const ap = document.getElementById("qAcctPanel"); if (ap) ap.remove();
@@ -1634,3 +1693,5 @@ window.loadQuest = function(h){
   window.scrollTo(0, 0);
 };
 })();
+// Offline support: cache what you've played so it still works on a flaky connection.
+if ("serviceWorker" in navigator && location.protocol === "https:") window.addEventListener("load", () => navigator.serviceWorker.register("sw.js").catch(() => {}));

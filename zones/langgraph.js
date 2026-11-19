@@ -152,3 +152,68 @@ QUEST.mock("langgraph", {title:"LangGraph round", who:"rohit", intro:"Rohit here
   ["What does a checkpointer give you?","Persistence after each step: **resume** after crashes, **human-in-the-loop** pauses, **time travel** (replay/fork from a checkpoint), and conversation memory per «thread_id».",[["Resume, human-in-the-loop, time travel and per-thread memory",1,"Correct."],["Faster LLM calls",0,"No."],["Only logging",0.5,"Much more."]]],
   ["How do you stream progress to the UI?","«stream» with modes: «updates» (per-node state changes), «messages» (LLM tokens), «values» (full state), or custom events, so users see steps and tokens live.",[["stream() with updates/messages/values modes",1,"Right."],["Poll the database",0.5,"Clunky."],["You can't stream agents",0,"You can."]]]],
  learned:["State, nodes, edges, reducers.","Checkpointers enable resume and HITL.","Supervisor patterns for multi-agent."]});
+
+/* ===== On-call desk: LangGraph incident ===== */
+QUEST.cases("langgraph", [
+{
+ title:"Agent replies get slower every day", icon:"🐢", sev:3, clock:"11:45", channel:"inc-2442-agent-latency", svc:"support-agent · LangGraph + Postgres checkpointer", need:4,
+ impact:{label:"Extra spend today", ic:"💸", pre:"₹", rate:3, start:38000},
+ terms:[["State","The data a LangGraph graph carries between steps (here, the messages list)."],["Reducer","How node updates merge into state; «add_messages» appends to the list."],["Checkpointer","Saves the state after every step so threads can resume. Big state = big checkpoints."],["trim_messages","A helper to keep only the most recent or most relevant messages within a token budget."],["Out-of-band storage","Keeping large blobs (documents, tool results) elsewhere and putting only a reference in the state."]],
+ deep:[{t:"Why state size drives latency and cost", md:"Every model call sends the conversation in state. If each tool call appends a 180 KB JSON blob, a long-running thread re-sends megabytes each turn: more input tokens (cost), slower time-to-first-token, and checkpoint writes that grow on every step. The checkpoint table then grows without bound too."},{t:"Keeping agent state lean", md:"- Return **compact** tool results (the 5 fields the model needs, not the raw API payload).\n- Store large artefacts out-of-band; put an id and a summary in state.\n- **Trim or summarise** history before each model call (keep the system prompt, recent turns and a running summary).\n- Set a **retention/TTL** for old checkpoints and threads."}],
+ pager:`[y]WARN[/y]  support-agent p95 response [r]38 s[/r] (was 6 s two weeks ago)
+cost per conversation  [r]₹21[/r] (was ₹3)
+checkpoint DB size     [r]412 GB[/r] and growing ~25 GB/day`,
+ brief:"Nothing broke suddenly. The support agent has been getting slower and more expensive every day for two weeks, and the checkpoint database keeps growing. Two weeks ago the team added an «order_lookup» tool.",
+ slack:[
+  {at:0, who:"kai", t:"No errors, just slow and pricey. And the Postgres checkpoint table is huge."},
+  {at:5, who:"priya", t:"Slow + expensive + growing storage smells like state bloat. How big is a typical thread's state?", cmd:"psql -c \"select pg_size_pretty(avg(pg_column_size(checkpoint))) from checkpoints where created_at > now() - interval '1 day'\""},
+  {on:"bigstate", who:"priya", t:"3 MB per checkpoint! What's in the messages? Look at one trace.", cmd:"langsmith runs get r_771a --show-messages"},
+  {on:"rawjson", who:"kai", t:"That's order_lookup returning the whole order API payload. Let's see the tool code.", cmd:"cat agent/tools/order_lookup.py"}
+ ],
+ hints:["Growing cost and latency without errors: what's growing? Check state/checkpoint size.","Look at the messages inside one trace. What takes up the space?","Check what the new tool returns and how messages are kept."],
+ term:{host:"ai-ops", user:"oncall", suggest:["psql -c \"select count(*), pg_size_pretty(pg_total_relation_size('checkpoints')) from checkpoints\"","psql -c \"select pg_size_pretty(avg(pg_column_size(checkpoint))) from checkpoints where created_at > now() - interval '1 day'\""],
+  cmds:[
+  {m:["psql -c \"select count(*), pg_size_pretty(pg_total"], out:`  count   | pg_size_pretty
+----------+----------------
+ [y]1,882,004[/y] | [r]412 GB[/r]
+[d](no TTL: checkpoints since launch are kept)[/d]`, clue:"nottl"},
+  {m:["psql -c \"select pg_size_pretty(avg"], out:` pg_size_pretty
+----------------
+ [r]3.1 MB[/r]        [d](two weeks ago: 41 kB)[/d]`, clue:"bigstate", unlock:["langsmith runs get r_771a --show-messages"]},
+  {m:["langsmith runs get"], out:`thread t_99812 · step 14 · input tokens [r]58,204[/r]
+  [system]     1,920 tokens
+  [user]       "where is my order O-55120?"
+  [tool]       order_lookup → [r]{"order":{…412 fields…},"events":[…180 tracking events…],"raw_carrier_payload":…}[/r]  (18,412 tokens)
+  [tool]       order_lookup → (18,388 tokens)   [d]← same order looked up again[/d]
+  [tool]       order_lookup → (18,401 tokens)`, clue:"rawjson", unlock:["cat agent/tools/order_lookup.py","cat agent/graph.py"]},
+  {m:["cat agent/tools/order_lookup.py"], out:`@tool
+def order_lookup(order_id: str) -> str:
+    """Look up an order."""
+    r = orders_api.get(order_id, expand="all")
+    [r]return json.dumps(r)[/r]          # full payload, ~70 KB`, clue:"tool"},
+  {m:["cat agent/graph.py"], out:`class State(TypedDict):
+    messages: Annotated[list, [y]add_messages[/y]]     # append-only, never trimmed
+…
+response = model.invoke(state["messages"])          [d]# whole history every call[/d]`, clue:"notrim"},
+  {m:["llm-gw stats"], out:`provider latency p50 per 1k input tokens: 22 ms (flat for a month)`, note:"The provider isn't slower. We're sending far more tokens."}
+ ]},
+ dash:[
+  {title:"Avg input tokens per model call", x:["Wk-2","Wk-1.5","Wk-1","Wk-0.5","Now"], series:[{name:"input tokens", v:[4200,14800,26100,41900,58200]}], marks:[{i:0, label:"order_lookup added"}], clue:"tokgrowth"},
+  {title:"Conversations per day", x:["Wk-2","Wk-1.5","Wk-1","Wk-0.5","Now"], series:[{name:"conversations", v:[9100,9300,8900,9200,9150]}], note:"Traffic is flat. Each conversation got heavier."}
+ ],
+ clues:{nottl:"The checkpoint table holds 1.9M checkpoints (412 GB) with no TTL", bigstate:"Average checkpoint grew from 41 kB to 3.1 MB", rawjson:"Each order_lookup adds ~18k tokens of raw JSON to the messages, repeated on every lookup", tool:"order_lookup returns the full expanded order payload (~70 KB)", notrim:"Messages use add_messages and are never trimmed; the whole history goes to the model every call", tokgrowth:"Input tokens per call grew from 4k to 58k since order_lookup was added"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"order_lookup dumps ~70 KB of raw JSON into an append-only, never-trimmed message state, so every call re-sends more tokens and every checkpoint stores megabytes", ok:true},
+  {t:"The LLM provider got slower", ok:false, why:"Latency per 1k tokens is flat; token counts exploded.", say:[["kai","Provider latency per token hasn't moved. We're sending 14× more tokens."]]},
+  {t:"Postgres needs a bigger instance", ok:false, why:"The DB is big because state is big; bigger hardware just stores more bloat.", say:[["priya","The table is huge because each checkpoint is 3 MB. A bigger box stores the same junk."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Make order_lookup return a compact summary (status, ETA, last 3 events) and keep the full payload out-of-band by id", kind:"must", why:"Cuts each lookup from ~18k tokens to a few hundred.", miss:[["kai","Trimming helps, but each lookup still dumps 18k tokens into the current turn. Answers are still slow."]]},
+  {t:"Trim or summarise messages before each model call (keep system prompt, recent turns, a running summary)", kind:"must", why:"Bounds the context no matter how long a thread gets.", miss:[["priya","Tool output is small now, but old threads still carry megabytes of history into every call."]]},
+  {t:"Add a TTL/retention job for checkpoints older than 30 days", kind:"good", why:"Stops unbounded DB growth."},
+  {t:"Switch to a model with a 1M-token context", kind:"bad", why:"More room for bloat; cost per call goes up, not down.", say:[["arjun","Bigger context model: cost per conversation went from ₹21 to ₹48. Why?!"]]},
+  {t:"TRUNCATE the checkpoints table", kind:"bad", why:"Wipes every in-progress conversation and human-approval pause.", say:[["meera","Every customer mid-conversation just lost their thread, including 40 refunds waiting for approval!"]]}]},
+ post:{summary:"Over two weeks, the support agent's p95 rose from 6 s to 38 s and cost per conversation from ₹3 to ₹21; checkpoints grew to 412 GB.", cause:"The new «order_lookup» tool returned the **full expanded order payload (~70 KB)** as a string. State used «add_messages» with **no trimming**, so every lookup permanently added ~18k tokens, re-sent on every later model call and stored in every checkpoint (avg 41 kB → 3.1 MB), with no checkpoint retention.", prevent:["Token budget checks for tool outputs","Trim/summarise state","Checkpoint retention"]},
+ learned:["Agent **state is a budget**: everything in it is re-sent and re-stored.","Tools should return compact, model-ready results.","Slow creep without errors? Chart tokens per call over time."],
+ cards:[]
+}
+]);

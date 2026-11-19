@@ -161,3 +161,61 @@ QUEST.mock("snowflake", {title:"Snowflake round", who:"rohit", intro:"Rohit here
   ["How do you control Snowflake cost?","Right-size warehouses, low **auto_suspend**, separate warehouses per workload, **resource monitors**, avoid scanning (clustering, selective queries), use result cache, watch serverless features (auto-clustering, Snowpipe, search optimization) and storage (time travel retention).",[["Right-size, auto-suspend, separate workloads, resource monitors, pruning, watch serverless features",1,"Thorough."],["Always use X-Small",0.5,"Too small = slow and sometimes more credits."],["Turn off time travel everywhere",0,"Loses recovery; small saving."]]],
   ["Time travel vs fail-safe vs zero-copy clone?","**Time travel** (1-90 days): query or restore past versions. **Fail-safe** (7 days after): Snowflake-only recovery, not self-service. **Zero-copy clone**: instant copy of a table/schema/db sharing micro-partitions; only changes cost storage. Great for dev/test.",[["Time travel for self-service history, fail-safe for vendor recovery, clones share storage instantly",1,"Precise."],["They're the same thing",0,"Different purposes."],["Clones copy all data",0,"Zero-copy."]]]],
  learned:["Storage/compute/services separation.","Micro-partitions + clustering = pruning.","Auto-suspend and resource monitors."]});
+
+/* ===== On-call desk: Snowflake incident ===== */
+QUEST.cases("snowflake", [
+{
+ title:"Credits burning 6× faster since yesterday", icon:"🔥", sev:2, clock:"10:05", channel:"inc-2415-credit-spike", svc:"Snowflake · TRANSFORM_WH (X-Large)", need:4,
+ impact:{label:"Extra credits burned", ic:"💸", rate:0.02, start:410, unit:" cr"},
+ terms:[["Credit","Snowflake's billing unit. A running warehouse burns credits per second (X-Large = 16 per hour)."],["Task","A scheduled SQL job inside Snowflake, with a cron schedule."],["CTAS","CREATE TABLE AS SELECT: rebuilds a whole table from a query."],["Resource monitor","A credit quota that can notify or suspend warehouses when reached."],["QUERY_HISTORY","An account usage view listing every query with its warehouse, time and bytes scanned."]],
+ deep:[{t:"Finding where credits go", md:"- «SNOWFLAKE.ACCOUNT_USAGE.WAREHOUSE_METERING_HISTORY»: credits per warehouse per hour.\n- «QUERY_HISTORY» grouped by «query_parameterized_hash» (or query text) and warehouse: which repeated query is expensive.\n- «TASK_HISTORY»: scheduled tasks and how often they ran.\n- Credits ≈ warehouse size × time it's running (not number of queries), so a query every minute keeps a warehouse awake 24/7."},{t:"Cron in Snowflake tasks", md:"«SCHEDULE = 'USING CRON 0 * * * * Asia/Kolkata'» = every hour at minute 0. «* * * * *» = **every minute**. A one-character slip turns 24 runs/day into 1,440."}],
+ pager:`[y]WARN[/y]  resource monitor RM_TRANSFORM at [r]81%[/r] of monthly quota (day 19 of 30)
+TRANSFORM_WH credits/hour  [r]16.0[/r] (usual ~2.6)
+running continuously since yesterday 15:00`,
+ brief:"The transform warehouse used to wake up a few times an hour for dbt runs. Since yesterday afternoon it hasn't suspended once. Finance gets a daily credit report and asked what happened.",
+ slack:[
+  {at:0, who:"arjun", t:"Snowflake spend is 6× normal since yesterday. At this rate we blow the monthly budget by Saturday."},
+  {at:5, who:"priya", t:"Credits follow running time. Find what keeps TRANSFORM_WH awake.", cmd:"snowsql -q \"select query_text, count(*), sum(total_elapsed_time)/1000 as secs from query_history where warehouse_name='TRANSFORM_WH' and start_time > dateadd(day,-1,current_timestamp) group by 1 order by 3 desc limit 3\""},
+  {on:"topq", who:"priya", t:"1,440 runs a day is exactly once a minute. Is that a task?", cmd:"snowsql -q \"show tasks like 'REFRESH_ORDERS%'\""},
+  {on:"cron", who:"ravi", t:"Who changed that task yesterday? Check the deploy repo.", cmd:"git -C ~/repos/snowflake-infra log -p -1 -- tasks/refresh_orders.sql"}
+ ],
+ hints:["Credits = warehouse size × running time. What's keeping it running?","Group query_history by query text for the last day.","A query that runs 1,440 times a day runs every minute. Check the task schedule."],
+ term:{host:"analytics-ci", user:"oncall", suggest:["snowsql -q \"show warehouses like 'TRANSFORM_WH'\"","snowsql -q \"select query_text, count(*), sum(total_elapsed_time)/1000 as secs from query_history where warehouse_name='TRANSFORM_WH' and start_time > dateadd(day,-1,current_timestamp) group by 1 order by 3 desc limit 3\""],
+  cmds:[
+  {m:["snowsql -q \"show warehouses"], out:`name          size     auto_suspend  state    running
+TRANSFORM_WH  X-Large  60            [r]STARTED[/r]  1
+BI_WH         Medium   60            SUSPENDED 0`, note:"Auto-suspend is a sensible 60 s. Something must be sending queries constantly."},
+  {m:["snowsql -q \"select query_text"], out:`QUERY_TEXT                                                     COUNT(*)  SECS
+[y]CREATE OR REPLACE TABLE marts.orders_snapshot AS SELECT …[/y]    [r]1,440[/r]     [r]62,208[/r]
+dbt run: fct_payments (incremental)                             24        1,310
+dbt run: dim_merchants                                          24        210`, clue:"topq", unlock:["snowsql -q \"show tasks like 'REFRESH_ORDERS%'\""]},
+  {m:["snowsql -q \"show tasks"], out:`name             warehouse     schedule                              state
+REFRESH_ORDERS   TRANSFORM_WH  [r]USING CRON * * * * * Asia/Kolkata[/r]   started
+[d]last run 10:04:00 (43 s), next 10:05:00[/d]`, clue:"cron", unlock:["git -C ~/repos/snowflake-infra log -p -1 -- tasks/refresh_orders.sql"]},
+  {m:["git -C ~/repos/snowflake-infra log","git log"], out:`commit [y]a8e10f2[/y] (Wed 14:52, kunal) Move orders snapshot refresh to Asia/Kolkata timezone
+-  SCHEDULE = 'USING CRON 0 * * * * UTC'
++  SCHEDULE = 'USING CRON [r]* * * * *[/r] Asia/Kolkata'`, clue:"commit"},
+  {m:["snowsql -q \"select * from storage_usage","snowsql -q \"select storage"], out:`storage TB: 41.2 (yesterday 40.4)`, note:"Storage grows ~2% a week as usual. Compute, not storage, is the spike."}
+ ]},
+ dash:[
+  {title:"TRANSFORM_WH credits per hour", x:["Tue 12","Tue 18","Wed 00","Wed 12","Wed 15","Wed 21","Thu 06"], series:[{name:"credits/h", v:[2.4,2.6,2.2,2.7,16,16,16]}], marks:[{i:4, label:"task change"}], clue:"spike"},
+  {title:"BI_WH credits per hour", x:["Tue 12","Tue 18","Wed 00","Wed 12","Wed 15","Wed 21","Thu 06"], series:[{name:"credits/h", v:[3.1,2.0,0.2,3.0,2.9,1.8,0.3]}], note:"BI usage follows the normal business-hours pattern. Not the culprit."}
+ ],
+ clues:{topq:"One CTAS ran 1,440 times in 24 h and used 62,000 seconds of warehouse time", cron:"Task REFRESH_ORDERS is scheduled «* * * * *»: every minute", commit:"Wednesday's commit changed the cron from «0 * * * *» to «* * * * *» while switching time zones", spike:"TRANSFORM_WH jumped to a constant 16 credits/h at Wed 15:00"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"A cron typo made the orders-snapshot task run every minute instead of hourly, keeping the X-Large warehouse awake 24/7 with a full CTAS each time", ok:true},
+  {t:"Analysts are running more BI queries", ok:false, why:"BI_WH is normal; the spike is on TRANSFORM_WH.", say:[["meera","BI_WH looks like any other week. It's the transform warehouse."]]},
+  {t:"auto_suspend is set too high", ok:false, why:"It's 60 s; it never gets to suspend because a query arrives every minute.", say:[["priya","Auto-suspend is 60 seconds. It can't suspend if a job starts every minute."]]},
+  {t:"Data volume grew 6×", ok:false, why:"Storage grew 2%.", say:[["ravi","Storage is +2%. Data didn't grow 6×."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Fix the schedule back to hourly («0 * * * *» in Asia/Kolkata) and resume the task", kind:"must", why:"Stops 1,416 unnecessary runs a day.", miss:[["arjun","Task suspended, credits dropped… but the orders snapshot is now stale for everyone. Fix the schedule and turn it back on."]]},
+  {t:"Make the snapshot incremental (MERGE changed rows) or a dynamic table instead of a full CTAS", kind:"good", why:"Even hourly, rebuilding the whole table is wasteful."},
+  {t:"Lower the resource monitor to notify at 50% and add a daily credit anomaly alert", kind:"good", why:"You'd have caught it Wednesday evening."},
+  {t:"Review task schedule changes in CI (show how many runs per day a cron implies)", kind:"good", why:"A cron linter would have flagged 1,440 runs/day."},
+  {t:"Scale TRANSFORM_WH up to 2X-Large so each run finishes faster", kind:"bad", why:"Double credits per second while it still never suspends.", say:[["arjun","Credits per hour just went from 16 to 32. Why is it worse?!"]]},
+  {t:"Suspend every warehouse until month-end", kind:"bad", why:"Breaks dbt and every dashboard.", say:[["meera","All dashboards are failing: 'Warehouse BI_WH is suspended'. Leadership review is in an hour!"]]}]},
+ post:{summary:"TRANSFORM_WH ran continuously for 19 hours, burning ~6× the normal credits, after a schedule change.", cause:"Commit «a8e10f2» moved the REFRESH_ORDERS task to the Asia/Kolkata time zone and accidentally changed «0 * * * *» (hourly) to «* * * * *» (**every minute**). Each run is a full CTAS taking ~43 s on an X-Large warehouse, so the warehouse never reached its 60-second auto-suspend.", prevent:["Cron linting in CI","Credit anomaly alerts","Incremental instead of full rebuilds"]},
+ learned:["Snowflake bills **running time × size**; a query every minute = always on.","Group QUERY_HISTORY by query text to find the spender.","Bigger warehouses don't fix a scheduling bug; they double it."],
+ cards:[]
+}
+]);

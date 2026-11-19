@@ -163,3 +163,63 @@ QUEST.mock("llm", {title:"LLM fundamentals round", who:"rohit", intro:"Rohit her
   ["Why do LLMs hallucinate, and how do you reduce it?","They generate likely text, not verified facts. Reduce with **grounding** (RAG with citations), instructions to abstain, tool use for facts (DB lookups, calculators), constrained outputs (schemas), evals measuring faithfulness, and human review for high stakes.",[["They predict plausible text; ground with retrieval/tools, allow abstaining, constrain outputs, measure with evals",1,"Complete."],["Lower temperature fixes it",0.5,"Only makes errors consistent."],["Bigger models never hallucinate",0,"They do."]]],
   ["When would you fine-tune instead of prompting or RAG?","Prompting first; RAG for **knowledge** that changes. Fine-tune for **behaviour**: consistent format/style, a narrow task at lower cost/latency with a smaller model, or domain language. Needs good labelled data and evals.",[["Prompt first, RAG for changing knowledge, fine-tune for consistent behaviour or cheaper specialised models",1,"Mature answer."],["Fine-tune to teach new facts",0.5,"Unreliable for facts and stale quickly."],["Always fine-tune",0,"Costly and often unnecessary."]]]],
  learned:["Tokens drive limits and cost.","Temperature = randomness, not knowledge.","Prompt → RAG → fine-tune."]});
+
+/* ===== On-call desk: LLM incident ===== */
+QUEST.cases("llm", [
+{
+ title:"Assistant timing out with 429s", icon:"🚦", sev:1, clock:"16:30", channel:"inc-2431-llm-429", svc:"merchant-assistant · LLM gateway", need:4,
+ impact:{label:"Failed answers", ic:"🤖", rate:4, start:5200},
+ terms:[["429","HTTP \"Too Many Requests\": the provider's rate limit was hit."],["TPM / RPM","Tokens per minute and requests per minute: the two usual LLM rate limits."],["Retry storm","Clients retry failed calls immediately and repeatedly, multiplying load exactly when the system is overloaded."],["Exponential backoff + jitter","Wait longer after each failure (1 s, 2 s, 4 s…) with randomness, so clients don't retry in sync."],["Prompt caching","Reusing a provider-side cache for a long fixed prompt prefix, cutting cost and latency."]],
+ deep:[{t:"Why retries can make an outage worse", md:"If 10% of calls fail with 429 and every client retries 10 times immediately, offered load can grow several-fold, pushing the failure rate higher: a **positive feedback loop**. Use exponential backoff with jitter, a small retry cap, honour «Retry-After», and a **circuit breaker** that fails fast when the provider is saturated."},{t:"Token budgets per request", md:"Rate limits are usually in **tokens per minute**. A request's cost = input + output tokens. Trimming history, retrieving fewer but better chunks, caching the fixed prefix and capping max_tokens directly raises how many requests fit under the limit."}],
+ pager:`[r]FIRING[/r]  merchant-assistant error rate [r]38%[/r]   p95 latency [r]41 s[/r]
+gateway   upstream status 429 (rate_limit_error: tokens per minute)
+since     15:10 (release assistant v3.4 at 15:05)`,
+ brief:"The merchant assistant started failing after v3.4, which added \"answers that consider the merchant's last 90 days of tickets\". Traffic is normal for a Thursday.",
+ slack:[
+  {at:0, who:"kai", t:"We're hitting the provider's tokens-per-minute limit. Requests per minute look normal though."},
+  {at:5, who:"priya", t:"Same requests, more tokens? Compare tokens per request before and after the release.", cmd:"llm-gw stats --metric input_tokens_per_request --since 6h"},
+  {on:"tokens", who:"priya", t:"6× tokens per request. And are clients retrying sensibly? Check the client config.", cmd:"cat services/assistant/llm_client.yaml"},
+  {on:"retries", who:"kai", t:"10 immediate retries… so every 429 becomes up to 11 requests. That's a retry storm."}
+ ],
+ hints:["The limit is tokens per minute, and request count is normal. So what changed per request?","Compare input tokens per request before and after v3.4.","Look at how the client retries 429s."],
+ term:{host:"ai-ops", user:"oncall", suggest:["llm-gw stats --metric requests_per_minute --since 6h","llm-gw stats --metric input_tokens_per_request --since 6h"],
+  cmds:[
+  {m:["llm-gw stats --metric requests_per_minute"], out:`time    rpm
+14:00   2,110
+15:00   2,180
+16:00   [y]5,940[/y]   [d](client attempts incl. retries; unique requests 2,150)[/d]`, clue:"rpm"},
+  {m:["llm-gw stats --metric input_tokens_per_request"], out:`time    p50 input tokens
+14:00   3,900
+15:00   4,100
+16:00   [r]26,300[/r]`, clue:"tokens", unlock:["cat services/assistant/llm_client.yaml","git -C ~/repos/assistant show v3.4 --stat"]},
+  {m:["cat services/assistant/llm_client.yaml","cat services"], out:`timeout_s: 60
+retry:
+  on_status: [429, 500, 503]
+  max_retries: [r]10[/r]
+  backoff: [r]none[/r]          # retry immediately`, clue:"retries"},
+  {m:["git -C ~/repos/assistant show","git show"], out:`v3.4 (15:02, ria) Personalised answers using ticket history
++ context += render_tickets(merchant_id, days=[r]90[/r])   # full ticket bodies, ~180 tickets
+  context += retrieve_docs(question, top_k=8)`, clue:"history90"},
+  {m:["llm-gw stats --metric provider_status","curl status"], out:`provider status: operational · no incidents`, note:"The provider is healthy. The limit is ours, and we're over it."}
+ ]},
+ dash:[
+  {title:"Tokens per minute vs limit", x:["14:00","14:30","15:00","15:30","16:00","16:30"], series:[{name:"TPM used (attempted)", v:[8.4e6,8.6e6,9.2e6,61e6,140e6,152e6]}, {name:"TPM limit", v:[20e6,20e6,20e6,20e6,20e6,20e6]}], marks:[{i:2, label:"v3.4"}], clue:"tpm"},
+  {title:"Unique user questions per minute", x:["14:00","14:30","15:00","15:30","16:00","16:30"], series:[{name:"questions", v:[2110,2090,2180,2140,2150,2160]}], note:"User traffic is flat. Nothing outside us changed."}
+ ],
+ clues:{rpm:"Client attempts per minute nearly tripled while unique requests stayed ~2,150", tokens:"Input tokens per request jumped from ~4,000 to ~26,300 after v3.4", retries:"The client retries 429s 10 times with no backoff", history90:"v3.4 adds full bodies of 90 days of tickets to every prompt", tpm:"Tokens per minute shot from 9M to over 140M against a 20M limit"},
+ cause:{q:"What's the root cause?", o:[
+  {t:"v3.4 stuffs 90 days of full ticket bodies into every prompt (~6× tokens), blowing the tokens-per-minute limit; 10 immediate retries per 429 turn it into a retry storm", ok:true},
+  {t:"The provider is having an outage", ok:false, why:"Provider status is operational; the 429s cite our TPM limit.", say:[["kai","The provider status page is green and the error says *our* tokens-per-minute limit."]]},
+  {t:"A traffic spike from merchants", ok:false, why:"Unique questions per minute are flat.", say:[["meera","Questions per minute are exactly like last Thursday."]]}]},
+ fix:{q:"What do you ship?", o:[
+  {t:"Limit ticket context: last 5 relevant tickets, summarised, instead of 90 days of full bodies", kind:"must", why:"Brings tokens per request back near 5k: under the limit with headroom.", miss:[["kai","Backoff stopped the storm, but each request still needs 26k tokens. We can only serve about 750 questions a minute. Still failing."]]},
+  {t:"Exponential backoff with jitter, max 2-3 retries, honour Retry-After, and a circuit breaker", kind:"must", why:"Stops retries from multiplying load during any future limit.", miss:[["priya","Tokens are back to normal. But with 10 instant retries we'll storm again at the next blip."]]},
+  {t:"Prompt caching for the fixed system prompt and a per-request token budget check in CI", kind:"good", why:"Cheaper, faster, and catches the next prompt bloat before release."},
+  {t:"Raise max_retries to 20", kind:"bad", why:"More load on an already saturated limit.", say:[["kai","Attempts per minute just tripled again. Error rate went UP to 55%."]]},
+  {t:"Switch to a bigger model", kind:"bad", why:"Same tokens, usually lower limits, higher cost and latency.", say:[["arjun","Bigger model, same 429s, and each answer now costs 4× more."]]},
+  {t:"Ask the provider for a higher TPM limit", kind:"meh", why:"Takes days and treats the symptom; 6× tokens also means 6× cost."}]},
+ post:{summary:"38% of assistant answers failed for ~80 minutes after v3.4.", cause:"v3.4 added the **full bodies of 90 days of tickets** to every prompt, raising input tokens per request from ~4k to ~26k. Total demand reached ~7× the 20M tokens-per-minute limit. The client retried every 429 **10 times with no backoff**, nearly tripling attempts and keeping the limit saturated.", prevent:["Token budget per request in CI","Backoff + jitter + circuit breaker in the shared LLM client","TPM headroom alerts"]},
+ learned:["LLM limits are often **tokens** per minute, not requests.","Retries without backoff turn a limit into an outage.","More context isn't free: summarise and retrieve selectively."],
+ cards:[]
+}
+]);
