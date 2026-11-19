@@ -25,7 +25,7 @@ Spark · Kafka · Debezium CDC · AWS (S3, Glue, Athena, DynamoDB) · Apache Ice
 ### AI Engineering world
 LLM fundamentals · RAG · LangChain · LangGraph · LangSmith · Agentic AI · MCP · Claude Code (CLAUDE.md, skills, subagents, hooks, MCP, headless) · Security of AI (OWASP LLM Top 10, red-teaming) · Security for AI (defence in depth, least privilege, governance) · AI observability · Fine-tuning
 
-Plus the **Data flow player**: animated, step-by-step views of a write through MySQL (InnoDB), Apache Iceberg, and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
+Plus the **Data flow player**: animated, step-by-step views of how Spark splits a job into stages and tasks across a shuffle; reads and writes in PostgreSQL (MVCC, WAL, shared buffers), MySQL (InnoDB) and Amazon Redshift (slices, DISTKEY, zone maps); Apache Iceberg; and a MySQL → Debezium → Kafka → Flink → Iceberg CDC pipeline.
 
 Progress is saved in the visitor's browser.
 
