@@ -50,7 +50,7 @@ const CAST = {priya:["Priya","Tech lead",205], arjun:["Arjun","Finance",28], rav
 const Q = window.QUEST = {data:{}, zones:ZONES, zone(id, def){ this.data[id] = def; }, more(id, levels){ const Z = this.data[id]; if (Z) Z.levels.push(...levels); }};
 const ld = (k, d) => { try { return Object.assign(d, JSON.parse(localStorage.getItem(k)) || {}); } catch(e){ return d; } };
 const raw = k => { try { return JSON.parse(localStorage.getItem(k)); } catch(e){ return null; } };
-const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, wk:{}, ach:{}, chest:{}});
+const DEF_P = () => ({stars:{}, cards:{}, lv:{}, last:null, ms:{}, iv:{}, cs:{}, wk:{}, sd:{}, ach:{}, chest:{}});
 const DEF_PR = () => ({xp:0, streak:0, last:null});
 let NS = "";
 const KQ = () => "dagdeep-quest-v1" + NS, KP = () => "dagdeep-profile-v1" + NS;
@@ -287,7 +287,8 @@ function mapView(){
     </section>
     ${nx ? `<a class="q-next" id="qNext" href="#mis-${nx.z}-${nx.i}"><span class="q-next-ic">${nx.M ? nx.M.icon : "🎬"}</span><div><small>${nx.i ? "Continue" : "Start here"} · ${esc(ZMAP[nx.z].title)} · mission ${nx.i + 1}</small><b>${nx.M ? esc(nx.M.title) : "Story mission"}</b>${nx.M ? `<p>${fm(nx.M.setup)}</p>` : ""}</div><span class="q-next-go">▶</span></a>` : ""}
     ${homeWork()}
-    <a class="q-ivhome" href="#interview"><span>🎤</span><div><b>Mock interviews</b><small>A full round for every topic, with model answers and a hire verdict</small></div><span class="q-next-go">▶</span></a>
+    <div class="q-homepair"><a class="q-ivhome" href="#interview"><span>🎤</span><div><b>Mock interviews</b><small>A full round for every topic, with model answers</small></div><span class="q-next-go">▶</span></a>
+    <a class="q-ivhome" href="#design"><span>🏗️</span><div><b>System design</b><small>Design rounds, architectures and project ideas</small></div><span class="q-next-go">▶</span></a></div>
     <h2 class="q-sec-h">🗺️ Zones</h2>
     <div class="q-tabs" role="tablist">${WORLDS.map(w => `<button role="tab" data-w="${w.id}" aria-selected="${worldTab === w.id}">${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</button>`).join("")}</div>
     <div class="q-zones">${ZONES.filter(z => z.world === worldTab).map(tile).join("")}</div>
@@ -1578,13 +1579,14 @@ function aboutView(){
     ["🧭", "Postmortems", "Order the events, label trigger vs root cause, then ask \"why?\" five times."],
     ["🚦", "Triage", "Sort a morning inbox of alerts by urgency and pick the first move."],
     ["🎤", "Mock interviews", "A full technical round per topic, with model answers and a hire verdict."],
+    ["🏗️", "System design", "Interview-style design rounds: clarify, estimate, build the architecture, defend trade-offs. Plus reference architectures and project ideas."],
     ["🌊", "Data flows", "Animated, step-by-step views of how a write moves through MySQL and Iceberg."]];
   root().innerHTML = `<div class="q-wrap q-about">
     <section class="q-ab-hero"><p class="q-eyebrow">About this project</p><h1>Learn data &amp; AI engineering the way the job actually feels.</h1>
       <p class="q-ab-lede">Dagdeep turns data engineering and AI engineering into a game: every concept is something you <b>do</b>. Debug a broken pipeline, review a pull request, tune a Spark job, triage an inbox of alerts, then explain it all in a mock interview.</p>
       <div class="q-res-b"><a class="btn big solid" href="#play">Start playing</a><a class="btn big" href="#work">Try a work task</a></div></section>
     <div class="q-ab-stats">${stat.map(([n, l, s]) => `<div><b>${n}</b><span>${l}</span><small>${s}</small></div>`).join("")}</div>
-    <h2 class="q-sec-h">Ten ways to play</h2>
+    <h2 class="q-sec-h">Eleven ways to play</h2>
     <div class="q-ab-modes">${modes.map(([i, t, d]) => `<div><span>${i}</span><b>${t}</b><p>${d}</p></div>`).join("")}</div>
     <h2 class="q-sec-h">What's covered</h2>
     <div class="q-ab-topics">${WORLDS.map(w => `<div><b>${w.id === "de" ? "🗄️" : "🤖"} ${esc(w.title)}</b><p>${ZONES.filter(z => z.world === w.id).map(z => esc(z.title)).join(" · ")}</p></div>`).join("")}</div>
@@ -1603,6 +1605,7 @@ function aboutView(){
   window.scrollTo(0, 0);
 }
 
+Q._ = {esc, fm, md, root, stars, save, P, PR, addXP, toast, confetti, unlock, shuffle, reduce, ZMAP, refList, needZones, refZones, setKeys};
 window.loadQuest = function(h){
   if (typeof showMode === "function") showMode("courses");
   setKeys(null); drawAcct();
@@ -1615,6 +1618,14 @@ window.loadQuest = function(h){
   else if ((m = h.match(/^work-([a-z]+)-(\d+)$/))) workView(m[1], +m[2]);
   else if (h === "interview") ivHub();
   else if (h === "about") aboutView();
+  else if (/^(design(\/.*)?|sd-[a-z0-9-]+)$/.test(h)){
+    // System design lives in design.js, loaded on first visit.
+    const go = () => Q.design.route(h);
+    if (Q.design) go();
+    else { root().innerHTML = `<div class="q-wrap"><p class="muted">Loading…</p></div>`; const fail = () => { root().innerHTML = `<div class="q-wrap"><p>Couldn't load this section. Check your connection and refresh.</p></div>`; };
+      const load = (src, cb) => { const sc = document.createElement("script"); sc.src = src; sc.onload = cb; sc.onerror = fail; document.head.appendChild(sc); };
+      load("design-data.js", () => load("design.js", go)); }
+  }
   else if ((m = h.match(/^work(?:\/([a-z]+))?$/))) workHub(m[1]);
   else if ((m = h.match(/^learn-([a-z]+)-(\d+)$/))) studyView(m[1], +m[2]);
   else if ((m = h.match(/^card-([a-z]+)-(\w+)$/))) studyView(m[1], 0, m[2]);

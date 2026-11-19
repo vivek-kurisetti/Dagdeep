@@ -768,3 +768,60 @@ button.q-prl:hover{outline:1px solid var(--hc); outline-offset:-1px}
 @media (prefers-color-scheme: dark){ :root:not([data-theme="light"]) .q-wrow-s i{color:hsl(var(--h) 80% 72%)} }
 :root[data-theme="dark"] .q-wrow-s i{color:hsl(var(--h) 80% 72%)}
 @media (max-width:640px){ .q-ab-modes{grid-template-columns:1fr 1fr; gap:8px} .q-ab-modes div{padding:12px} .q-ab-modes p{font-size:.8rem} }
+.q-homepair{display:grid; gap:8px; margin:8px 0 16px} @media (min-width:760px){ .q-homepair{grid-template-columns:1fr 1fr} } .q-homepair .q-ivhome{margin:0}
+
+/* ================= System design ================= */
+.sd{max-width:900px}
+.sd-h1{font:900 clamp(1.6rem, 4vw, 2.4rem)/1.12 var(--display); letter-spacing:-.02em; margin:6px 0 12px}
+.sd-lede{font-size:1.02rem; line-height:1.6; color:var(--muted); max-width:64ch}
+.sd-tiles{display:grid; gap:10px; margin:18px 0} @media (min-width:760px){ .sd-tiles{grid-template-columns:repeat(3, 1fr)} }
+.sd-tiles a{display:flex; flex-direction:column; gap:4px; padding:16px; border-radius:16px; background:var(--surface); border:1px solid var(--line); text-decoration:none; color:var(--ink)}
+.sd-tiles a:hover{border-color:var(--accent)} .sd-tiles span{font-size:1.5rem} .sd-tiles small{color:var(--muted); line-height:1.45}
+.sd-wh{font:800 1rem var(--display); margin:16px 0 6px}
+.sd-guide{line-height:1.6} .sd-guide table{font-size:.88rem} .sd-guide h3{font:800 1.08rem var(--display); margin:20px 0 6px}
+.sd-arch{overflow-x:auto; margin:10px 0; padding:8px; border-radius:14px; background:var(--bg); border:1px solid var(--line)}
+.sd-arch svg{display:block; width:100%; height:auto}
+.sd-n{fill:var(--surface); stroke:color-mix(in srgb, var(--kc) 55%, var(--line)); stroke-width:1.4}
+.sd-nt{font:700 12.5px var(--body); fill:var(--ink)} .sd-ns{font:500 10.5px var(--body); fill:var(--muted)}
+.sd-e{fill:none; stroke:var(--muted); stroke-width:1.5} .sd-ah{fill:var(--muted)} .sd-el{font:600 10px var(--body); fill:var(--muted)}
+.sd-legend{display:flex; flex-wrap:wrap; gap:10px; font-size:.75rem; color:var(--muted)} .sd-legend i{display:inline-block; width:10px; height:10px; border-radius:3px; margin-right:5px; vertical-align:-1px}
+.sd-card{border:1px solid var(--line); border-radius:16px; background:var(--surface); padding:4px 16px; margin:10px 0}
+.sd-card > summary{display:flex; gap:12px; align-items:center; cursor:pointer; padding:12px 0; list-style:none} .sd-card > summary::-webkit-details-marker{display:none}
+.sd-card > summary > span{font-size:1.4rem; width:42px; height:42px; display:grid; place-items:center; border-radius:12px; background:var(--bg); font-weight:900; flex:none}
+.sd-card > summary b{display:block} .sd-card > summary small{color:var(--muted)}
+.sd-cols{display:grid; gap:14px; padding-bottom:12px} @media (min-width:760px){ .sd-cols{grid-template-columns:1fr 1fr} }
+.sd-cols h4, .sd-proj h4{font:800 .9rem var(--display); margin:10px 0 4px} .sd-cols ul, .sd-proj ul{margin:0; padding-left:18px; line-height:1.55}
+.sd-rel{font-size:.86rem; color:var(--muted)} .sd-rel a{color:var(--accent); font-weight:700; text-decoration:none}
+.sd-projects{display:grid; gap:12px; margin:12px 0} @media (min-width:760px){ .sd-projects{grid-template-columns:1fr 1fr} }
+.sd-proj{padding:16px; border-radius:16px; background:var(--surface); border:1px solid var(--line)} .sd-proj > p{line-height:1.55; margin:8px 0}
+.sd-proj-h{display:flex; gap:10px; align-items:center} .sd-proj-h > span{font-size:1.6rem} .sd-proj-h b{display:block; font:800 1.02rem var(--display)} .sd-proj-h small{color:var(--muted)}
+.sd-stack{display:flex; flex-wrap:wrap; gap:6px} .sd-stack span{padding:3px 9px; border-radius:999px; background:var(--bg); border:1px solid var(--line); font:600 .76rem var(--mono, monospace)}
+.sd-intro{max-width:680px} .sd-prompt{padding:14px 16px; border-radius:14px; background:var(--surface); border:1px solid var(--line); border-left:4px solid hsl(var(--h) 70% 45%); line-height:1.55}
+.sd-intro h3{font:800 1rem var(--display); margin:16px 0 6px}
+.sd-mode{display:grid; grid-template-columns:1fr 1fr; gap:8px} .sd-mode button{padding:12px; border-radius:12px; border:1px solid var(--line); background:var(--surface); color:var(--ink); font:700 .9rem var(--body); text-align:left; cursor:pointer}
+.sd-mode button small{display:block; font-weight:500; color:var(--muted); margin-top:2px} .sd-mode button[aria-checked="true"]{border-color:var(--accent); box-shadow:inset 0 0 0 1px var(--accent)}
+.sd-go{width:100%; margin-top:14px}
+.sd-bar{--hc:hsl(var(--h) 70% 45%)}
+.sd-done{border:1px solid var(--line); border-radius:12px; background:var(--surface); padding:2px 12px; margin:6px 0} .sd-done summary{cursor:pointer; padding:8px 0; font-size:.9rem} .sd-done summary span{font:800 .7rem var(--body); text-transform:uppercase; letter-spacing:.06em; color:var(--muted); margin-right:8px} .sd-done > div{font-size:.88rem; padding-bottom:10px}
+.sd-step{padding:18px; border-radius:18px; background:var(--surface); border:1px solid var(--line); margin:10px 0; scroll-margin-top:130px}
+.sd-k{font:800 .72rem var(--body); text-transform:uppercase; letter-spacing:.08em; color:var(--accent); margin:0} .sd-q{font:800 1.2rem/1.35 var(--display); margin:4px 0 10px}
+.sd-ctx{padding:10px 12px; border-radius:10px; background:var(--bg); line-height:1.55; margin-bottom:10px; font-size:.92rem}
+.sd-write label{display:block} .sd-write small{display:block; color:var(--muted); margin:2px 0 6px}
+.sd-write textarea{width:100%; box-sizing:border-box; border-radius:12px; border:1px solid var(--line); background:var(--bg); color:var(--ink); padding:12px; font:16px/1.5 var(--body); resize:vertical}
+.sd-write .btn{margin-top:8px}
+.sd-yours{padding:10px 12px; border-radius:10px; background:color-mix(in srgb, var(--accent) 8%, transparent); margin-bottom:10px} .sd-yours small{font-weight:800; color:var(--muted)} .sd-yours p{margin:4px 0 0; line-height:1.5; font-size:.92rem}
+.sd-hint{color:var(--muted); font-size:.88rem}
+.sd-multi, .sd-opts{display:grid; gap:8px; margin:8px 0}
+.sd-multi button, .sd-opts button, .sd-slot button{padding:10px 12px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font:500 .92rem/1.4 var(--body); text-align:left; cursor:pointer}
+.sd-multi button[aria-pressed="true"], .sd-slot button[aria-pressed="true"]{border-color:var(--accent); background:color-mix(in srgb, var(--accent) 12%, var(--surface)); font-weight:700}
+.sd-multi button[aria-pressed="true"]::before{content:"✓ "; color:var(--accent)}
+.sd-slots{display:grid; gap:10px} .sd-slot > b{display:block; margin-bottom:6px; font-size:.9rem} .sd-slot > div{display:flex; flex-wrap:wrap; gap:6px} .sd-slot button{font-size:.84rem; padding:8px 10px}
+.sd-check, .sd-next{margin-top:12px}
+.sd-fb{list-style:none; padding:0; margin:8px 0} .sd-fb li{padding:8px 0; border-top:1px solid var(--line); line-height:1.45} .sd-fb li div{font-size:.86rem; color:var(--muted); margin-top:3px}
+.sd-fb li.no:not(.sel){opacity:.75} .sd-fb em{font-style:normal; font-size:.78rem; color:var(--accent)}
+.sd-score{font-size:.95rem; line-height:1.5}
+.sd-model{padding:12px 14px; border-radius:12px; border:1px solid color-mix(in srgb, #16a34a 40%, var(--line)); background:color-mix(in srgb, #16a34a 6%, var(--surface)); margin:10px 0; line-height:1.55}
+.sd-model > b{display:block; margin-bottom:4px}
+.sd-num{display:flex; flex-wrap:wrap; justify-content:space-between; align-items:center; gap:8px; padding:8px 0; border-top:1px solid var(--line)}
+.sd-numin{display:flex; align-items:center; gap:6px} .sd-numin input{width:120px; padding:9px 10px; border-radius:10px; border:1px solid var(--line); background:var(--bg); color:var(--ink); font:16px var(--mono, monospace)} .sd-numin em{font-style:normal; color:var(--muted); font-size:.86rem}
+.sd-points{display:grid; gap:6px; margin:8px 0} .sd-points label{display:flex; gap:10px; align-items:flex-start; padding:8px 10px; border-radius:10px; background:var(--bg); cursor:pointer; line-height:1.4} .sd-points input{width:18px; height:18px; margin-top:2px; flex:none; accent-color:var(--accent)}

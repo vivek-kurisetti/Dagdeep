@@ -76,6 +76,16 @@ window.DAGDEEP_FIREBASE = {
 
 Firebase project **dagdeep** is wired in `firebase-config.js` (the web config is public by design). Each signed-in user's progress is stored in Firestore at `users/{uid}`, protected by the rules below. Authorized domains (Firebase → Authentication → Settings) must include every domain that serves the site. Popups fall back to redirect, in-app browsers (LinkedIn, Instagram) get an "open in your browser" prompt, and anyone can export/import progress as JSON.
 
+## System design
+
+`#design` (loaded on demand from `design-data.js` + `design.js`):
+- **Design rounds** in interview format: clarify (pick the right questions), estimate (back-of-envelope numbers), build the architecture (pick a component per box; the diagram draws itself), deep-dive trade-offs, and free-text answers scored against a model-answer checklist. Players choose **write first, then compare** or **pick from options**.
+- **How to approach a design**: a 6-step framework with timings and habits.
+- **Architecture gallery**: Lambda, Kappa, medallion lakehouse, CDC + outbox, real-time OLAP, feature store, RAG platform, agent platform, each with a diagram, use-when and watch-outs.
+- **Project ideas**: 12 portfolio projects (idea, what you learn, stack, how to stand out), no code.
+
+Diagrams are generated SVG from a small spec (`{nodes:{id:{c, r, label, sub, k}}, edges:[[from, to, label]]}`) and flip to top-to-bottom on phones.
+
 ## Security
 
 - Static site: no server, no secrets. The Firebase web config is public by design.
