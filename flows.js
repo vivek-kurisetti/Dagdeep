@@ -1,3 +1,4 @@
+{ const f = document.getElementById("fontcss"); if (f) f.media = "all"; }
 const KIND_NAMES = {actor:"Client / engine", proc:"Compute layer", mem:"Memory", disk:"Durable storage", log:"Log / stream", meta:"Metadata / catalog"};
 const STATE_NAMES = {memory:"memory", disk:"on disk", network:"shipped", catalog:"catalog", client:"client"};
 

@@ -2,6 +2,8 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta http-equiv="Content-Security-Policy" content="default-src 'self'; script-src 'self' https://www.gstatic.com https://apis.google.com https://www.google.com; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com; img-src 'self' data: blob: https://*.googleusercontent.com https://www.gstatic.com; connect-src 'self' https://*.googleapis.com https://*.firebaseio.com wss://*.firebaseio.com https://*.firebaseapp.com https://apis.google.com; frame-src https://dagdeep.firebaseapp.com https://accounts.google.com https://apis.google.com https://www.google.com; object-src 'none'; base-uri 'self'; form-action 'self'; manifest-src 'self'">
+<meta name="referrer" content="strict-origin-when-cross-origin">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Dagdeep · Learn data and AI engineering by playing</title>
 <meta name="description" content="A game for learning data and AI engineering: 26 topics from Spark, Kafka and Iceberg to RAG, agents and MCP. Debug incidents, review PRs, tune jobs, triage alerts and practise mock interviews.">
@@ -26,7 +28,7 @@
 <link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 32 32'%3E%3Crect x='1' y='1' width='30' height='30' rx='9' fill='%2315202b'/%3E%3Cpath d='M9 11h6a4 4 0 0 1 4 4v2a4 4 0 0 0 4 4' fill='none' stroke='%23eef1f4' stroke-width='2' stroke-linecap='round'/%3E%3Ccircle cx='9' cy='11' r='3' fill='%23d9620f'/%3E%3Ccircle cx='23' cy='21' r='3' fill='%230f8a7a'/%3E%3C/svg%3E">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-<link rel="preload" as="style" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" onload="this.onload=null;this.rel='stylesheet'">
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap" media="print" id="fontcss">
 <noscript><link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Archivo:wght@600;700&family=IBM+Plex+Sans:wght@400;500;600&family=IBM+Plex+Mono:wght@400;500&display=swap"></noscript>
 <style>
 /* Layout: tabs across the top; diagram + current-step card on the left, state + step list on the right; one column on phones. */

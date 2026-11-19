@@ -66,6 +66,21 @@ const save = () => {
 const rerender = () => { if (typeof route === "function") route(); };
 Q.account = null;
 // Called by auth.js after Google sign-in. cloud = {quest, profile} from Firestore or null.
+// Progress can come from localStorage, Firestore or an imported file. Keep only plain data:
+// keys and strings limited to safe id characters, finite numbers, booleans. Anything else is dropped.
+const SAFE = /^[\w:.\- ]{0,80}$/;
+const clean = (v, d = 0) => {
+  if (d > 6) return undefined;
+  if (typeof v === "number") return Number.isFinite(v) ? v : undefined;
+  if (typeof v === "boolean") return v;
+  if (typeof v === "string") return SAFE.test(v) ? v : undefined;
+  if (Array.isArray(v)) return v.slice(0, 2000).map(x => clean(x, d + 1)).filter(x => x !== undefined);
+  if (v && typeof v === "object"){ const o = {}; Object.keys(v).slice(0, 2000).forEach(k => { if (SAFE.test(k) && k !== "__proto__" && k !== "constructor" && k !== "prototype"){ const c = clean(v[k], d + 1); if (c !== undefined) o[k] = c; } }); return o; }
+  return undefined;
+};
+const cleanP = q => Object.assign(DEF_P(), clean(q || {}) || {});
+const cleanPR = pr => { const o = Object.assign(DEF_PR(), clean(pr || {}) || {}); o.xp = Math.max(0, Math.min(1e7, +o.xp || 0)); o.streak = Math.max(0, Math.min(1e4, +o.streak || 0)); return o; };
+swap(P, cleanP(P)); swap(PR, cleanPR(PR));
 Q.useAccount = (user, cloud) => {
   const gq = raw("dagdeep-quest-v1"), gp = raw("dagdeep-profile-v1");
   NS = ":" + user.uid; Q.account = user;
@@ -75,12 +90,12 @@ Q.useAccount = (user, cloud) => {
     if (lq){ q = lq; pr = lp; }
     else if (gp && gp.xp > 0){ q = gq; pr = gp; setTimeout(() => toast("Your guest progress moved into your account"), 400); }
   }
-  swap(P, Object.assign(DEF_P(), q || {})); swap(PR, Object.assign(DEF_PR(), pr || {}));
+  swap(P, cleanP(q)); swap(PR, cleanPR(pr));
   save(); drawAcct(); rerender();
 };
 Q.useGuest = () => {
   NS = ""; Q.account = null; Q.cloud = null;
-  swap(P, Object.assign(DEF_P(), raw(KQ()) || {})); swap(PR, Object.assign(DEF_PR(), raw(KP()) || {}));
+  swap(P, cleanP(raw(KQ()))); swap(PR, cleanPR(raw(KP())));
   drawAcct(); rerender();
 };
 Q.toastMsg = m => toast(m);
@@ -230,7 +245,7 @@ function acctPanel(confirmReset){
     if (act === "import"){
       const f = document.createElement("input"); f.type = "file"; f.accept = "application/json,.json";
       f.onchange = async () => { try { const d = JSON.parse(await f.files[0].text()); if (d.app !== "dagdeep" || !d.quest) throw 0;
-        swap(P, Object.assign(DEF_P(), d.quest)); swap(PR, Object.assign(DEF_PR(), d.profile || {})); save(); p.remove(); rerender(); drawAcct(); toast("Progress imported ✓"); }
+        swap(P, cleanP(d.quest)); swap(PR, cleanPR(d.profile)); save(); p.remove(); rerender(); drawAcct(); toast("Progress imported ✓"); }
         catch(x){ toast("That file isn't a Dagdeep progress export"); } };
       f.click();
     }
