@@ -385,7 +385,7 @@ function zonePanel(id, Z, tab, got){
       <div class="q-qa">${qa.map(([q, a]) => `<details><summary>${fm(q)}</summary><div>${md(a)}</div></details>`).join("")}
       ${Z.cardBook ? Object.values(Z.cardBook).map(C => `<details><summary>Explain: ${fm(C.t)}</summary><div><p>${fm(C.say || "")}</p></div></details>`).join("") : ""}</div>`;
   }
-  if (tab === "drills") return `<p class="q-lead">Quick-fire rounds to lock in what the missions taught.</p>
+  if (tab === "drills") return `<p class="q-lead"><b>Drills test, Concepts teach.</b> No re-reading here: quick recall flips, then puzzles (sort, match, spot the bug, estimate) that make you <i>use</i> what you read. Shaky on something? It goes back to your 📘 Concepts list for review.</p>
     <ol class="q-path">${Z.levels.map((L, li) => { const head = L.act && (li === 0 || Z.levels[li - 1].act !== L.act) ? `<li class="q-act"><span>${esc(L.act)}</span></li>` : ""; const s = (P.stars[id] || {})[li] || 0, open = unlocked(id, li), kind = L.boss ? "boss" : L.arcade ? "arcade" : "q-lv";
       return head + `<li class="q-node ${kind} ${L.act ? "expert" : ""} ${s ? "done" : ""} ${open ? "" : "locked"}" style="--i:${li}">
         ${open ? `<a href="#lvl-${id}-${li}" class="q-dot">` : `<span class="q-dot">`}${L.boss ? "👑" : L.arcade ? "🕹" : li + 1}${open ? "</a>" : "</span>"}
@@ -537,15 +537,30 @@ const whyOf = r => ({pick:r[4], sort:r[3], order:r[3], match:r[3], fill:r[5], bu
 
 /* ================= Round types ================= */
 const ROUND = {};
+// Drills practise, Concepts teach. A concept inside a drill is an active-recall flashcard, not the full lesson again.
 ROUND.learn = (r, st, c) => {
-  const [, title, body, flow, code, deep] = r;
-  st.innerHTML = `<div class="q-learn ${deep ? "has-deep" : ""}"><p class="q-kick">⚡ ${deep ? "Deep card" : "Power-up · concept card"}</p><h2>${fm(title)}</h2><p class="q-body">${fm(body)}</p>
-    ${flow && flow.length ? `<ol class="q-flow">${flow.map((f, i) => `<li style="--i:${i}">${fm(f)}</li>`).join("")}</ol>` : ""}
-    ${code ? `<pre class="q-code">${esc(code)}</pre>` : ""}
-    ${deep ? `<details class="q-deep" open><summary>Go deeper</summary><div class="q-deep-b">${md(deep)}</div></details>` : ""}
-    <button class="btn big solid q-collect">Collect card →</button></div>`;
-  st.querySelector(".q-collect").onclick = () => c.collect(r);
-  c.setKey(e => { if (e.key === "Enter"){ e.preventDefault(); c.collect(r); } });
+  const [, title, body, flow] = r, key = `${c.li}.${c.ri}`, rd = P.rd[c.id] = P.rd[c.id] || {}, known = !!rd[key];
+  const plain = String(body).replace(/<[^>]+>/g, "");
+  const gist = (plain.match(/^.*?[.!?](\s|$)/) || [plain])[0].trim();
+  const pts = (flow || []).slice(0, 3).map(f => String(f).split(/[:.—–]| - /)[0].trim()).filter(Boolean);
+  st.innerHTML = `<div class="q-recall"><p class="q-kick">🧠 Quick recall</p><h2>${fm(title)}</h2>
+    <p class="q-recall-q">Before you flip: what's the key idea, in one line? Say it in your head.</p>
+    ${known ? "" : `<p class="q-recall-new">New to this? <a href="#learn-${c.id}-${c.li}" target="_blank" rel="noopener">Read the full concept ↗</a></p>`}
+    <button class="btn big solid q-flip">Flip card</button></div>`;
+  const flip = () => {
+    st.querySelector(".q-recall").innerHTML = `<p class="q-kick">🧠 Quick recall</p><h2>${fm(title)}</h2>
+      <div class="q-recall-a"><small>Key idea</small><p>${fm(gist)}</p>${pts.length ? `<ul>${pts.map(x => `<li>${fm(x)}</li>`).join("")}</ul>` : ""}</div>
+      <p class="q-recall-q">Did you have it?</p>
+      <div class="q-recall-b"><button class="btn big solid" data-k="1"><kbd>1</kbd> ✅ I knew it</button><button class="btn big" data-k="2"><kbd>2</kbd> 🤔 Shaky</button></div>`;
+    const rate = ok => {
+      if (ok) rd[key] = 1; else { delete rd[key]; toast("Added to review: it's unticked in 📘 Concepts"); }
+      save(); c.collect(r);
+    };
+    st.querySelectorAll(".q-recall-b button").forEach(b => b.onclick = () => rate(b.dataset.k === "1"));
+    c.setKey(e => { if (e.key === "1") rate(true); if (e.key === "2") rate(false); });
+  };
+  st.querySelector(".q-flip").onclick = flip;
+  c.setKey(e => { if (e.key === "Enter" || e.key === " "){ e.preventDefault(); flip(); } });
 };
 ROUND.pick = (r, st, c) => {
   const [, q, opts, ans, why, code] = r;
@@ -1628,7 +1643,7 @@ function aboutView(){
   document.title = "About · Dagdeep";
   const all = ALLW(), stat = [["26", "topics", "Spark to MCP"], ["289", "drill levels", "1,500+ challenges"], ["32", "story missions", "real situations"], [String(all.length), "work tasks", "6 formats"], ["26", "mock interviews", "with model answers"]];
   const modes = [
-    ["🎯", "Drills", "Short puzzles per concept: sort, match, fill the gap, spot the bug, estimate a number. Basic and expert tiers with boss levels."],
+    ["🎯", "Drills", "Practice, not reading: recall flashcards plus puzzles — sort, match, fill the gap, spot the bug, estimate a number. Anything you rate shaky goes back to Concepts for review. Basic and expert tiers with boss levels."],
     ["🎬", "Story missions", "A real day at work. Make the calls, watch the meters move, collect detailed concept cards."],
     ["📟", "Incidents", "Get paged. Slack, a working terminal, dashboards and code. Find the root cause, ship a fix, read the postmortem."],
     ["🔍", "PR reviews", "Read a real-looking diff, tap the risky lines and say what's wrong before it ships."],

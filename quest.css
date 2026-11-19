@@ -845,3 +845,10 @@ button.q-prl:hover{outline:1px solid var(--hc); outline-offset:-1px}
 .q-errbox{max-width:560px; margin:40px auto; text-align:center} .q-errbox h2{font:900 1.4rem var(--display)} .q-errbox pre{text-align:left; white-space:pre-wrap; font-size:.75rem}
 .q-lsec > header{flex-direction:row !important; text-align:left; justify-content:flex-start}
 .q-cbody .q-studyl > h4{display:none}
+/* drills: active recall instead of re-reading */
+.q-recall{padding:22px; border-radius:20px; background:var(--surface); border:1px solid var(--line); box-shadow:0 10px 30px -18px rgba(0,0,0,.35)}
+.q-recall h2{font:900 1.35rem/1.25 var(--display); margin:4px 0 10px}
+.q-recall-q{color:var(--muted); margin:6px 0 12px} .q-recall-new{font-size:.88rem; margin:0 0 12px} .q-recall-new a{color:var(--sc, var(--accent)); font-weight:700}
+.q-recall-a{padding:14px 16px; border-radius:14px; background:color-mix(in srgb, var(--sc, var(--accent)) 9%, transparent); border-left:4px solid var(--sc, var(--accent)); margin:6px 0 12px}
+.q-recall-a small{font:800 .7rem var(--body); letter-spacing:.08em; text-transform:uppercase; color:var(--muted)} .q-recall-a p{margin:4px 0; font-size:1.02rem; line-height:1.5} .q-recall-a ul{margin:6px 0 0; padding-left:18px; line-height:1.5}
+.q-recall-b{display:grid; grid-template-columns:1fr 1fr; gap:8px} .q-recall-b kbd{opacity:.6; margin-right:4px}

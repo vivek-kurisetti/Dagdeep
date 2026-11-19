@@ -1,5 +1,5 @@
 // Dagdeep service worker: network first (always fresh after a deploy), cache as an offline fallback.
-const CACHE = "dagdeep-v1";
+const CACHE = "dagdeep-v2";
 const CORE = ["./", "index.html", "quest.css", "quest-engine.js", "flows.js", "game-kit.js", "course-spark-games.js", "firebase-config.js", "auth.js", "manifest.webmanifest", "img/icon-192.png"];
 self.addEventListener("install", e => { e.waitUntil(caches.open(CACHE).then(c => c.addAll(CORE)).catch(() => {})); self.skipWaiting(); });
 self.addEventListener("activate", e => { e.waitUntil(caches.keys().then(ks => Promise.all(ks.filter(k => k !== CACHE).map(k => caches.delete(k)))).then(() => self.clients.claim())); });
