@@ -852,3 +852,15 @@ button.q-prl:hover{outline:1px solid var(--hc); outline-offset:-1px}
 .q-recall-a{padding:14px 16px; border-radius:14px; background:color-mix(in srgb, var(--sc, var(--accent)) 9%, transparent); border-left:4px solid var(--sc, var(--accent)); margin:6px 0 12px}
 .q-recall-a small{font:800 .7rem var(--body); letter-spacing:.08em; text-transform:uppercase; color:var(--muted)} .q-recall-a p{margin:4px 0; font-size:1.02rem; line-height:1.5} .q-recall-a ul{margin:6px 0 0; padding-left:18px; line-height:1.5}
 .q-recall-b{display:grid; grid-template-columns:1fr 1fr; gap:8px} .q-recall-b kbd{opacity:.6; margin-right:4px}
+/* deep concept notes */
+.q-dive{display:grid; gap:12px; margin:14px 0 6px}
+.q-dsec{padding:12px 14px; border-radius:14px; border:1px solid var(--line); background:var(--surface)}
+.q-dsec h5{margin:0 0 6px; font:800 .78rem var(--body); letter-spacing:.06em; text-transform:uppercase; color:var(--muted)}
+.q-dsec p{margin:6px 0; line-height:1.6} .q-dsec ul,.q-dsec ol{margin:6px 0; padding-left:20px; line-height:1.6}
+.q-dsec.life{background:color-mix(in srgb, #f5b041 10%, var(--surface))}
+.q-dsec.work{background:color-mix(in srgb, #3498db 9%, var(--surface))}
+.q-dsec.pit{background:color-mix(in srgb, #e74c3c 7%, var(--surface))}
+.q-dsec .q-code{margin:4px 0 0; white-space:pre; overflow-x:auto; font-size:.8rem}
+.q-dq{padding:10px 14px; border-radius:14px; border:1px dashed var(--line)} .q-dq summary{cursor:pointer; font-weight:700} .q-dq p{margin:8px 0 0; line-height:1.6}
+.q-dive{grid-template-columns:minmax(0,1fr)} .q-dsec{min-width:0; overflow-wrap:anywhere} .q-dsec .q-code{max-width:100%; overflow-x:auto}
+.q-cbody,.q-studyl{min-width:0; max-width:100%}

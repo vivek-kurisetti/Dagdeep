@@ -322,7 +322,7 @@ function mapView(){
 /* ================= Zone ================= */
 function zoneView(id, tab){
   const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
-  needZone(id, () => {
+  needZone(id, () => needDeep(id, () => {
     const Z = Q.data[id]; P.last = id; P.lv[id] = Z.levels.length; save();
     document.title = `${z.title} · Dagdeep`;
     // Learning path: understand the concepts, then use them in missions, drills, real work and interviews.
@@ -351,7 +351,7 @@ function zoneView(id, tab){
       if (on && n === tot) { toast("📘 Every concept understood. Time for the missions!"); }
     });
     root().querySelectorAll(".q-lgo").forEach(b => b.onclick = () => { history.replaceState(null, "", `#zone-${id}/${b.dataset.t}`); zoneView(id, b.dataset.t); window.scrollTo(0, 0); });
-  });
+  }));
 }
 function epList(id, list, kind){
   return `<div class="q-eps">${list.map((M, i) => { const s = (P[kind][id] || {})[i] || 0, open = kind === "iv" || msOpen(id, i), href = `#${kind === "iv" ? "iv" : "mis"}-${id}-${i}`;
@@ -370,7 +370,7 @@ function conceptsPanel(id, Z){
       return `${head}<section class="q-lsec"><header><span>${li + 1}</span><div><b>${esc(L.t)}</b><small>${ls.length} concept${ls.length > 1 ? "s" : ""} · <a href="#lvl-${id}-${li}">practise in drill ${li + 1}</a></small></div></header>
       ${ls.map(([r, ri]) => { const k = `${li}.${ri}`, on = !!rd[k];
         return `<details class="q-concept ${on ? "read" : ""}"><summary><span class="q-cdot">${on ? "✓" : ""}</span><div><b>${fm(r[1])}</b><small>${esc(String(r[2]).replace(/<[^>]+>|[*«»]/g, "").slice(0, 110))}…</small></div></summary>
-          <div class="q-cbody">${learnHTML(r, true)}<button class="btn q-cread" data-k="${k}" aria-pressed="${on}">${on ? "✓ Understood" : "Mark as understood"}</button></div></details>`; }).join("")}</section>`; }).join("")}
+          <div class="q-cbody">${learnHTML(r, false, id)}<button class="btn q-cread" data-k="${k}" aria-pressed="${on}">${on ? "✓ Understood" : "Mark as understood"}</button></div></details>`; }).join("")}</section>`; }).join("")}
     <div class="q-lnext"><b>Ready to use it?</b><div>${Z.missions ? `<button class="btn big solid q-lgo" data-t="missions">🎬 Play the missions →</button>` : ""}<button class="btn big q-lgo" data-t="drills">🏋️ Drills</button><button class="btn big q-lgo" data-t="debug">💼 Real work</button></div></div>`;
 }
 function zonePanel(id, Z, tab, got){
@@ -988,13 +988,35 @@ Q.CASES = CASES;
 const csStars = (z, i) => ((P.cs || {})[z] || {})[i] || 0;
 const caseList = list => `<div class="q-cases">${list.map(c => { const s = csStars(c.z, c.i); return `<a class="q-case" href="#case-${c.z}-${c.i}" style="--h:${ZMAP[c.z].hue}">
   <span class="q-case-ic">${c.icon}</span><div><span class="q-sev s${c.sev}">SEV-${c.sev}</span><b>${esc(c.title)}</b><small>${esc(c.svc)}</small>${c.topics ? `<small class="q-case-top">📚 ${esc(c.topics)}</small>` : ""}${s ? stars(s, "sm") : ""}</div><span class="q-ep-go">${s ? "Replay" : "Take the page"}</span></a>`; }).join("")}</div>`;
-const learnHTML = (r, open) => `<div class="q-studyl"><h4>${fm(r[1])}</h4><p>${fm(r[2])}</p>${r[3] && r[3].length ? `<ol class="q-flow">${r[3].map(f => `<li>${fm(f)}</li>`).join("")}</ol>` : ""}${r[4] ? `<pre class="q-code">${esc(r[4])}</pre>` : ""}${r[5] ? `<details class="q-deep" ${open ? "open" : ""}><summary>Go deeper</summary><div class="q-deep-b">${md(r[5])}</div></details>` : ""}</div>`;
+// Deep notes live in deep/<zone>.js (lazy loaded), keyed by concept title: {d, life, work, ex, pit, q}.
+const DEEP = Q.DEEP = {}, deepWait = {};
+Q.deep = (id, map) => { DEEP[id] = Object.assign(DEEP[id] || {}, map); };
+function needDeep(id, cb){
+  if (DEEP[id] || deepWait[id] === "x") return cb();
+  if (deepWait[id]) return deepWait[id].push(cb);
+  deepWait[id] = [cb];
+  const s = document.createElement("script"); s.src = `deep/${id}.js`;
+  const done = () => { const w = deepWait[id] || []; deepWait[id] = DEEP[id] ? null : "x"; w.forEach(f => { try { f(); } catch(e){ showError(e); } }); };
+  s.onload = done; s.onerror = done; document.head.appendChild(s);
+}
+const deepHTML = (id, title) => {
+  const D = id && DEEP[id] && DEEP[id][title]; if (!D) return "";
+  const sec = (ic, h, body, cls = "") => body ? `<section class="q-dsec ${cls}"><h5>${ic} ${h}</h5>${body}</section>` : "";
+  return `<div class="q-dive">
+    ${sec("🔍", "In depth", D.d ? md(D.d) : "")}
+    ${sec("🏠", "Real-life analogy", D.life ? `<p>${fm(D.life)}</p>` : "", "life")}
+    ${sec("🏭", "On the job", D.work ? md(D.work) : "", "work")}
+    ${sec("💻", "Example", D.ex ? `<pre class="q-code">${esc(D.ex)}</pre>` : "")}
+    ${sec("⚠️", "Common mistakes", D.pit && D.pit.length ? `<ul>${D.pit.map(x => `<li>${fm(x)}</li>`).join("")}</ul>` : "", "pit")}
+    ${D.q ? `<details class="q-dq"><summary>🧠 Check yourself: ${fm(D.q[0])}</summary><p>${fm(D.q[1])}</p></details>` : ""}</div>`;
+};
+const learnHTML = (r, open, id) => `<div class="q-studyl"><h4>${fm(r[1])}</h4><p>${fm(r[2])}</p>${r[3] && r[3].length ? `<ol class="q-flow">${r[3].map(f => `<li>${fm(f)}</li>`).join("")}</ol>` : ""}${r[4] ? `<pre class="q-code">${esc(r[4])}</pre>` : ""}${deepHTML(id, r[1])}${r[5] ? `<details class="q-deep" ${open ? "open" : ""}><summary>Go deeper: internals</summary><div class="q-deep-b">${md(r[5])}</div></details>` : ""}</div>`;
 const refInfo = ref => {
   let m;
   if ((m = ref.match(/^([a-z]+):(\d+)$/))){
     const Z = Q.data[m[1]], L = Z && Z.levels[+m[2]]; if (!L) return null;
     const ls = (L.rounds || []).filter(r => r[0] === "learn");
-    return {ref, z:m[1], zone:ZMAP[m[1]].title, kind:`Drill ${+m[2] + 1}`, title:L.t, sub:ls.map(r => r[1]).join(" · "), body:ls.map(r => learnHTML(r)).join(""), href:`#learn-${m[1]}-${m[2]}`};
+    return {ref, z:m[1], zone:ZMAP[m[1]].title, kind:`Drill ${+m[2] + 1}`, title:L.t, sub:ls.map(r => r[1]).join(" · "), body:ls.map(r => learnHTML(r, false, m[1])).join(""), href:`#learn-${m[1]}-${m[2]}`};
   }
   if ((m = ref.match(/^([a-z]+)\/(\w+)$/))){
     const Z = Q.data[m[1]], C = Z && Z.cardBook && Z.cardBook[m[2]]; if (!C) return null;
@@ -1011,19 +1033,19 @@ const refZones = refs => [...new Set((refs || []).map(r => r.split(/[:/]/)[0]))]
 const casesFor = ref => ALLW().filter(c => (c.study || []).includes(ref));
 function studyView(id, li, key){
   const z = ZMAP[id]; if (!z){ location.hash = "#play"; return; }
-  needZone(id, () => {
+  needZone(id, () => needDeep(id, () => {
     const Z = Q.data[id], ref = key ? `${id}/${key}` : `${id}:${li}`, R = refInfo(ref);
     if (!R){ location.hash = "#zone-" + id; return; }
     document.title = `${R.title} · ${z.title} · Dagdeep`;
     const L = key ? null : Z.levels[li], cs = casesFor(ref);
-    const body = key ? cardHTML(Z.cardBook[key]) : (L.rounds || []).filter(r => r[0] === "learn").map(r => learnHTML(r, true)).join("");
+    const body = key ? cardHTML(Z.cardBook[key]) : (L.rounds || []).filter(r => r[0] === "learn").map(r => learnHTML(r, true, id)).join("");
     root().innerHTML = `<div class="q-wrap q-studyv" style="--h:${z.hue}; --hc:hsl(${z.hue} 70% 45%)">
       <a class="q-back" href="#zone-${id}/${key ? "cards" : "drills"}">← ${esc(z.title)}</a>
       <p class="q-eyebrow">📚 Course · ${esc(z.title)} · ${esc(R.kind)}</p><h1>${fm(R.title)}</h1>
       ${body || `<p class="muted">This drill is hands-on practice. Play it to learn by doing.</p>`}
       <div class="q-res-b">${key ? `<a class="btn big" href="#zone-${id}/cards">All ${esc(z.title)} cards</a>` : unlocked(id, li) ? `<a class="btn big solid" href="#lvl-${id}-${li}">Practise this drill ▶</a>` : `<a class="btn big" href="#zone-${id}/drills">${esc(z.title)} drills</a>`}</div>
       ${cs.length ? `<h2 class="q-sec-h">💼 Use it at work</h2><p class="muted">Work-simulator tasks that use this concept.</p>${workList(cs)}` : ""}</div>`;
-  });
+  }));
 }
 const termFmt = t => esc(t).replace(/\[(r|y|g|b|d|c)\]([\s\S]*?)\[\/\1\]/g, '<span class="t-$1">$2</span>');
 const nfmt = v => v >= 1e9 ? +(v / 1e9).toFixed(1) + "B" : v >= 1e6 ? +(v / 1e6).toFixed(1) + "M" : v >= 1e3 ? +(v / 1e3).toFixed(1) + "k" : +(+v).toFixed(2) + "";

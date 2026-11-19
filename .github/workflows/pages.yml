@@ -25,13 +25,14 @@ jobs:
           mkdir _site
           cp index.html *.js *.css manifest.webmanifest robots.txt _site/
           cp -r zones _site/zones
+          cp -r deep _site/deep
           cp -r img _site/img
           # absolute URLs for social previews (og:image needs a full URL)
           sed -i "s#__SITE_URL__#${{ steps.pages.outputs.base_url }}/#g" _site/index.html
       - name: Minify JS and CSS
         run: |
           npm i -g esbuild@0.24.2 --ignore-scripts=false >/dev/null
-          for f in _site/*.js _site/zones/*.js; do
+          for f in _site/*.js _site/zones/*.js _site/deep/*.js; do
             if [ "$(basename $f)" = "auth.js" ]; then esbuild "$f" --minify --format=esm --allow-overwrite --outfile="$f" --log-level=warning
             else esbuild "$f" --minify --allow-overwrite --outfile="$f" --log-level=warning; fi
           done
